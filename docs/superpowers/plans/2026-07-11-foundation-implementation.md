@@ -20,7 +20,7 @@
 - Durable server storage may contain bounded authored input, references, revisions, hashes, lifecycle events, typed results, checkpoints, audit, and evidence; it must not contain raw terminal output, interactive transcripts, flattened prompts, fetched source bodies, raw diffs, credentials, private profile arguments, absolute paths, or worktree contents.
 - Native and Orca trusted-host enforcement reports `ADVISORY`; `ENFORCED` fails closed until a real isolation adapter exists.
 - Interactive bytes remain local. Headless live output is bounded, redacted, ephemeral, and absent from SQLite, backups, and outboxes.
-- Operational defaults are positive and finite: invitation 48h, invitation exchange 15m, fresh verification 5m, browser idle/absolute 12h/7d, recovery 15m, permit 30s, authority session/renewal 30s/10s, mutation disconnect grace 15s, heartbeat/offline/lost 10s/30s/90s, WSS frame 64KiB, output chunk/buffer 16KiB/1MiB, reconnect backoff 30s, source refresh grace 5m, diagnostic tail 2MiB/24h.
+- Operational defaults are positive and finite: invitation 48h, invitation exchange 15m, fresh verification 5m, browser idle/absolute 12h/7d, recovery 15m, host recovery code 10m, OIDC transaction 10m, device pairing/access 10m/10m, device refresh idle/absolute 30d/90d, DPoP clock/replay 5m/10m, permit 30s, authority session/renewal 30s/10s, mutation disconnect grace 15s, heartbeat/offline/lost 10s/30s/90s, WSS frame 64KiB, output chunk/buffer 16KiB/1MiB, reconnect backoff 30s, source refresh grace 5m, diagnostic tail 2MiB/24h.
 - External/timed evidence remains honestly `IN_PROGRESS` until executed; its absence does not block implementation of subsequent phases.
 - Do not push, merge, release, mutate production integrations, or post public comments without explicit authority.
 
@@ -313,6 +313,8 @@ git commit -m "feat: implement local identity lifecycle"
 - Create: `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts`
 - Create: `src/server/adapters/http/middleware/{session,csrf}.ts`
 - Create: `src/server/commands/auth-recover.ts`
+- Modify: `src/server/db/migrations/0001_foundation.sql`
+- Modify: `src/server/db/migrations/0001_foundation.verify.ts`
 - Test: `tests/integration/identity/{providers,devices,offboarding}.test.ts`
 
 **Interfaces:**
@@ -345,17 +347,17 @@ Expected: FAIL because provider, device, and revocation modules do not exist.
 - [ ] **Step 3: Implement provider ports, CSRF, DPoP, and one offboarding transaction**
 
 ```ts
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 export interface OidcPort {
-  verify(input: Readonly<{ issuer: string; audience: string; code: string; state: string; nonce: string }>): Promise<Result<Readonly<{ issuer: string; subject: string }>>>;
+  verify(input: Readonly<{ transaction: StoredOidcTransaction; provider: StoredOidcProvider; authorizationCode: string; returnedState: string }>): Promise<Result<Readonly<{ issuer: string; subject: string }>>>;
 }
 export interface AuthProxyPort {
-  verify(input: Readonly<{ provider: "CLOUDFLARE_ACCESS" | "TAILSCALE_SERVE"; assertion: string; originTrusted: boolean }>): Promise<Result<Readonly<{ issuer: string; subject: string }>>>;
+  verify(input: Readonly<{ provider: StoredAuthProxyProvider; assertion: string; provenance: VerifiedProxyProvenance }>): Promise<Result<Readonly<{ issuer: string; subject: string }>>>;
 }
-export function verifyCsrf(sessionToken: string, headerToken: string): boolean {
-  const left = new TextEncoder().encode(sessionToken);
-  const right = new TextEncoder().encode(headerToken);
+export function verifyCsrf(sessionCsrfHash: Uint8Array, headerToken: string, request: SameOriginMutation): boolean {
+  const left = sessionCsrfHash;
+  const right = createHash("sha256").update(headerToken, "utf8").digest();
   return left.length === right.length && timingSafeEqual(left, right);
 }
 export type DeviceAccess = Readonly<{ memberId: string; deviceId: string; senderKeyThumbprint: string; expiresAt: number }>;
@@ -367,11 +369,13 @@ export function removeMemberTransaction(db: Database, command: RemoveMember, aut
   return inImmediateTransaction(db, () => {
     assertNotLastOwner(db, command.memberId);
     const revision = revokeMembershipAndCredentials(db, command);
-    enqueueAuthorityRevocation(db, command, revision);
+    persistAuthorityRevocationOutbox(db, command, revision);
     return ok({ memberId: command.memberId, authorityEpoch: revision.authorityEpoch, disposition: "REVOKED" });
   });
 }
 ```
+
+Expected issuer, audience, redirect binding, state, nonce, and proxy trust provenance are loaded or minted by server-owned configuration and request adapters; public callers never supply their own expected values or an `originTrusted` boolean. The CSRF proof is a separate session-bound secret whose bearer is never the HTTP-only application cookie, and the middleware also enforces configured origin, mutation method, and content type. Offboarding commits a durable revocation outbox intent inside SQLite and invokes `ExecutionAuthority` only after commit; no asynchronous provider or authority call runs inside `BEGIN IMMEDIATE`.
 
 - [ ] **Step 4: Verify GREEN**
 

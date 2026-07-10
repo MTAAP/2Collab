@@ -1204,6 +1204,12 @@ V1 ships finite defaults for every security-sensitive lifetime and buffer. Deplo
 | Fresh privileged verification | 5 minutes |
 | Browser idle / absolute session | 12 hours / 7 days |
 | Recovery session | 15 minutes |
+| Host recovery code | 10 minutes |
+| OIDC authorization transaction | 10 minutes |
+| CLI/device pairing code | 10 minutes |
+| Device access token | 10 minutes |
+| Device refresh idle / absolute lifetime | 30 days / 90 days |
+| DPoP proof clock window / replay retention | 5 minutes / 10 minutes |
 | Dispatch Permit lifetime | 30 seconds |
 | Authority Session lifetime / renewal cadence | 30 seconds / 10 seconds |
 | Mutation disconnect grace | 15 seconds |
