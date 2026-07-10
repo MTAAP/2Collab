@@ -26,6 +26,22 @@ function expectConstraint(db: Database, statement: string): void {
   expect(() => db.exec(statement)).toThrow();
 }
 
+function columnNames(db: Database, table: string): readonly string[] {
+  return db
+    .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+    .all()
+    .map((row) => row.name);
+}
+
+function seedOwner(db: Database): void {
+  db.exec(
+    "INSERT INTO deployments(id, singleton, team_id, revision, created_at) VALUES ('deployment_1', 1, 'team_1', 1, 0)",
+  );
+  db.exec(
+    "INSERT INTO members(id, role, status, authority_epoch, revision, created_at) VALUES ('member_1', 'OWNER', 'ACTIVE', 1, 1, 0)",
+  );
+}
+
 function databaseWithHistory(versions: readonly number[]): Database {
   const db = memoryDatabase();
   db.exec("CREATE TABLE schema_migrations(version INTEGER NOT NULL, applied_at INTEGER NOT NULL)");
@@ -129,12 +145,18 @@ describe("migrate", () => {
           "deployments",
           "encrypted_credentials",
           "idempotency_results",
+          "invitation_exchange_sessions",
           "invitations",
           "member_credentials",
           "members",
+          "passkey_credential_transports",
+          "passkey_credentials",
           "projects",
+          "recovery_code_sets",
+          "recovery_codes",
           "schema_migrations",
           "sessions",
+          "webauthn_challenges",
         ]),
       );
       expect(
@@ -227,8 +249,197 @@ describe("migrate", () => {
       migrate(db);
       expectConstraint(
         db,
-        "INSERT INTO member_credentials(id, member_id, kind, secret_hash, revision, created_at) VALUES ('credential_1', 'missing_member', 'RECOVERY', X'00', 1, 0)",
+        "INSERT INTO member_credentials(id, member_id, kind, issuer, subject, revision, created_at) VALUES ('credential_1', 'missing_member', 'OIDC', 'https://issuer.test', 'subject_1', 1, 0)",
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("stores explicit lossless passkey metadata without a generic lifecycle payload", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      db.exec(`
+        INSERT INTO passkey_credentials(
+          id, member_id, credential_id, public_key, opaque_user_id, signature_counter,
+          backup_eligible, backup_state, device_type, name, revision, created_at
+        ) VALUES (
+          'passkey_1', 'member_1', X'001122FF', X'00FFA501', X'00112233445566778899AABBCCDDEEFF', 7,
+          1, 1, 'MULTI_DEVICE', 'Laptop passkey', 1, 100
+        )
+      `);
+      db.exec(
+        "INSERT INTO passkey_credential_transports(passkey_credential_id, transport) VALUES ('passkey_1', 'INTERNAL'), ('passkey_1', 'HYBRID')",
+      );
+
+      const stored = db
+        .query<
+          { credential_id: Uint8Array; public_key: Uint8Array; opaque_user_id: Uint8Array },
+          []
+        >(
+          "SELECT credential_id, public_key, opaque_user_id FROM passkey_credentials WHERE id = 'passkey_1'",
+        )
+        .get();
+      expect(stored?.credential_id).toEqual(Uint8Array.from([0x00, 0x11, 0x22, 0xff]));
+      expect(stored?.public_key).toEqual(Uint8Array.from([0x00, 0xff, 0xa5, 0x01]));
+      expect(stored?.opaque_user_id).toHaveLength(16);
+      expect(columnNames(db, "passkey_credentials")).not.toContain("public_data");
+      expect(columnNames(db, "passkey_credentials")).not.toContain("metadata_json");
+      expect(
+        db
+          .query<{ transport: string }, []>(
+            "SELECT transport FROM passkey_credential_transports ORDER BY transport",
+          )
+          .all(),
+      ).toEqual([{ transport: "HYBRID" }, { transport: "INTERNAL" }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("rejects invalid passkey counters, backup state, lifecycle time, and transports", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      const base = `
+        INSERT INTO passkey_credentials(
+          id, member_id, credential_id, public_key, opaque_user_id, signature_counter,
+          backup_eligible, backup_state, device_type, name, revision, created_at, last_used_at
+        ) VALUES`;
+      expectConstraint(
+        db,
+        `${base} ('bad_counter', 'member_1', X'01', X'01', X'00112233445566778899AABBCCDDEEFF', -1, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 0, NULL)`,
+      );
+      expectConstraint(
+        db,
+        `${base} ('bad_backup', 'member_1', X'02', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 1, 'MULTI_DEVICE', 'Bad', 1, 0, NULL)`,
+      );
+      expectConstraint(
+        db,
+        `${base} ('bad_time', 'member_1', X'03', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 10, 9)`,
+      );
+      db.exec(
+        `${base} ('passkey_1', 'member_1', X'04', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Valid', 1, 0, NULL)`,
+      );
+      expectConstraint(
+        db,
+        "INSERT INTO passkey_credential_transports(passkey_credential_id, transport) VALUES ('passkey_1', 'NETWORK')",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("stores purpose-bound one-time WebAuthn challenges as hashes only", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      db.exec(`
+        INSERT INTO webauthn_challenges(
+          id, purpose, challenge_hash, bootstrap_binding_hash, rp_id, expected_origin,
+          revision, created_at, expires_at
+        ) VALUES (
+          'challenge_1', 'PASSKEY_REGISTRATION', X'000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F',
+          X'000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F',
+          'localhost', 'http://localhost:3000', 1, 100, 400
+        )
+      `);
+      const columns = columnNames(db, "webauthn_challenges");
+      expect(columns).toContain("challenge_hash");
+      expect(columns).not.toContain("challenge");
+      expect(columns).not.toContain("payload_json");
+      expectConstraint(
+        db,
+        "INSERT INTO webauthn_challenges(id, purpose, challenge_hash, rp_id, expected_origin, revision, created_at, expires_at) VALUES ('challenge_duplicate', 'PASSKEY_AUTHENTICATION', X'000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F', 'localhost', 'http://localhost:3000', 1, 100, 400)",
+      );
+      expectConstraint(
+        db,
+        "INSERT INTO webauthn_challenges(id, purpose, challenge_hash, rp_id, expected_origin, revision, created_at, expires_at) VALUES ('challenge_2', 'PASSKEY_REGISTRATION', X'00', 'localhost', 'http://localhost:3000', 1, 0, 10)",
+      );
+      expectConstraint(
+        db,
+        "UPDATE webauthn_challenges SET consumed_at = 200, revoked_at = 200 WHERE id = 'challenge_1'",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("supports a 15-minute invitation exchange session without an existing invitee member", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      db.exec(
+        "INSERT INTO invitations(id, token_hash, inviter_id, label, expires_at, revision, created_at) VALUES ('invite_1', X'000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F', 'member_1', 'Teammate', 200000, 1, 100)",
+      );
+      db.exec(
+        "INSERT INTO invitation_exchange_sessions(id, invitation_id, session_hash, revision, created_at, expires_at) VALUES ('exchange_1', 'invite_1', X'101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F', 1, 1000, 1900)",
+      );
+      expect(columnNames(db, "invitations")).toContain("created_at");
+      expect(columnNames(db, "invitation_exchange_sessions")).not.toContain("member_id");
+      expect(columnNames(db, "invitation_exchange_sessions")).not.toContain("session_secret");
+      expectConstraint(
+        db,
+        "INSERT INTO invitation_exchange_sessions(id, invitation_id, session_hash, revision, created_at, expires_at) VALUES ('exchange_2', 'invite_1', X'202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F', 1, 1000, 1901)",
+      );
+      expectConstraint(
+        db,
+        "UPDATE invitation_exchange_sessions SET consumed_at = 1100, revoked_at = 1100 WHERE id = 'exchange_1'",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("stores salted recovery-code state and permits rotation only after revocation", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      db.exec(
+        "INSERT INTO recovery_code_sets(id, member_id, generation, revision, created_at) VALUES ('set_1', 'member_1', 1, 1, 100)",
+      );
+      db.exec(
+        "INSERT INTO recovery_codes(id, recovery_code_set_id, code_index, salt, code_hash, revision, created_at) VALUES ('code_1', 'set_1', 0, X'000102030405060708090A0B0C0D0E0F', X'000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F', 1, 100)",
+      );
+      expectConstraint(
+        db,
+        "INSERT INTO recovery_code_sets(id, member_id, generation, revision, created_at) VALUES ('set_2', 'member_1', 2, 1, 200)",
+      );
+      db.exec("UPDATE recovery_code_sets SET revoked_at = 200, revision = 2 WHERE id = 'set_1'");
+      db.exec(
+        "INSERT INTO recovery_code_sets(id, member_id, generation, revision, created_at) VALUES ('set_2', 'member_1', 2, 1, 200)",
+      );
+      const columns = columnNames(db, "recovery_codes");
+      expect(columns).toContain("salt");
+      expect(columns).toContain("code_hash");
+      expect(columns).not.toContain("code");
+      expect(columns).not.toContain("payload_json");
+      expectConstraint(
+        db,
+        "UPDATE recovery_codes SET consumed_at = 150, revoked_at = 150 WHERE id = 'code_1'",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("uses explicit provider identity columns instead of generic credential JSON", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      db.exec(
+        "INSERT INTO member_credentials(id, member_id, kind, issuer, subject, revision, created_at) VALUES ('provider_1', 'member_1', 'OIDC', 'https://issuer.test', 'subject_1', 1, 100)",
+      );
+      const columns = columnNames(db, "member_credentials");
+      expect(columns).toEqual(expect.arrayContaining(["kind", "issuer", "subject"]));
+      expect(columns).not.toContain("secret_hash");
+      expect(columns).not.toContain("public_data");
     } finally {
       db.close();
     }

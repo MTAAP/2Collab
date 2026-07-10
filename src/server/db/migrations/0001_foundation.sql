@@ -25,12 +25,36 @@ CREATE TABLE members (
 CREATE TABLE member_credentials (
   id TEXT PRIMARY KEY,
   member_id TEXT NOT NULL REFERENCES members(id),
-  kind TEXT NOT NULL CHECK (kind IN ('PASSKEY', 'RECOVERY', 'OIDC', 'AUTH_PROXY')),
-  secret_hash BLOB,
-  public_data TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('OIDC', 'AUTH_PROXY')),
+  issuer TEXT NOT NULL CHECK (length(issuer) BETWEEN 1 AND 512),
+  subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 512),
   revision INTEGER NOT NULL CHECK (revision > 0),
   created_at INTEGER NOT NULL CHECK (created_at >= 0),
-  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= 0)
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  UNIQUE (kind, issuer, subject)
+) STRICT;
+
+CREATE TABLE passkey_credentials (
+  id TEXT PRIMARY KEY,
+  member_id TEXT NOT NULL REFERENCES members(id),
+  credential_id BLOB NOT NULL UNIQUE CHECK (length(credential_id) BETWEEN 1 AND 1024),
+  public_key BLOB NOT NULL CHECK (length(public_key) BETWEEN 1 AND 8192),
+  opaque_user_id BLOB NOT NULL CHECK (length(opaque_user_id) BETWEEN 16 AND 64),
+  signature_counter INTEGER NOT NULL CHECK (signature_counter >= 0),
+  backup_eligible INTEGER NOT NULL CHECK (backup_eligible IN (0, 1)),
+  backup_state INTEGER NOT NULL CHECK (backup_state IN (0, 1) AND backup_state <= backup_eligible),
+  device_type TEXT NOT NULL CHECK (device_type IN ('SINGLE_DEVICE', 'MULTI_DEVICE')),
+  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  last_used_at INTEGER CHECK (last_used_at IS NULL OR last_used_at >= created_at),
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+) STRICT;
+
+CREATE TABLE passkey_credential_transports (
+  passkey_credential_id TEXT NOT NULL REFERENCES passkey_credentials(id) ON DELETE CASCADE,
+  transport TEXT NOT NULL CHECK (transport IN ('BLE', 'CABLE', 'HYBRID', 'INTERNAL', 'NFC', 'SMART_CARD', 'USB')),
+  PRIMARY KEY (passkey_credential_id, transport)
 ) STRICT;
 
 CREATE TABLE sessions (
@@ -46,13 +70,81 @@ CREATE TABLE sessions (
 
 CREATE TABLE invitations (
   id TEXT PRIMARY KEY,
-  token_hash BLOB NOT NULL UNIQUE,
+  token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
   inviter_id TEXT NOT NULL REFERENCES members(id),
   label TEXT,
-  expires_at INTEGER NOT NULL CHECK (expires_at >= 0),
-  consumed_at INTEGER CHECK (consumed_at IS NULL OR consumed_at >= 0),
-  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= 0),
-  revision INTEGER NOT NULL CHECK (revision > 0)
+  expires_at INTEGER NOT NULL CHECK (expires_at > created_at),
+  consumed_at INTEGER CHECK (consumed_at IS NULL OR consumed_at BETWEEN created_at AND expires_at),
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  CHECK (consumed_at IS NULL OR revoked_at IS NULL)
+) STRICT;
+
+CREATE TABLE invitation_exchange_sessions (
+  id TEXT PRIMARY KEY,
+  invitation_id TEXT NOT NULL REFERENCES invitations(id),
+  session_hash BLOB NOT NULL UNIQUE CHECK (length(session_hash) = 32),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  expires_at INTEGER NOT NULL CHECK (expires_at = created_at + 900),
+  consumed_at INTEGER CHECK (consumed_at IS NULL OR consumed_at BETWEEN created_at AND expires_at),
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  CHECK (consumed_at IS NULL OR revoked_at IS NULL)
+) STRICT;
+
+CREATE TABLE webauthn_challenges (
+  id TEXT PRIMARY KEY,
+  purpose TEXT NOT NULL CHECK (purpose IN ('PASSKEY_REGISTRATION', 'PASSKEY_AUTHENTICATION', 'PRIVILEGED_REAUTHENTICATION')),
+  challenge_hash BLOB NOT NULL UNIQUE CHECK (length(challenge_hash) = 32),
+  member_id TEXT REFERENCES members(id),
+  invitation_exchange_session_id TEXT REFERENCES invitation_exchange_sessions(id),
+  bootstrap_binding_hash BLOB CHECK (bootstrap_binding_hash IS NULL OR length(bootstrap_binding_hash) = 32),
+  rp_id TEXT NOT NULL CHECK (length(rp_id) BETWEEN 1 AND 253),
+  expected_origin TEXT NOT NULL CHECK (length(expected_origin) BETWEEN 1 AND 2048),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  expires_at INTEGER NOT NULL CHECK (expires_at > created_at),
+  consumed_at INTEGER CHECK (consumed_at IS NULL OR consumed_at BETWEEN created_at AND expires_at),
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  CHECK (consumed_at IS NULL OR revoked_at IS NULL),
+  CHECK (
+    purpose != 'PASSKEY_REGISTRATION'
+    OR (
+      (member_id IS NOT NULL)
+      + (invitation_exchange_session_id IS NOT NULL)
+      + (bootstrap_binding_hash IS NOT NULL)
+    ) = 1
+  ),
+  CHECK (purpose != 'PRIVILEGED_REAUTHENTICATION' OR member_id IS NOT NULL)
+) STRICT;
+
+CREATE TABLE recovery_code_sets (
+  id TEXT PRIMARY KEY,
+  member_id TEXT NOT NULL REFERENCES members(id),
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  UNIQUE (member_id, generation)
+) STRICT;
+
+CREATE UNIQUE INDEX one_active_recovery_code_set_per_member
+  ON recovery_code_sets(member_id)
+  WHERE revoked_at IS NULL;
+
+CREATE TABLE recovery_codes (
+  id TEXT PRIMARY KEY,
+  recovery_code_set_id TEXT NOT NULL REFERENCES recovery_code_sets(id) ON DELETE CASCADE,
+  code_index INTEGER NOT NULL CHECK (code_index >= 0),
+  salt BLOB NOT NULL CHECK (length(salt) BETWEEN 16 AND 64),
+  code_hash BLOB NOT NULL CHECK (length(code_hash) BETWEEN 32 AND 128),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK (created_at >= 0),
+  consumed_at INTEGER CHECK (consumed_at IS NULL OR consumed_at >= created_at),
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  UNIQUE (recovery_code_set_id, code_index),
+  CHECK (consumed_at IS NULL OR revoked_at IS NULL)
 ) STRICT;
 
 CREATE TABLE projects (

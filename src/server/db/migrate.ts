@@ -9,12 +9,18 @@ const FOUNDATION_TABLES = [
   "deployments",
   "encrypted_credentials",
   "idempotency_results",
+  "invitation_exchange_sessions",
   "invitations",
   "member_credentials",
   "members",
+  "passkey_credential_transports",
+  "passkey_credentials",
   "projects",
+  "recovery_code_sets",
+  "recovery_codes",
   "schema_migrations",
   "sessions",
+  "webauthn_challenges",
 ] as const;
 
 type SchemaVersion = Readonly<{ version: number }>;
