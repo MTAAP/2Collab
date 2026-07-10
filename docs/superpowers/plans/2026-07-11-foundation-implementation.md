@@ -15,6 +15,7 @@
 - Follow `shared contracts <- domain <- server or runner modules <- adapters and composition roots`; React, Hono, provider payloads, WSS frames, shell commands, and absolute paths never enter domain interfaces.
 - Write the failing Bun test before executable behavior and confirm a behavioral RED before the smallest GREEN implementation.
 - Every write command carries an idempotency key, authenticated actor, expected revisions, and a structured `Result`; persisted enum-like values are UPPERCASE.
+- Secret-producing commands persist only a replay marker and a secret-free result projection; bootstrap, invitation, recovery, and permit cleartext must never enter generic idempotency result storage.
 - User-facing errors use stable uppercase codes, bounded safe messages, retry disposition, and safe scalar details; never echo secrets, provider errors, commands, environment values, source bodies, diffs, or paths.
 - Durable server storage may contain bounded authored input, references, revisions, hashes, lifecycle events, typed results, checkpoints, audit, and evidence; it must not contain raw terminal output, interactive transcripts, flattened prompts, fetched source bodies, raw diffs, credentials, private profile arguments, absolute paths, or worktree contents.
 - Native and Orca trusted-host enforcement reports `ADVISORY`; `ENFORCED` fails closed until a real isolation adapter exists.
@@ -224,6 +225,9 @@ git commit -m "feat: add foundation sqlite schema"
 
 **Files:**
 - Create: `src/server/modules/identity/{contract,identity-authority,passkeys,invitations,recovery}.ts`
+- Modify: `src/shared/contracts/identity.ts`
+- Modify: `src/server/db/migrations/0001_foundation.sql`
+- Modify: `src/server/db/migrations/0001_foundation.verify.ts`
 - Test: `tests/unit/identity/policies.test.ts`
 - Test: `tests/integration/identity/local-auth.test.ts`
 
@@ -269,9 +273,10 @@ export interface IdentityAuthority {
   generateRecoveryCodes(command: GenerateRecoveryCodes): Promise<Result<RecoveryCodeSet>>;
   redeemRecoveryCode(command: RedeemRecoveryCode): Promise<Result<RecoverySession>>;
   invite(command: CreateInvitation): Promise<Result<TeamInvitation>>;
+  exchangeInvitation(command: ExchangeInvitationSecret): Promise<Result<InvitationSession>>;
   inspectInvitation(query: InspectInvitation): Promise<Result<TeamInvitation>>;
   revokeInvitation(command: RevokeInvitation): Promise<Result<TeamInvitation>>;
-  accept(command: AcceptInvitation): Promise<Result<MemberSession>>;
+  accept(command: AcceptInvitationWithVerifiedIdentity): Promise<Result<MemberSession>>;
   changeRole(command: ChangeMemberRole): Promise<Result<Member>>;
   remove(command: RemoveMember): Promise<Result<MemberRemoval>>;
   linkProvider(command: LinkProviderIdentity): Promise<Result<LinkedIdentity>>;
@@ -279,6 +284,8 @@ export interface IdentityAuthority {
   createHostRecovery(command: CreateHostRecovery): Promise<Result<HostRecoveryCode>>;
 }
 ```
+
+The Task 3 implementation is limited to bootstrap, local passkeys, member recovery codes, and invitations. Provider linking, host break-glass recovery, hardened ordinary sessions, role changes, removal, and offboarding are implemented in Task 4. Pre-authentication commands use explicit bounded bootstrap, invitation-session, or recovery-session principals rather than forged Member actors. Invitation acceptance requires a 15-minute, HTTP-only, invitation-specific exchange session plus a verified local identity ceremony; possession of the raw fragment secret or an upstream identity alone is insufficient. WebAuthn challenges are purpose-bound, expiring, single-use records. Secret-producing idempotency records never contain clear bootstrap secrets, invitation tokens, or recovery codes.
 
 ```ts
 // src/server/modules/identity/recovery.ts
