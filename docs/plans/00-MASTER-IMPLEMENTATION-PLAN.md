@@ -76,17 +76,9 @@ export type Result<T> =
 
 // src/server/modules/execution-authority/contract.ts
 export interface ExecutionAuthority {
-  previewAttempt(input: PreviewAttemptInput): Promise<AttemptAuthorityPreview>;
-  decide<C extends AuthorityCommand>(command: C): Promise<AuthorityDecisionFor<C>>;
-}
-
-// src/server/modules/runs/contract.ts
-export interface RunCoordinator {
-  create(command: CreateRun): Promise<Result<AgentRun>>;
-  inspect(query: InspectRun): Promise<Result<RunView>>;
-  cancel(command: CancelRun): Promise<Result<RunView>>;
-  checkpoint(command: RecordCheckpoint): Promise<Result<DurableCheckpoint>>;
-  acceptEvent(command: AcceptAttemptEvent): Promise<Result<RunView>>;
+  preview(request: AuthorityPreviewRequest): Promise<AuthorityPreview>;
+  execute<C extends CollabCommand>(command: C): Promise<Result<CommandResultFor<C>>>;
+  query<Q extends CoordinationQuery>(query: Q): Promise<Result<QueryResultFor<Q>>>;
 }
 
 // src/server/modules/connectors/contract.ts
@@ -116,7 +108,7 @@ The full authority command types live in `src/shared/contracts/execution-authori
 
 | Phase | Migration files | Owned schema groups |
 |---|---|---|
-| Foundation | `src/server/db/migrations/0001_foundation.sql` through `0004_foundation_operations.sql` | deployment, members, credentials, sessions, projects, runners, policies, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
+| Foundation | `src/server/db/migrations/0001_foundation.sql` through `0004_foundation_operations.sql` | deployment, members, credentials, sessions, projects, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
 | GitHub | `src/server/db/migrations/0101_github.sql` through `0103_github_attention.sql` | connector installations/scopes, source projections, canonical records, source links, mutation provenance, collision summaries, inbox |
 | Outline | `src/server/db/migrations/0201_outline.sql` through `0203_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
 | Automation | `src/server/db/migrations/0301_workflows.sql` through `0303_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
@@ -140,6 +132,10 @@ For every task group in a phase plan:
 2. **GitHub coordination** starts only after Foundation security, authority, backup, and runner gates pass.
 3. **Outline collaboration** starts only after the same Foundation gate. It may execute alongside GitHub but cannot duplicate identity, credentials, exact-revision mutation, or revocation logic.
 4. **Bounded automation** starts after Foundation and GitHub exit because its canonical dogfood operates on a real pull request. Outline is not a required runtime dependency.
+
+### Implementation sequencing versus acceptance evidence
+
+Local implementation may proceed into a later phase after the earlier phase's shared interfaces, migrations, local security suites, and strict fixture contracts pass, even when a timed or disposable-provider dogfood proof is still `IN_PROGRESS` or `BLOCKED`. This code-ahead rule does not convert mocked or unexecuted behavior into `PASS`: the Acceptance Matrix status changes only when its exact observable proof is captured from running software. GitHub and Outline may therefore be implemented against strict local adapters after Foundation's local prerequisites exist, and bounded automation may be implemented after local GitHub exact-revision and check-observation contracts exist.
 
 ## Fifteen orphan risks: master disposition
 
@@ -166,13 +162,18 @@ For every task group in a phase plan:
 Run from the repository root:
 
 ```bash
-bun install --frozen-lockfile
+bun ci
 bun run format:check
 bun run lint
 bun run typecheck
-bun test tests/unit tests/integration tests/protocol
+bun run test
 bun run build
-bun run test:e2e
+bunx playwright install chromium
+bun run test:e2e:run
+bun run audit:public
+bun run manifest:verify
+docker compose config --quiet
+docker build --tag 2collab:verify .
 ```
 
 Expected: every command exits 0. Phase-specific live connector or runner drills are additional and cannot be replaced by the common suite.

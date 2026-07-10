@@ -35,15 +35,21 @@ export interface GateCoordinator {
 
 // src/shared/contracts/workflow.ts
 export type WorkflowNode =
-  | RunStepNode
-  | ParallelInspectNode
-  | JoinNode
+  | StartNode
+  | AgentRunNode
   | HumanDecisionNode
-  | ConditionNode
+  | ResultRouterNode
+  | ParallelSplitNode
+  | JoinNode
   | TerminalNode;
 export type WorkflowDefinition = Readonly<{
+  inputs: readonly WorkflowInput[];
   nodes: readonly WorkflowNode[];
   transitions: readonly WorkflowTransition[];
+  maximumRunCount: number;
+  cycleBounds: Readonly<Record<string, number>>;
+  maximumParallelBranches: number;
+  maximumConcurrency: number;
   absoluteDeadlineMs: number;
 }>;
 ```
@@ -78,7 +84,8 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 - Create `src/server/modules/workflows/{contract,definition,validation,versioning}.ts`.
 - Create `src/server/adapters/http/routes/workflows.ts`.
-- Create `src/web/features/workflow-studio/{editor,definition-adapter,validation-panel}.tsx`.
+- Create `src/web/features/workflow-studio/{editor,definition-adapter,validation-panel,structured-outline,history,yaml-io}.tsx`.
+- Create `src/server/modules/workflows/{drafts,yaml}.ts`, CLI workflow-authoring commands, and MCP schema-authoring tools.
 - Test `tests/unit/workflows/{definition,validation,layout}.test.ts`, `tests/e2e/workflow-authoring.spec.ts`.
 
 **Test-first sequence:**
@@ -87,6 +94,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 - [ ] Implement pure validation with stable path-addressed diagnostics.
 - [ ] Prove layout-only edits do not change semantic hash/version and semantic edits do.
 - [ ] Adapt React Flow nodes/edges to canonical schema at the UI seam; server rejects raw React Flow objects.
+- [ ] Test optimistic shared draft revisions, stale-draft duplicate-as-new behavior, undo/redo, YAML import/export sanitization, HTTP/CLI/MCP parity, keyboard operation, and synchronized structured outline.
 - [ ] Run unit and authoring E2E suites; expect PASS.
 
 **Failure drill:** Tamper browser payload to add executable fields, change semantic edges without expected version, and publish an invalid graph. All fail before activation.

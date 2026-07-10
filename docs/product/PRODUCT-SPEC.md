@@ -10,10 +10,10 @@ tags:
 aliases:
   - Core Idea
   - New Iteration Brief
-status: draft
+status: accepted
 ---
 
-# MTAAP Core Knowledge
+# 2Collab Product Specification
 
 ## Executive Summary
 
@@ -498,7 +498,7 @@ Document review is asynchronous and must not keep the originating agent process 
 
 Agent-authored Outline changes require approval by default. A human may explicitly grant an agent write scope over named existing documents; within that scope, the agent may make repeated non-destructive content edits without per-change approval. Documents outside the scope continue through the asynchronous proposal queue. Creating documents, moving or archiving them, deleting them, and changing sharing or permissions remain approval-gated even when content editing is granted. A concurrent external edit invalidates the direct-write path and turns the agent's next change into a reviewable conflict instead of silently overwriting the newer source.
 
-Before every granted write, MTAAP refreshes the document and compares its current source revision with the revision the Agent Run edited. If they differ, v1 never overwrites or auto-merges the content. It stores the base, current source, and proposed change as a conflict proposal that a human can edit, apply, reject, or hand to a focused follow-up run. The originating run continues or completes independently. Automatic document merging is deferred until real conflict patterns justify the additional machinery.
+Before every granted write, MTAAP refreshes the document and compares its current source revision with the revision the Agent Run edited. If they differ, v1 never overwrites or auto-merges the content. It stores the base and current source references and revisions plus the bounded agent-authored proposed change or patch as a conflict proposal that a human can edit, apply, reject, or hand to a focused follow-up run. Fetched base and current document bodies remain in Outline and are retrieved on demand when an authorized member resolves the conflict; they are not copied into coordination tables, audit payloads, logs, backups, or runner outboxes. The originating run continues or completes independently. Automatic document merging is deferred until real conflict patterns justify the additional machinery.
 
 MTAAP serializes its own bot writes per document and records the pre-write and returned source revisions. This prevents races between MTAAP operations but cannot lock a human editing directly in Outline, so Outline's revision history remains the recovery path for the narrow race between the final revision check and the external write.
 
@@ -530,7 +530,7 @@ V1 ships exactly two installable artifacts from one repository and build system.
 
 **`collab`** is one local executable installed on each trusted developer machine. Its interactive commands, background runner daemon, OS credential-store integration, project registry, worktree manager, durable outbox, and Bundled Execution Adapters share the same installation. `collab runner` controls the local service, while `collab mcp` provides a local stdio bridge for agent clients that cannot connect directly to the server's authenticated MCP transport; the bridge contains no separate coordination logic.
 
-The repository may retain separate server, local-client, protocol, domain, connector, and adapter packages for testability and ownership, but package boundaries do not imply more operational components. The server and local executable use a versioned protocol handshake and may be upgraded independently only within an explicitly supported compatibility range.
+The repository may retain separate server, local-client, protocol, domain, connector, and adapter source modules and directories for testability and ownership, but all remain inside the one root package and build graph. Module boundaries do not imply more operational components. The server and local executable use a versioned protocol handshake and may be upgraded independently only within an explicitly supported compatibility range.
 
 V1 requires no Redis, message broker, external worker fleet, separate frontend hosting, separate MCP deployment, or server-hosted execution pool. A small team operates one server container plus one `collab` installation per trusted machine; later scale may split internal modules without changing their semantic contracts.
 
@@ -1069,7 +1069,7 @@ The repo file is not just for humans. It is also how the agent knows which proje
 
 ### Global Project Registry
 
-The CLI should also work from outside a repo. A global registry in `~/.collab/global.db` or `~/.collab/projects.json` remembers every project that has been invoked at least once. This lets a developer run commands like `collab projects` or `collab status --all` from anywhere on their machine.
+The CLI should also work from outside a repo. A SQLite global registry at `~/.collab/global.db` remembers every project that has been invoked at least once. This lets a developer run commands like `collab projects` or `collab status --all` from anywhere on their machine.
 
 From this global view, the user can:
 
@@ -1177,7 +1177,7 @@ The **Shared Coordination Server is the source of truth** for MTAAP-owned state.
 2. **Read cache**: The local runner may retain recently fetched task context and run metadata so an already-started execution can continue through a brief outage.
 3. **Durable outbox**: Structured progress, notes, and verification evidence receive idempotency keys and are queued locally if the server is unreachable. Raw prompts and process output are never placed in the outbox.
 4. **Reconnect**: The runner submits queued events in order. The server deduplicates them and revalidates any requested state transition against current authoritative state.
-5. **Live projection**: The server broadcasts committed events to web and CLI clients through SSE by default. WebSockets are added only if a real bidirectional transport requirement appears.
+5. **Live projection**: The server broadcasts committed events to browser and ordinary API clients through SSE. The runner uses the separately specified outbound WSS data plane because dispatch, acknowledgement, cancellation, and session control are already a real bidirectional transport requirement.
 
 ### Offline Safety Boundary
 
@@ -1193,6 +1193,30 @@ The server stores coordination state and connector credentials, not developer gi
 
 The documented restore drill starts in an isolated target, verifies backup integrity and schema compatibility before opening network listeners, restores with an explicitly supplied master key, invalidates server sessions and short-lived capabilities, increments connector and runner authority epochs, and requires owners to review or reauthorize external connectors before queued mutations resume. Losing the encryption key is reported as unrecoverable credential loss rather than bypassed; restoring an old backup cannot resurrect a revoked token or permit. Key rotation, backup retention and deletion, restore time, and connector reauthorization outcomes are audited. Local runner communication uses the paired runner identity, sender-constrained short-lived access tokens, and short-lived Run Capabilities over the outbound WSS channel. Connector webhooks and outbox events are idempotent so retries are safe.
 
+### Operational Bounds V1
+
+V1 ships finite defaults for every security-sensitive lifetime and buffer. Deployments may configure them only within positive validated ranges, and an Agent Run snapshots every effective bound that governs it so a later configuration change cannot widen work already in progress.
+
+| Policy | Default |
+|---|---:|
+| Team invitation expiry | 48 hours |
+| Invitation exchange session | 15 minutes |
+| Fresh privileged verification | 5 minutes |
+| Browser idle / absolute session | 12 hours / 7 days |
+| Recovery session | 15 minutes |
+| Dispatch Permit lifetime | 30 seconds |
+| Authority Session lifetime / renewal cadence | 30 seconds / 10 seconds |
+| Mutation disconnect grace | 15 seconds |
+| Runner heartbeat / offline / lost grace | 10 / 30 / 90 seconds |
+| Structured WSS frame | 64 KiB |
+| Live output chunk / in-memory reconnect buffer | 16 KiB / 1 MiB per attempt |
+| Runner reconnect maximum backoff | 30 seconds |
+| Source-unavailable automatic refresh grace | 5 minutes |
+| Encrypted local diagnostic tail | 2 MiB and 24 hours |
+| Resolved Inbox retention | 90 days |
+
+No infinity value, zero sentinel, disabled deadline, unbounded retry, or unbounded output mode is valid. A deployment may lower a bound immediately for future work. Raising a ceiling affects only newly created sessions, attempts, runs, or workflow executions.
+
 ## Dogfood Delivery Slices and Exit Criteria
 
 The specification describes one v1, but implementation should reach it through four vertically usable slices. A later slice may begin behind a feature flag, but the team does not call an earlier slice complete from schema or static UI alone.
@@ -1203,6 +1227,7 @@ The specification describes one v1, but implementation should reach it through f
 
 2. **GitHub coordination: work reaches delivery**
    - Add the GitHub App, issue and pull-request projections and mutations, Milestones, selected GitHub Projects, Assignment versus Delegation, canonical Coordination Records, mutation guards, diff evidence, GitHub checks, Inbox, and Command Center.
+   - Pull-request review and merge remain GitHub operations in v1. Collab links to them, reconciles their authoritative state, and records the resulting evidence; it does not gain an unlisted review-submission or merge mutation.
    - Exit when a real connected issue can be triaged, assigned, delegated, implemented, published with a closing reference, reviewed, merged, and observed closing from GitHub without Collab fabricating source state; missed webhook reconciliation, stale replace-style edits, late source linking, and connector scope narrowing are exercised successfully.
 
 3. **Outline collaboration: knowledge is genuinely bidirectional**

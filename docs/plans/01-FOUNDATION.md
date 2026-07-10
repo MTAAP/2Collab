@@ -16,17 +16,27 @@
 
 ## Stable phase interfaces
 
-Implement the master-plan `Result`, `ExecutionAuthority`, and `RunCoordinator` interfaces plus:
+Implement the master-plan `Result` and three-entry `ExecutionAuthority` interface plus:
 
 ```ts
 // src/server/modules/identity/contract.ts
 export interface IdentityAuthority {
   bootstrap(command: BootstrapDeployment): Promise<Result<MemberSession>>;
+  beginPasskeyRegistration(command: BeginPasskeyRegistration): Promise<Result<PasskeyChallenge>>;
+  finishPasskeyRegistration(command: FinishPasskeyRegistration): Promise<Result<PasskeyCredential>>;
+  authenticate(command: AuthenticatePasskey): Promise<Result<MemberSession>>;
+  revokePasskey(command: RevokePasskey): Promise<Result<PasskeyRevocation>>;
+  generateRecoveryCodes(command: GenerateRecoveryCodes): Promise<Result<RecoveryCodeSet>>;
+  redeemRecoveryCode(command: RedeemRecoveryCode): Promise<Result<RecoverySession>>;
   invite(command: CreateInvitation): Promise<Result<TeamInvitation>>;
+  inspectInvitation(query: InspectInvitation): Promise<Result<TeamInvitation>>;
+  revokeInvitation(command: RevokeInvitation): Promise<Result<TeamInvitation>>;
   accept(command: AcceptInvitation): Promise<Result<MemberSession>>;
   changeRole(command: ChangeMemberRole): Promise<Result<Member>>;
   remove(command: RemoveMember): Promise<Result<MemberRemoval>>;
-  authenticate(command: AuthenticatePasskey): Promise<Result<MemberSession>>;
+  linkProvider(command: LinkProviderIdentity): Promise<Result<LinkedIdentity>>;
+  revokeSession(command: RevokeSession): Promise<Result<SessionRevocation>>;
+  createHostRecovery(command: CreateHostRecovery): Promise<Result<HostRecoveryCode>>;
 }
 
 // src/server/modules/projects/contract.ts
@@ -64,7 +74,10 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 - Create `src/server/db/connection.ts`, `transaction.ts`, `migrate.ts`.
 - Create `src/server/db/migrations/0001_foundation.sql` and `0001_foundation.verify.ts`.
 - Create `src/server/modules/identity/{contract,identity-authority,passkeys,invitations,recovery,revocation}.ts`.
+- Create `src/server/modules/identity/{sessions,csrf,devices,oidc,auth-proxy,provider-links}.ts`.
+- Create `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts` as shared Foundation primitives.
 - Create `src/server/adapters/http/routes/{bootstrap,auth,members}.ts`.
+- Create `src/server/adapters/http/middleware/{session,csrf}.ts` and `src/server/commands/auth-recover.ts`.
 - Create `src/web/features/setup/` and `src/web/features/members/`.
 - Test `tests/unit/identity/*.test.ts`, `tests/integration/identity/*.test.ts`, `tests/e2e/setup-and-members.spec.ts`.
 
@@ -75,6 +88,8 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 - [ ] Implement schema and pure policies, then run the unit suite to green.
 - [ ] Write integration tests proving bootstrap/accept/change/remove are single SQLite transactions and removal emits one durable `MEMBER_REMOVED` authority event.
 - [ ] Run `bun test tests/integration/identity`; expected initial failure is missing persistence behavior, then PASS after implementation.
+- [ ] Add strict OIDC and authenticated-proxy adapters and tests for issuer, audience, signature, state, nonce, trusted origin path, identity linking, and invitation-only membership.
+- [ ] Add device pairing, rotating refresh credentials, sender-constrained access proof, CSRF, and container-only host recovery tests.
 - [ ] Add browser journey for two owners, passkey/recovery, and removal; run `bun run test:e2e -- setup-and-members.spec.ts` and expect PASS.
 
 **Security drill:** Replay invitation and recovery secrets; use expired tokens; race two last-owner demotions; remove an actor with active sessions and an unused attempt permit. Every credential and permit is rejected after the committed membership revision.
@@ -136,7 +151,8 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 
 - Create `src/server/db/migrations/0003_runs_authority.sql` and verifier.
 - Create `src/shared/contracts/{runs,execution-authority,presets,context,telemetry}.ts`.
-- Create `src/server/modules/runs/{contract,run-coordinator,lifecycle,checkpoints,evidence}.ts`.
+- Create `src/server/modules/runs/{lifecycle,checkpoints,evidence,results}.ts` as private `ExecutionAuthority` implementation modules.
+- Create `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts` with minimal source-free records and mutation-guard ownership.
 - Create `src/server/modules/execution-authority/{contract,execution-authority,policy,fencing,revocation}.ts`.
 - Create `src/server/modules/presets/{personal-run-presets,configuration-resolver}.ts`.
 - Create `src/server/modules/context/context-recipes.ts` and `src/server/modules/telemetry/usage.ts`.
@@ -163,7 +179,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 **Files:**
 
 - Create `src/server/adapters/http/routes/{projects,runs,runners,presets}.ts`.
-- Create `src/server/adapters/mcp/{server,tools}.ts`.
+- Create `src/server/adapters/mcp/{server,tools}.ts` and `src/cli/commands/mcp.ts` for the local stdio bridge.
 - Create `src/server/adapters/http/sse.ts`.
 - Create `src/cli/commands/{start,cancel,resume,runner,preset}.ts`.
 - Create `src/web/features/{runs,runners,presets}/`.
@@ -173,7 +189,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 
 - [ ] Create a table-driven contract fixture for create/inspect/cancel/resume and map it through HTTP, CLI, and MCP adapters.
 - [ ] Assert identical domain values and error codes; adapters may differ only in presentation and transport metadata.
-- [ ] Implement thin adapters calling `RunCoordinator`, `ExecutionAuthority`, `RunnerRegistry`, and preset modules.
+- [ ] Implement thin adapters calling `ExecutionAuthority`, `RunnerRegistry`, and preset modules.
 - [ ] Run `bun test tests/protocol/surface-parity.test.ts`; expect PASS.
 - [ ] Run browser and CLI source-free run journeys; expect the same run/attempt identities and committed SSE projection.
 
@@ -205,7 +221,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 **Files:**
 
 - Create `src/server/operations/{backup,restore,key-rotation}.ts`.
-- Create `src/cli/commands/server-operations.ts`.
+- Create `src/server/commands/{backup,restore,key-rotation,auth-recover}.ts` and a `collab-server` command dispatcher included in the server artifact.
 - Create `tests/drills/backup-restore.test.ts`, `tests/drills/offboarding-active-run.test.ts`.
 - Create evidence template `docs/evidence/foundation/EVIDENCE-TEMPLATE.md` and dogfood ledger `docs/evidence/foundation/DOGFOOD-LEDGER.md` during implementation.
 
@@ -215,6 +231,10 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 - [ ] Test offboarding dispatcher and runner owner during active work, including unreachable runner and preserved local-work truth.
 - [ ] Run the full verification suite and both drills.
 - [ ] Operate the exact build for seven consecutive days; record every run, incident, migration, restart, restore, and whether direct database editing occurred.
+
+## Composition-root and packaging ownership
+
+Each task group updates its feature modules only. One integration owner wires `src/server/app.ts`, `src/server/index.ts`, `src/cli/command.ts`, `src/cli/index.ts`, `src/web/app.tsx`, `src/shared/environment.ts`, `package.json`, `Dockerfile`, and `compose.yaml` after the corresponding interface tests pass. Compose adds public base URL, WebAuthn RP ID, deployment master-key input, backup destination, and one-time bootstrap-secret handling. `bun run test` includes unit, integration, protocol, runner, and drill suites so the package gate cannot omit a class of tests.
 
 ## Verification commands
 
