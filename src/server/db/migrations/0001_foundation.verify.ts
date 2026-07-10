@@ -38,24 +38,23 @@ export function verifyFoundationSchema(db: Database): void {
   );
   expect(
     db
-      .query<{ name: string }, []>("PRAGMA table_info(passkey_credentials)")
+      .query<{ name: string; type: string }, []>("PRAGMA table_info(passkey_credentials)")
       .all()
-      .map((row) => row.name),
+      .map((row) => ({ name: row.name, type: row.type })),
   ).toEqual(
     expect.arrayContaining([
-      "credential_id",
-      "public_key",
-      "opaque_user_id",
-      "signature_counter",
-      "backup_eligible",
-      "backup_state",
-      "device_type",
-      "name",
-      "created_at",
-      "last_used_at",
-      "revoked_at",
+      { name: "credential_id", type: "TEXT" },
+      { name: "public_key", type: "BLOB" },
+      { name: "opaque_user_id", type: "BLOB" },
     ]),
   );
+  expect(
+    db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'one_active_recovery_code_set_per_member'",
+      )
+      .get(),
+  ).toEqual({ name: "one_active_recovery_code_set_per_member" });
   expect(db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()).toEqual({
     foreign_keys: 1,
   });

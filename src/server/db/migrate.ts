@@ -22,6 +22,7 @@ const FOUNDATION_TABLES = [
   "sessions",
   "webauthn_challenges",
 ] as const;
+const FOUNDATION_INDEXES = ["one_active_recovery_code_set_per_member"] as const;
 
 type SchemaVersion = Readonly<{ version: number }>;
 
@@ -47,7 +48,16 @@ function validateClaimedSchema(database: Database, version: number): void {
       .all()
       .map((row) => row.name),
   );
-  if (FOUNDATION_TABLES.some((table) => !tables.has(table))) {
+  const indexes = new Set(
+    database
+      .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all()
+      .map((row) => row.name),
+  );
+  if (
+    FOUNDATION_TABLES.some((table) => !tables.has(table)) ||
+    FOUNDATION_INDEXES.some((index) => !indexes.has(index))
+  ) {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
 }

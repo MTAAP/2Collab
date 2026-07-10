@@ -37,7 +37,9 @@ CREATE TABLE member_credentials (
 CREATE TABLE passkey_credentials (
   id TEXT PRIMARY KEY,
   member_id TEXT NOT NULL REFERENCES members(id),
-  credential_id BLOB NOT NULL UNIQUE CHECK (length(credential_id) BETWEEN 1 AND 1024),
+  credential_id TEXT NOT NULL UNIQUE
+    CHECK (length(credential_id) BETWEEN 1 AND 1366)
+    CHECK (credential_id NOT GLOB '*[^A-Za-z0-9_-]*'),
   public_key BLOB NOT NULL CHECK (length(public_key) BETWEEN 1 AND 8192),
   opaque_user_id BLOB NOT NULL CHECK (length(opaque_user_id) BETWEEN 16 AND 64),
   signature_counter INTEGER NOT NULL CHECK (signature_counter >= 0),
@@ -83,7 +85,7 @@ CREATE TABLE invitations (
 
 CREATE TABLE invitation_exchange_sessions (
   id TEXT PRIMARY KEY,
-  invitation_id TEXT NOT NULL REFERENCES invitations(id),
+  invitation_id TEXT NOT NULL UNIQUE REFERENCES invitations(id),
   session_hash BLOB NOT NULL UNIQUE CHECK (length(session_hash) = 32),
   revision INTEGER NOT NULL CHECK (revision > 0),
   created_at INTEGER NOT NULL CHECK (created_at >= 0),
@@ -109,14 +111,26 @@ CREATE TABLE webauthn_challenges (
   revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
   CHECK (consumed_at IS NULL OR revoked_at IS NULL),
   CHECK (
-    purpose != 'PASSKEY_REGISTRATION'
+    (
+      purpose = 'PASSKEY_REGISTRATION'
+      AND (
+        (member_id IS NOT NULL)
+        + (invitation_exchange_session_id IS NOT NULL)
+        + (bootstrap_binding_hash IS NOT NULL)
+      ) = 1
+    )
     OR (
-      (member_id IS NOT NULL)
-      + (invitation_exchange_session_id IS NOT NULL)
-      + (bootstrap_binding_hash IS NOT NULL)
-    ) = 1
-  ),
-  CHECK (purpose != 'PRIVILEGED_REAUTHENTICATION' OR member_id IS NOT NULL)
+      purpose = 'PASSKEY_AUTHENTICATION'
+      AND invitation_exchange_session_id IS NULL
+      AND bootstrap_binding_hash IS NULL
+    )
+    OR (
+      purpose = 'PRIVILEGED_REAUTHENTICATION'
+      AND member_id IS NOT NULL
+      AND invitation_exchange_session_id IS NULL
+      AND bootstrap_binding_hash IS NULL
+    )
+  )
 ) STRICT;
 
 CREATE TABLE recovery_code_sets (

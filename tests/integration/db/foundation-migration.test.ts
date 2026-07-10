@@ -33,6 +33,40 @@ function columnNames(db: Database, table: string): readonly string[] {
     .map((row) => row.name);
 }
 
+function fixedHash(byte: number): string {
+  return `X'${byte.toString(16).padStart(2, "0").repeat(32)}'`;
+}
+
+function insertChallenge(
+  db: Database,
+  values: Readonly<{
+    id: string;
+    purpose: string;
+    hashByte: number;
+    memberId?: string;
+    invitationExchangeSessionId?: string;
+    bootstrapHashByte?: number;
+  }>,
+): void {
+  const memberId = values.memberId === undefined ? "NULL" : `'${values.memberId}'`;
+  const invitationExchangeSessionId =
+    values.invitationExchangeSessionId === undefined
+      ? "NULL"
+      : `'${values.invitationExchangeSessionId}'`;
+  const bootstrapBindingHash =
+    values.bootstrapHashByte === undefined ? "NULL" : fixedHash(values.bootstrapHashByte);
+  db.exec(`
+    INSERT INTO webauthn_challenges(
+      id, purpose, challenge_hash, member_id, invitation_exchange_session_id,
+      bootstrap_binding_hash, rp_id, expected_origin, revision, created_at, expires_at
+    ) VALUES (
+      '${values.id}', '${values.purpose}', ${fixedHash(values.hashByte)}, ${memberId},
+      ${invitationExchangeSessionId}, ${bootstrapBindingHash}, 'localhost',
+      'http://localhost:3000', 1, 100, 400
+    )
+  `);
+}
+
 function seedOwner(db: Database): void {
   db.exec(
     "INSERT INTO deployments(id, singleton, team_id, revision, created_at) VALUES ('deployment_1', 1, 'team_1', 1, 0)",
@@ -266,7 +300,7 @@ describe("migrate", () => {
           id, member_id, credential_id, public_key, opaque_user_id, signature_counter,
           backup_eligible, backup_state, device_type, name, revision, created_at
         ) VALUES (
-          'passkey_1', 'member_1', X'001122FF', X'00FFA501', X'00112233445566778899AABBCCDDEEFF', 7,
+          'passkey_1', 'member_1', 'ABEi_w', X'00FFA501', X'00112233445566778899AABBCCDDEEFF', 7,
           1, 1, 'MULTI_DEVICE', 'Laptop passkey', 1, 100
         )
       `);
@@ -275,14 +309,11 @@ describe("migrate", () => {
       );
 
       const stored = db
-        .query<
-          { credential_id: Uint8Array; public_key: Uint8Array; opaque_user_id: Uint8Array },
-          []
-        >(
+        .query<{ credential_id: string; public_key: Uint8Array; opaque_user_id: Uint8Array }, []>(
           "SELECT credential_id, public_key, opaque_user_id FROM passkey_credentials WHERE id = 'passkey_1'",
         )
         .get();
-      expect(stored?.credential_id).toEqual(Uint8Array.from([0x00, 0x11, 0x22, 0xff]));
+      expect(stored?.credential_id).toBe("ABEi_w");
       expect(stored?.public_key).toEqual(Uint8Array.from([0x00, 0xff, 0xa5, 0x01]));
       expect(stored?.opaque_user_id).toHaveLength(16);
       expect(columnNames(db, "passkey_credentials")).not.toContain("public_data");
@@ -311,23 +342,67 @@ describe("migrate", () => {
         ) VALUES`;
       expectConstraint(
         db,
-        `${base} ('bad_counter', 'member_1', X'01', X'01', X'00112233445566778899AABBCCDDEEFF', -1, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 0, NULL)`,
+        `${base} ('bad_counter', 'member_1', 'AQ', X'01', X'00112233445566778899AABBCCDDEEFF', -1, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 0, NULL)`,
       );
       expectConstraint(
         db,
-        `${base} ('bad_backup', 'member_1', X'02', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 1, 'MULTI_DEVICE', 'Bad', 1, 0, NULL)`,
+        `${base} ('bad_backup', 'member_1', 'Ag', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 1, 'MULTI_DEVICE', 'Bad', 1, 0, NULL)`,
       );
       expectConstraint(
         db,
-        `${base} ('bad_time', 'member_1', X'03', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 10, 9)`,
+        `${base} ('bad_time', 'member_1', 'Aw', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 10, 9)`,
       );
       db.exec(
-        `${base} ('passkey_1', 'member_1', X'04', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Valid', 1, 0, NULL)`,
+        `${base} ('passkey_1', 'member_1', 'BA', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Valid', 1, 0, NULL)`,
       );
       expectConstraint(
         db,
         "INSERT INTO passkey_credential_transports(passkey_credential_id, transport) VALUES ('passkey_1', 'NETWORK')",
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("stores bounded base64url passkey credential IDs while keeping opaque bytes lossless", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      const insert = (id: string, credentialId: string): void => {
+        db.exec(`
+          INSERT INTO passkey_credentials(
+            id, member_id, credential_id, public_key, opaque_user_id, signature_counter,
+            backup_eligible, backup_state, device_type, name, revision, created_at
+          ) VALUES (
+            '${id}', 'member_1', '${credentialId}', X'00FFA501',
+            X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Passkey', 1, 0
+          )
+        `);
+      };
+
+      insert("passkey_valid", "ABEi_w");
+      expectConstraint(
+        db,
+        "INSERT INTO passkey_credentials(id, member_id, credential_id, public_key, opaque_user_id, signature_counter, backup_eligible, backup_state, device_type, name, revision, created_at) VALUES ('passkey_padding', 'member_1', 'abc=', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 0)",
+      );
+      expectConstraint(
+        db,
+        "INSERT INTO passkey_credentials(id, member_id, credential_id, public_key, opaque_user_id, signature_counter, backup_eligible, backup_state, device_type, name, revision, created_at) VALUES ('passkey_alphabet', 'member_1', 'abc+', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 0)",
+      );
+      expectConstraint(
+        db,
+        "INSERT INTO passkey_credentials(id, member_id, credential_id, public_key, opaque_user_id, signature_counter, backup_eligible, backup_state, device_type, name, revision, created_at) VALUES ('passkey_empty', 'member_1', '', X'01', X'00112233445566778899AABBCCDDEEFF', 0, 0, 0, 'SINGLE_DEVICE', 'Bad', 1, 0)",
+      );
+
+      const stored = db
+        .query<{ credential_id: string; public_key: Uint8Array; opaque_user_id: Uint8Array }, []>(
+          "SELECT credential_id, public_key, opaque_user_id FROM passkey_credentials WHERE id = 'passkey_valid'",
+        )
+        .get();
+      expect(stored?.credential_id).toBe("ABEi_w");
+      expect(stored?.public_key).toEqual(Uint8Array.from([0x00, 0xff, 0xa5, 0x01]));
+      expect(stored?.opaque_user_id).toHaveLength(16);
     } finally {
       db.close();
     }
@@ -368,6 +443,116 @@ describe("migrate", () => {
     }
   });
 
+  test("fully discriminates valid WebAuthn challenge bindings by purpose", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      seedOwner(db);
+      db.exec(
+        "INSERT INTO invitations(id, token_hash, inviter_id, label, expires_at, revision, created_at) VALUES ('invite_1', X'000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F', 'member_1', 'Teammate', 200000, 1, 100)",
+      );
+      db.exec(
+        "INSERT INTO invitation_exchange_sessions(id, invitation_id, session_hash, revision, created_at, expires_at) VALUES ('exchange_1', 'invite_1', X'101112131415161718191A1B1C1D1E1F202122232425262728292A2B2C2D2E2F', 1, 1000, 1900)",
+      );
+
+      insertChallenge(db, {
+        id: "registration_member",
+        purpose: "PASSKEY_REGISTRATION",
+        hashByte: 1,
+        memberId: "member_1",
+      });
+      insertChallenge(db, {
+        id: "registration_invitation",
+        purpose: "PASSKEY_REGISTRATION",
+        hashByte: 2,
+        invitationExchangeSessionId: "exchange_1",
+      });
+      insertChallenge(db, {
+        id: "registration_bootstrap",
+        purpose: "PASSKEY_REGISTRATION",
+        hashByte: 3,
+        bootstrapHashByte: 103,
+      });
+      insertChallenge(db, {
+        id: "authentication_discoverable",
+        purpose: "PASSKEY_AUTHENTICATION",
+        hashByte: 4,
+      });
+      insertChallenge(db, {
+        id: "authentication_member",
+        purpose: "PASSKEY_AUTHENTICATION",
+        hashByte: 5,
+        memberId: "member_1",
+      });
+      insertChallenge(db, {
+        id: "privileged_member",
+        purpose: "PRIVILEGED_REAUTHENTICATION",
+        hashByte: 6,
+        memberId: "member_1",
+      });
+
+      expect(() =>
+        insertChallenge(db, {
+          id: "registration_unbound",
+          purpose: "PASSKEY_REGISTRATION",
+          hashByte: 11,
+        }),
+      ).toThrow();
+      expect(() =>
+        insertChallenge(db, {
+          id: "registration_multiple",
+          purpose: "PASSKEY_REGISTRATION",
+          hashByte: 12,
+          memberId: "member_1",
+          invitationExchangeSessionId: "exchange_1",
+        }),
+      ).toThrow();
+      expect(() =>
+        insertChallenge(db, {
+          id: "authentication_invitation",
+          purpose: "PASSKEY_AUTHENTICATION",
+          hashByte: 13,
+          invitationExchangeSessionId: "exchange_1",
+        }),
+      ).toThrow();
+      expect(() =>
+        insertChallenge(db, {
+          id: "authentication_bootstrap",
+          purpose: "PASSKEY_AUTHENTICATION",
+          hashByte: 14,
+          bootstrapHashByte: 114,
+        }),
+      ).toThrow();
+      expect(() =>
+        insertChallenge(db, {
+          id: "privileged_unbound",
+          purpose: "PRIVILEGED_REAUTHENTICATION",
+          hashByte: 15,
+        }),
+      ).toThrow();
+      expect(() =>
+        insertChallenge(db, {
+          id: "privileged_invitation",
+          purpose: "PRIVILEGED_REAUTHENTICATION",
+          hashByte: 16,
+          memberId: "member_1",
+          invitationExchangeSessionId: "exchange_1",
+        }),
+      ).toThrow();
+      expect(() =>
+        insertChallenge(db, {
+          id: "privileged_bootstrap",
+          purpose: "PRIVILEGED_REAUTHENTICATION",
+          hashByte: 17,
+          memberId: "member_1",
+          bootstrapHashByte: 117,
+        }),
+      ).toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
   test("supports a 15-minute invitation exchange session without an existing invitee member", () => {
     const db = memoryDatabase();
     try {
@@ -385,6 +570,10 @@ describe("migrate", () => {
       expectConstraint(
         db,
         "INSERT INTO invitation_exchange_sessions(id, invitation_id, session_hash, revision, created_at, expires_at) VALUES ('exchange_2', 'invite_1', X'202122232425262728292A2B2C2D2E2F303132333435363738393A3B3C3D3E3F', 1, 1000, 1901)",
+      );
+      expectConstraint(
+        db,
+        "INSERT INTO invitation_exchange_sessions(id, invitation_id, session_hash, revision, created_at, expires_at) VALUES ('exchange_duplicate', 'invite_1', X'303132333435363738393A3B3C3D3E3F404142434445464748494A4B4C4D4E4F', 1, 2000, 2900)",
       );
       expectConstraint(
         db,
@@ -474,6 +663,17 @@ describe("migrate", () => {
     try {
       migrate(db);
       db.exec("DROP TABLE audit_events");
+      expect(() => migrate(db)).toThrow("SCHEMA_INTEGRITY_INVALID");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("rejects a claimed version 1 schema missing a security index", () => {
+    const db = memoryDatabase();
+    try {
+      migrate(db);
+      db.exec("DROP INDEX one_active_recovery_code_set_per_member");
       expect(() => migrate(db)).toThrow("SCHEMA_INTEGRITY_INVALID");
     } finally {
       db.close();
