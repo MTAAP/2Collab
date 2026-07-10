@@ -30,16 +30,29 @@ import type {
   AttemptView,
   AuthoritySessionView,
   CoordinationRecordView,
-  DispatchPermit,
   DurableCheckpoint,
+  EvidenceInput,
   EvidenceRecord,
   ProjectionView,
+  QueuedDispatchMetadata,
   RunResultKind,
   RunView,
+  TerminationRequestMetadata,
 } from "./runs.ts";
-import { AttemptEventSchema } from "./runs.ts";
+import {
+  AttemptEventSchema,
+  AttemptViewSchema,
+  AuthoritySessionViewSchema,
+  CoordinationRecordViewSchema,
+  DurableCheckpointSchema,
+  EvidenceInputSchema,
+  EvidenceRecordSchema,
+  QueuedDispatchMetadataSchema,
+  RunViewSchema,
+  TerminationRequestMetadataSchema,
+} from "./runs.ts";
 import type { ExecutionSelection, RepositoryRequest, RunnerPolicyReplacement } from "./runners.ts";
-import { ExecutionSelectionSchema, RepositoryRequestSchema } from "./runners.ts";
+import { ExecutionSelectionSchema, GitRefSchema, RepositoryRequestSchema } from "./runners.ts";
 
 export type CommandBase = Readonly<{
   idempotencyKey: IdempotencyKey;
@@ -86,6 +99,37 @@ export type CancelRun = CommandBase &
     reason: "MEMBER_REQUEST" | "DEADLINE" | "WORKFLOW" | "REVOCATION";
   }>;
 
+export type ReconciliationObservation =
+  | Readonly<{
+      kind: "RUNNER_ATTEMPT";
+      attemptId: ExecutionAttemptId;
+      observedState: "RUNNING" | "EXITED" | "NOT_FOUND" | "ORPHAN_TERMINATED";
+      observedAt: number;
+    }>
+  | Readonly<{
+      kind: "SOURCE_REVISION";
+      connectorId: ConnectorId;
+      sourceKind: SourceRef["kind"];
+      sourceItemId: string;
+      availability: "AVAILABLE" | "MISSING" | "FORBIDDEN";
+      observedRevision?: string;
+      observedAt: number;
+    }>
+  | Readonly<{
+      kind: "OUTBOX_DELIVERY";
+      deliveryId: string;
+      disposition: "DELIVERED" | "RETRYABLE_FAILURE" | "PERMANENT_FAILURE";
+      observedAt: number;
+    }>;
+
+export type ReconcileObservation = CommandBase &
+  Readonly<{
+    kind: "RECONCILE_OBSERVATION";
+    runId: AgentRunId;
+    expectedRunRevision: number;
+    observation: ReconciliationObservation;
+  }>;
+
 export type AcceptAttemptEvent = CommandBase &
   Readonly<{
     kind: "ACCEPT_ATTEMPT_EVENT";
@@ -114,8 +158,7 @@ export type RecordEvidence = CommandBase &
     runId: AgentRunId;
     expectedRunRevision: number;
     attemptId?: ExecutionAttemptId;
-    evidenceKind: EvidenceRecord["kind"];
-    summary: string;
+    evidence: EvidenceInput;
   }>;
 
 export type RecordRunResult = CommandBase &
@@ -164,18 +207,31 @@ export type RenewAuthoritySession = CommandBase &
   }>;
 
 export type GitHubMutationKind =
-  | "CREATE_ISSUE"
-  | "EDIT_ISSUE"
-  | "COMMENT"
-  | "SET_LABELS"
-  | "SET_ASSIGNEES"
-  | "SET_MILESTONE"
-  | "SET_STATE";
+  | "ISSUE_CREATE"
+  | "ISSUE_EDIT"
+  | "ISSUE_COMMENT"
+  | "ISSUE_ADD_LABELS"
+  | "ISSUE_REMOVE_LABELS"
+  | "ISSUE_ADD_ASSIGNEES"
+  | "ISSUE_REMOVE_ASSIGNEES"
+  | "ISSUE_SET_MILESTONE"
+  | "ISSUE_CLEAR_MILESTONE"
+  | "ISSUE_CLOSE"
+  | "ISSUE_REOPEN"
+  | "MILESTONE_CREATE"
+  | "MILESTONE_EDIT"
+  | "MILESTONE_CLOSE"
+  | "MILESTONE_REOPEN"
+  | "PROJECT_ADD_ITEM"
+  | "PROJECT_REMOVE_ITEM"
+  | "PROJECT_UPDATE_FIELD"
+  | "PROJECT_MOVE_ITEM";
 export type OutlineMutationKind =
-  | "CREATE_DOCUMENT"
-  | "EDIT_DOCUMENT"
-  | "ADD_COMMENT"
-  | "ARCHIVE_DOCUMENT";
+  | "DOCUMENT_CREATE"
+  | "DOCUMENT_EDIT"
+  | "PROPOSAL_APPLY"
+  | "WORKING_DOCUMENT_PROMOTE"
+  | "WORKING_DOCUMENT_ARCHIVE";
 
 export type SensitiveOperation =
   | Readonly<{ kind: "MUTATE_REPOSITORY"; expectedHead: CommitSha }>
@@ -186,6 +242,7 @@ export type SensitiveOperation =
       connectorEpoch: number;
       resourceId: string;
       expectedRevision: string;
+      actionDigest: Sha256;
       mutation: GitHubMutationKind;
     }>
   | Readonly<{
@@ -194,6 +251,7 @@ export type SensitiveOperation =
       connectorEpoch: number;
       documentId: string;
       expectedRevision: string;
+      actionDigest: Sha256;
       mutation: OutlineMutationKind;
     }>
   | Readonly<{
@@ -248,6 +306,7 @@ export type CollabCommand =
   | LaunchRun
   | AuthorizeAttempt
   | CancelRun
+  | ReconcileObservation
   | AcceptAttemptEvent
   | RecordCheckpoint
   | RecordEvidence
@@ -302,15 +361,20 @@ export type CommandResult =
       record: CoordinationRecordView;
       run: RunView;
       attempt: AttemptView;
-      permit: DispatchPermit;
+      dispatch: QueuedDispatchMetadata;
     }>
   | Readonly<{
       kind: "AUTHORIZE_ATTEMPT";
       run: RunView;
       attempt: AttemptView;
-      permit: DispatchPermit;
+      dispatch: QueuedDispatchMetadata;
     }>
-  | Readonly<{ kind: "CANCEL_RUN"; run: RunView }>
+  | Readonly<{
+      kind: "CANCEL_RUN";
+      run: RunView;
+      termination: TerminationRequestMetadata;
+    }>
+  | Readonly<{ kind: "RECONCILE_OBSERVATION"; reconciled: true }>
   | Readonly<{ kind: "ACCEPT_ATTEMPT_EVENT"; run: RunView; attempt: AttemptView }>
   | Readonly<{ kind: "RECORD_CHECKPOINT"; checkpoint: DurableCheckpoint; run: RunView }>
   | Readonly<{ kind: "RECORD_EVIDENCE"; evidence: EvidenceRecord }>
@@ -353,7 +417,7 @@ const SensitiveOperationSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("PUBLISH_GIT_REFERENCE"),
       expectedHead: CommitShaSchema,
-      remoteRef: z.string().min(1).max(255),
+      remoteRef: GitRefSchema,
     })
     .strict(),
   z
@@ -363,14 +427,27 @@ const SensitiveOperationSchema = z.discriminatedUnion("kind", [
       connectorEpoch: RevisionSchema,
       resourceId: z.string().min(1).max(256),
       expectedRevision: z.string().min(1).max(128),
+      actionDigest: Sha256Schema,
       mutation: z.enum([
-        "CREATE_ISSUE",
-        "EDIT_ISSUE",
-        "COMMENT",
-        "SET_LABELS",
-        "SET_ASSIGNEES",
-        "SET_MILESTONE",
-        "SET_STATE",
+        "ISSUE_CREATE",
+        "ISSUE_EDIT",
+        "ISSUE_COMMENT",
+        "ISSUE_ADD_LABELS",
+        "ISSUE_REMOVE_LABELS",
+        "ISSUE_ADD_ASSIGNEES",
+        "ISSUE_REMOVE_ASSIGNEES",
+        "ISSUE_SET_MILESTONE",
+        "ISSUE_CLEAR_MILESTONE",
+        "ISSUE_CLOSE",
+        "ISSUE_REOPEN",
+        "MILESTONE_CREATE",
+        "MILESTONE_EDIT",
+        "MILESTONE_CLOSE",
+        "MILESTONE_REOPEN",
+        "PROJECT_ADD_ITEM",
+        "PROJECT_REMOVE_ITEM",
+        "PROJECT_UPDATE_FIELD",
+        "PROJECT_MOVE_ITEM",
       ]),
     })
     .strict(),
@@ -381,7 +458,14 @@ const SensitiveOperationSchema = z.discriminatedUnion("kind", [
       connectorEpoch: RevisionSchema,
       documentId: z.string().min(1).max(256),
       expectedRevision: z.string().min(1).max(128),
-      mutation: z.enum(["CREATE_DOCUMENT", "EDIT_DOCUMENT", "ADD_COMMENT", "ARCHIVE_DOCUMENT"]),
+      actionDigest: Sha256Schema,
+      mutation: z.enum([
+        "DOCUMENT_CREATE",
+        "DOCUMENT_EDIT",
+        "PROPOSAL_APPLY",
+        "WORKING_DOCUMENT_PROMOTE",
+        "WORKING_DOCUMENT_ARCHIVE",
+      ]),
     })
     .strict(),
   z
@@ -440,6 +524,39 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     reason: z.enum(["MEMBER_REQUEST", "DEADLINE", "WORKFLOW", "REVOCATION"]),
   }).strict(),
   CommandBaseSchema.extend({
+    kind: z.literal("RECONCILE_OBSERVATION"),
+    ...RevisionedRunSchema,
+    observation: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("RUNNER_ATTEMPT"),
+          attemptId: IdentifierSchema,
+          observedState: z.enum(["RUNNING", "EXITED", "NOT_FOUND", "ORPHAN_TERMINATED"]),
+          observedAt: z.number().int().nonnegative(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("SOURCE_REVISION"),
+          connectorId: IdentifierSchema,
+          sourceKind: z.enum(["GITHUB_ISSUE", "GITHUB_PULL_REQUEST", "OUTLINE_DOCUMENT"]),
+          sourceItemId: z.string().min(1).max(256),
+          availability: z.enum(["AVAILABLE", "MISSING", "FORBIDDEN"]),
+          observedRevision: z.string().min(1).max(128).optional(),
+          observedAt: z.number().int().nonnegative(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("OUTBOX_DELIVERY"),
+          deliveryId: IdentifierSchema,
+          disposition: z.enum(["DELIVERED", "RETRYABLE_FAILURE", "PERMANENT_FAILURE"]),
+          observedAt: z.number().int().nonnegative(),
+        })
+        .strict(),
+    ]),
+  }).strict(),
+  CommandBaseSchema.extend({
     kind: z.literal("ACCEPT_ATTEMPT_EVENT"),
     ...RevisionedRunSchema,
     attemptId: IdentifierSchema,
@@ -459,8 +576,7 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     kind: z.literal("RECORD_EVIDENCE"),
     ...RevisionedRunSchema,
     attemptId: IdentifierSchema.optional(),
-    evidenceKind: z.enum(["VERIFICATION", "PUBLISHED_REFERENCE", "PROGRESS", "RUN_RESULT"]),
-    summary: z.string().min(1).max(2_048),
+    evidence: EvidenceInputSchema,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RECORD_RUN_RESULT"),
@@ -562,6 +678,76 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
         .strict(),
     ]),
   }).strict(),
+]);
+
+export const CommandResultSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("LAUNCH_RUN"),
+      record: CoordinationRecordViewSchema,
+      run: RunViewSchema,
+      attempt: AttemptViewSchema,
+      dispatch: QueuedDispatchMetadataSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("AUTHORIZE_ATTEMPT"),
+      run: RunViewSchema,
+      attempt: AttemptViewSchema,
+      dispatch: QueuedDispatchMetadataSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("CANCEL_RUN"),
+      run: RunViewSchema,
+      termination: TerminationRequestMetadataSchema,
+    })
+    .strict(),
+  z.object({ kind: z.literal("RECONCILE_OBSERVATION"), reconciled: z.literal(true) }).strict(),
+  z
+    .object({
+      kind: z.literal("ACCEPT_ATTEMPT_EVENT"),
+      run: RunViewSchema,
+      attempt: AttemptViewSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("RECORD_CHECKPOINT"),
+      checkpoint: DurableCheckpointSchema,
+      run: RunViewSchema,
+    })
+    .strict(),
+  z.object({ kind: z.literal("RECORD_EVIDENCE"), evidence: EvidenceRecordSchema }).strict(),
+  z.object({ kind: z.literal("RECORD_RUN_RESULT"), run: RunViewSchema }).strict(),
+  z
+    .object({ kind: z.literal("LINK_SOURCE_REFERENCE"), record: CoordinationRecordViewSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("ACKNOWLEDGE_COLLISION"), record: CoordinationRecordViewSchema })
+    .strict(),
+  z.object({ kind: z.literal("CONSUME_PERMIT"), session: AuthoritySessionViewSchema }).strict(),
+  z
+    .object({ kind: z.literal("RENEW_AUTHORITY_SESSION"), session: AuthoritySessionViewSchema })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("AUTHORIZE_OPERATION"),
+      authorizationId: IdentifierSchema,
+      expiresAt: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z.object({ kind: z.literal("RELEASE_AUTHORITY_SESSION"), released: z.literal(true) }).strict(),
+  z
+    .object({
+      kind: z.literal("REPLACE_RUNNER_POLICY"),
+      runnerId: IdentifierSchema,
+      policyRevision: RevisionSchema,
+    })
+    .strict(),
+  z.object({ kind: z.literal("APPLY_REVOCATION"), applied: z.literal(true) }).strict(),
 ]);
 
 export const CoordinationQuerySchema = z.discriminatedUnion("kind", [

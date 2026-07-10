@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { IdentifierSchema, InstantSchema } from "./ids.ts";
+import { CommitShaSchema, IdentifierSchema, InstantSchema, Sha256Schema } from "./ids.ts";
 
 export const RunnerOperationSchema = z.discriminatedUnion("kind", [
   z
@@ -14,7 +14,9 @@ export const RunnerOperationSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("EXECUTE_LOCAL_GATE"),
       gateEvaluationId: IdentifierSchema,
-      manifestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+      gateKey: IdentifierSchema,
+      repositoryRevision: CommitShaSchema,
+      manifestFingerprint: Sha256Schema,
     })
     .strict(),
   z

@@ -7,6 +7,54 @@ import type {
 } from "./ids.ts";
 import { CommitShaSchema, IdentifierSchema, RevisionSchema } from "./ids.ts";
 
+const forbiddenGitRefCharacters = new Set(["~", "^", ":", "?", "*", "[", "\\"]);
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0);
+    return code <= 32 || code === 127;
+  });
+}
+
+function isNormalizedGitRef(value: string): boolean {
+  if (
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.endsWith(".") ||
+    value.includes("..") ||
+    value.includes("//") ||
+    value.includes("@{") ||
+    hasControlCharacter(value) ||
+    [...value].some((character) => forbiddenGitRefCharacters.has(character))
+  ) {
+    return false;
+  }
+  return value
+    .split("/")
+    .every((part) => part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+export const GitRefSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine(isNormalizedGitRef, "Invalid git ref");
+export const RepositoryRelativePathSchema = z
+  .string()
+  .min(1)
+  .max(1_024)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.startsWith("-") &&
+      !/^[A-Za-z]:\//.test(value) &&
+      !value.includes("\\") &&
+      !hasControlCharacter(value) &&
+      value.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."),
+    "Invalid repository-relative path",
+  );
+
 export type RepositoryMode = "MUTATING" | "INSPECT_ONLY";
 export type RepositoryAssurance = "ADVISORY" | "ENFORCED";
 export type ExecutionHost = "NATIVE" | "ORCA";
@@ -54,7 +102,7 @@ export const RepositoryRequestSchema = z
       z.object({ kind: z.literal("EXACT"), commitSha: CommitShaSchema }).strict(),
       z.object({ kind: z.literal("RESOLVE_DEFAULT_BASE") }).strict(),
     ]),
-    intendedBranch: z.string().min(1).max(255).optional(),
+    intendedBranch: GitRefSchema.optional(),
   })
   .strict();
 

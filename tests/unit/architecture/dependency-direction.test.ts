@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { ResultSchema } from "../../../src/shared/contracts/result.ts";
+import { scanSourceImports } from "./dependency-rules.ts";
 
 describe("shared contracts", () => {
   test("accepts bounded safe errors", () => {
@@ -18,11 +17,7 @@ describe("shared contracts", () => {
     ).toBe(true);
   });
 
-  test("rejects domain imports of adapters", async () => {
-    for (const name of await readdir("src/domain", { recursive: true })) {
-      if (!name.endsWith(".ts")) continue;
-      const source = await readFile(join("src/domain", name), "utf8");
-      expect(source).not.toMatch(/from ["'](?:.*\/)?(?:server\/adapters|runner\/adapters|web|cli)/);
-    }
+  test("enforces shared contracts to domain to modules to adapters and entrypoints", async () => {
+    expect(await scanSourceImports("src")).toEqual([]);
   });
 });

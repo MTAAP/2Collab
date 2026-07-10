@@ -28,4 +28,8 @@ export type {
   SensitiveOperation,
 } from "./commands.ts";
 
-export { CollabCommandSchema, CoordinationQuerySchema } from "./commands.ts";
+export {
+  CollabCommandSchema,
+  CommandResultSchema,
+  CoordinationQuerySchema,
+} from "./commands.ts";
