@@ -589,15 +589,18 @@ git commit -m "feat: add typed runner data plane"
 
 ### Task 8: Runner supervisor, Claude/Codex, Native/Orca, and diagnostics
 
-**Requirements:** `FND-005`, `FND-018`.
+**Requirements:** adapter/supervisor portion of `FND-005` and `FND-018`; authority/worktree/restart drills remain `IN_PROGRESS` until Tasks 10, 12, and 14.
 
 **Files:**
 - Create: `src/runner/{daemon,supervisor,local-diagnostics}.ts`
+- Create: `src/runner/{profiles,process-state,environment}.ts`
+- Create: `src/runner/credentials/os-store.ts`
 - Create: `src/runner/adapters/runtime/{contract,claude,codex}.ts`
 - Create: `src/runner/adapters/host/{contract,native,orca}.ts`
 - Create: `src/runner/adapters/enforcement/{contract,trusted-host}.ts`
 - Test: `tests/runner/conformance/{runtime,host}.test.ts`
 - Test: `tests/runner/local-diagnostics.test.ts`
+- Modify: `src/shared/contracts/runs.ts`
 
 **Interfaces:**
 - Consumes: typed permits, generic execution selection, local profile registry.
@@ -609,8 +612,8 @@ git commit -m "feat: add typed runner data plane"
 for (const adapter of [claudeFixture(), codexFixture()]) {
   test(`${adapter.name} prepares argv without starting a process`, async () => {
     const prepared = await adapter.prepare(headlessRequest());
-    expect(prepared.argv.length).toBeGreaterThan(0);
-    expect(prepared.environment).not.toHaveProperty("CALLER_ENV");
+    expect(prepared.invocation.argv.length).toBeGreaterThan(0);
+    expect(prepared).not.toHaveProperty("environment");
     expect(adapter.startedProcesses()).toBe(0);
   });
 }
@@ -639,10 +642,21 @@ export interface ExecutionAdapter {
 }
 export interface ExecutionHost {
   readonly host: "NATIVE" | "ORCA";
-  start(execution: PreparedExecution): Promise<Result<HostProcess>>;
+  start(execution: SupervisorLaunch): Promise<Result<HostProcess>>;
   cancel(process: HostProcess): Promise<Result<HostDisposition>>;
   inspect(process: HostProcess): Promise<Result<HostObservation>>;
   attach(process: HostProcess): Promise<Result<LocalAttachment>>;
+}
+export interface LocalProfileRegistry {
+  resolve(profileVersionId: string, expectedFingerprint: string): Result<LocalProfileVersion>;
+}
+export interface LocalProcessRegistry {
+  reserve(attemptId: string, assignmentDigest: string): Result<ProcessStartReservation>;
+  recordStarted(reservation: ProcessStartReservation, identity: OpaqueHostProcessIdentity): Result<void>;
+  inspect(attemptId: string): Result<LocalProcessState>;
+}
+export interface WorktreePort {
+  resolveRunWorktree(runId: string, worktreeKey: string): Promise<Result<OpaqueWorktreeHandle>>;
 }
 export const trustedHostEnforcement: RepositoryEnforcementAdapter = {
   assurance: "ADVISORY",
@@ -667,13 +681,14 @@ git commit -m "feat: add trusted runner adapters"
 
 ### Task 9: Run/attempt schema, minimal Coordination Records, and authority contract
 
-**Requirements:** schema foundation for `FND-006` through `FND-011`, `FND-016`, `FND-017`.
+**Requirements:** persistence prerequisite for `FND-006` through `FND-011`, `FND-016`, and `FND-017`; no behavioral requirement is marked complete by schema alone.
 
 **Files:**
 - Create: `src/server/db/migrations/0003_runs_authority.sql`
 - Create: `src/server/db/migrations/0003_runs_authority.verify.ts`
 - Create: `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts`
-- Create: `src/server/modules/execution-authority/contract.ts`
+- Create: `src/server/modules/execution-authority/{contract,persistence}.ts`
+- Modify: `src/shared/contracts/{runs,execution-authority}.ts`
 - Test: `tests/integration/runs/source-free-creation.test.ts`
 
 **Interfaces:**
@@ -686,11 +701,11 @@ git commit -m "feat: add trusted runner adapters"
 test("LAUNCH_RUN atomically creates record, run, attempt, permit, audit, and outbox", async () => {
   const f = createAuthorityFixture();
   f.failCommitAfter("authority_snapshots");
-  const failed = await f.authority.execute(f.launchSourceFree());
+  const failed = await f.launchPersistence.create(f.launchSourceFree());
   expect(failed.ok).toBe(false);
   expect(f.counts()).toEqual({ records: 0, runs: 0, attempts: 0, permits: 0, audits: 0, outbox: 0 });
   f.clearFailure();
-  expect((await f.authority.execute(f.launchSourceFree())).ok).toBe(true);
+  expect((await f.launchPersistence.create(f.launchSourceFree())).ok).toBe(true);
   expect(f.counts()).toEqual({ records: 1, runs: 1, attempts: 1, permits: 1, audits: 1, outbox: 1 });
 });
 ```
@@ -703,30 +718,30 @@ Expected: FAIL because schema version 3 and authority implementation are missing
 
 - [ ] **Step 3: Add the authoritative schema**
 
-```sql
-CREATE TABLE coordination_records(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, creator_id TEXT NOT NULL REFERENCES members(id), revision INTEGER NOT NULL, mutation_guard_run_id TEXT, created_at INTEGER NOT NULL);
-CREATE TABLE coordination_source_refs(id TEXT PRIMARY KEY, record_id TEXT NOT NULL REFERENCES coordination_records(id), connector_id TEXT, source_item_id TEXT, observed_revision TEXT, kind TEXT NOT NULL, UNIQUE(connector_id,source_item_id));
-CREATE TABLE agent_runs(id TEXT PRIMARY KEY, record_id TEXT NOT NULL REFERENCES coordination_records(id), goal TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','WAITING','COMPLETED','FAILED','CANCELLED')), repository_mode TEXT NOT NULL CHECK(repository_mode IN ('MUTATING','INSPECT_ONLY')), repository_assurance TEXT NOT NULL CHECK(repository_assurance IN ('ADVISORY','ENFORCED')), max_attempts INTEGER NOT NULL CHECK(max_attempts > 0), deadline INTEGER NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE execution_attempts(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), ordinal INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('PENDING','STARTING','RUNNING','EXITED','FAILED_TO_START','CANCELLED','TIMED_OUT','LOST')), runner_id TEXT NOT NULL REFERENCES runners(id), worktree_key TEXT, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, UNIQUE(run_id,ordinal));
-CREATE TABLE authority_snapshots(id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES execution_attempts(id), snapshot_json TEXT NOT NULL, policy_epoch INTEGER NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE dispatch_permits(id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES execution_attempts(id), digest TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, consumed_at INTEGER);
-CREATE TABLE authority_sessions(id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES execution_attempts(id), fence INTEGER NOT NULL, lease_expires_at INTEGER NOT NULL, released_at INTEGER);
-CREATE TABLE checkpoints(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), attempt_id TEXT NOT NULL REFERENCES execution_attempts(id), reason TEXT NOT NULL, next_action TEXT NOT NULL, safe_summary TEXT NOT NULL, remote_ref TEXT, created_at INTEGER NOT NULL);
-CREATE TABLE evidence(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), attempt_id TEXT, kind TEXT NOT NULL, safe_payload TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE wss_outbox(id TEXT PRIMARY KEY, runner_id TEXT NOT NULL, message_json TEXT NOT NULL, delivered_at INTEGER, created_at INTEGER NOT NULL);
-INSERT INTO schema_migrations(version, applied_at) VALUES (3, unixepoch());
-```
+Migration 0003 is the complete durable execution/configuration foundation for Tasks 10–12. It creates strict tables for:
+
+- Coordination Records and canonical source references keyed by `(project_id, connector_id, source_item_id)` with project-consistent foreign keys;
+- Agent Runs, predecessor/follow-up edges, run-owned opaque worktree identity, immutable effective configuration, dispatcher, bounds, waiting/terminal reasons, and exact repository/branch provenance;
+- Execution Attempts with ordinals, exact runner/mapping/profile/exposure/policy/host/mode selections, acknowledgement/start/terminal facts, signals, and one active-attempt constraint;
+- append-only run and attempt events, typed run results/evidence links, immutable checkpoints plus append-only human responses/decisions, and closed versioned evidence payloads with byte bounds/digests;
+- dedicated mutation reservations, mutation overrides/collisions, and branch claims rather than a nullable guard column;
+- normalized immutable authority snapshots, hash-only single-use permits, fenced authority sessions, distinct mutation leases, and exact revocation/release/expiry bindings;
+- safe WSS delivery intents that reference permit claims/hash without clear signed capabilities, prompts, output, paths, or arbitrary message JSON;
+- hardened actor-kind/command-kind idempotency with fixed canonical input hashes and bounded safe result projections;
+- versioned Personal Run Presets, Context Recipes, immutable Effective Run Configurations, usage observations/coverage, Published Git References, and Retained Local Work references needed by Tasks 11–12.
+
+Every mutable revision, epoch, ordinal, and fence is positive; lifecycle time relationships and UPPERCASE enums are constrained. Historical rows do not cascade away. Named security/query indexes participate in claimed-schema integrity. `migrate` proves empty-to-v3, v1-to-v3, and v2-to-v3 under one serialized transaction and rejects missing/gapped/corrupt state. The private launch persistence seam atomically writes the record, run, first attempt, snapshot, permit state, mutation reservation/lease when required, audit, idempotency projection, and safe WSS intent; signing and transport happen only after commit. `ExecutionAuthority` behavior remains Task 10.
 
 - [ ] **Step 4: Verify GREEN**
 
 Run: `bun test src/server/db/migrations/0003_runs_authority.verify.ts tests/integration/runs/source-free-creation.test.ts`
 
-Expected: PASS; empty `sourceRefs` creates one minimal Coordination Record and any injected failure rolls the whole transaction back.
+Expected: PASS; empty `sourceRefs` creates one minimal Coordination Record and complete launch graph, every injected failure rolls the whole transaction back, upgrades preserve v1/v2 data, and no clear capability or prohibited content reaches storage.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0003_runs_authority.sql src/server/db/migrations/0003_runs_authority.verify.ts src/server/modules/coordination-records src/server/modules/execution-authority/contract.ts tests/integration/runs/source-free-creation.test.ts
+git add src/server/db/migrations/0003_runs_authority.sql src/server/db/migrations/0003_runs_authority.verify.ts src/server/db/migrate.ts src/shared/contracts/runs.ts src/shared/contracts/execution-authority.ts src/server/modules/coordination-records src/server/modules/execution-authority/contract.ts src/server/modules/execution-authority/persistence.ts tests/integration/runs/source-free-creation.test.ts
 git commit -m "feat: add coordination and run schema"
 ```
 
@@ -792,6 +807,8 @@ export function createExecutionAuthority(deps: AuthorityDependencies): Execution
   };
 }
 ```
+
+The runtime adapter returns a host-neutral invocation and never an environment. The supervisor resolves the run-owned worktree through `WorktreePort`, builds a minimal allowlisted environment from runner-local configuration/OS-credential references, activates assurance, consumes the permit immediately before start, and supplies the resulting `SupervisorLaunch` to Native or Orca. The versioned `~/.collab/runner.db` owns profile and opaque process reconciliation state but no shared lifecycle or raw output. Duplicate assignment digests reconcile; changed reuse fails. Trusted Native/Orca always report `ADVISORY`, and every `ENFORCED` request starts zero processes. Headless output uses split-safe redaction and bounded live chunks; interactive bytes have no shared code path. Diagnostics use local AEAD, owner reauthentication, 2MiB/24h caps, and only the metadata allowlist defined by the Product Spec.
 
 ```ts
 export function transitionAttempt(current: ExecutionAttemptState, event: AttemptEvent): Result<ExecutionAttemptState> {
