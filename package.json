@@ -37,6 +37,8 @@
     "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@simplewebauthn/server": "13.3.2",
     "@xyflow/react": "12.11.2",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
