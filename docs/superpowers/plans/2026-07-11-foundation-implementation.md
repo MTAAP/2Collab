@@ -277,11 +277,6 @@ export interface IdentityAuthority {
   inspectInvitation(query: InspectInvitation): Promise<Result<TeamInvitation>>;
   revokeInvitation(command: RevokeInvitation): Promise<Result<TeamInvitation>>;
   accept(command: AcceptInvitationWithVerifiedIdentity): Promise<Result<MemberSession>>;
-  changeRole(command: ChangeMemberRole): Promise<Result<Member>>;
-  remove(command: RemoveMember): Promise<Result<MemberRemoval>>;
-  linkProvider(command: LinkProviderIdentity): Promise<Result<LinkedIdentity>>;
-  revokeSession(command: RevokeSession): Promise<Result<SessionRevocation>>;
-  createHostRecovery(command: CreateHostRecovery): Promise<Result<HostRecoveryCode>>;
 }
 ```
 
