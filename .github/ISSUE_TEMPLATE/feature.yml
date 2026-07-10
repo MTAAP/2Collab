@@ -1,0 +1,64 @@
+name: Feature proposal
+description: Propose a focused addition or change to 2Collab.
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        2Collab optimizes for solo developers and 1-3 person teams. Proposals should preserve the Product Spec unless they explicitly request a product decision change.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the developer or coordination problem without prescribing an implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable behavior that would make the workflow better.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Closest implementation phase
+      options:
+        - Foundation
+        - GitHub coordination
+        - Outline collaboration
+        - Bounded automation
+        - Cross-cutting or uncertain
+    validations:
+      required: true
+
+  - type: textarea
+    id: fit
+    attributes:
+      label: Product fit and tradeoffs
+      description: Explain how this remains useful and understandable for a 1-3 person team, including complexity or security costs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or examples
+      description: Add public references, a small workflow example, or dogfood evidence when available.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and the Product Spec for this proposal.
+          required: true
+        - label: I identified whether this changes a settled product decision.
+          required: true
+        - label: I did not include credentials, private source, or personal information.
+          required: true
+

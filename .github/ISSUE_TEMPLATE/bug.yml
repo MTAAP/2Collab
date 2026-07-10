@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible defect in 2Collab.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve 2Collab. Do not disclose security vulnerabilities here; use the private reporting process in SECURITY.md.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the 2Collab version or full commit SHA where you observed the problem.
+      placeholder: 0.1.0 or a full commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - collab-server
+        - collab CLI
+        - Web interface
+        - Documentation
+        - Container or self-hosting
+        - Build or contributor tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: List the smallest reliable sequence that demonstrates the problem. Remove credentials and private source content.
+      placeholder: |
+        1. Start from...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the observable result you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include bounded logs or screenshots only after removing secrets, tokens, local paths, and proprietary source.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, architecture, Bun version, browser, and container runtime when relevant.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed credentials, tokens, private source, and machine-specific paths.
+          required: true
+        - label: This report is not a security vulnerability.
+          required: true
+
