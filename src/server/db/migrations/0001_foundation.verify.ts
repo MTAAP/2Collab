@@ -38,6 +38,12 @@ export function verifyFoundationSchema(db: Database): void {
   );
   expect(
     db
+      .query<{ name: string }, []>("PRAGMA table_info(members)")
+      .all()
+      .map((row) => row.name),
+  ).toContain("display_name");
+  expect(
+    db
       .query<{ name: string; type: string }, []>("PRAGMA table_info(passkey_credentials)")
       .all()
       .map((row) => ({ name: row.name, type: row.type })),

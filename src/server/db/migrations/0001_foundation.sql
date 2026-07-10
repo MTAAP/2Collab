@@ -15,6 +15,7 @@ CREATE TABLE deployments (
 
 CREATE TABLE members (
   id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL DEFAULT 'Member' CHECK (length(display_name) BETWEEN 1 AND 120),
   role TEXT NOT NULL CHECK (role IN ('OWNER', 'MEMBER')),
   status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'REVOKED')),
   authority_epoch INTEGER NOT NULL DEFAULT 1 CHECK (authority_epoch > 0),
