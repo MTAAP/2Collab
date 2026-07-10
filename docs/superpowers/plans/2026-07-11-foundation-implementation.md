@@ -392,12 +392,14 @@ git commit -m "feat: secure provider and device identity"
 
 ### Task 5: Project registry, repository discovery, and local global database
 
-**Requirements:** `FND-003`, `ORP-09`.
+**Requirements:** persistence/discovery portion of `FND-003`, `ORP-09`; `FND-003` remains `IN_PROGRESS` until Task 13 proves web/CLI parity.
 
 **Files:**
 - Create: `src/server/modules/projects/{contract,project-registry}.ts`
 - Create: `src/runner/repository/{config,discovery,global-registry}.ts`
-- Create: `src/cli/commands/{init,projects,status}.ts`
+- Create: `src/cli/commands/{init,list,projects,status}.ts`
+- Modify: `src/server/db/migrations/0001_foundation.sql`
+- Modify: `src/server/db/migrations/0001_foundation.verify.ts`
 - Test: `tests/unit/projects/discovery.test.ts`
 - Test: `tests/integration/{projects,cli-projects}.test.ts`
 
@@ -427,10 +429,10 @@ Expected: FAIL because project discovery modules do not exist.
 
 ```ts
 export const ProjectConfigSchema = z.object({
-  project_id: z.string().regex(/^proj_[A-Za-z0-9]+$/),
-  team_id: z.string().regex(/^team_[A-Za-z0-9]+$/),
-  server_url: z.string().url().refine((value) => value.startsWith("https://") || value.startsWith("http://localhost")),
-  base_branch: z.string().regex(/^(?!.*\.\.)(?!\/)[A-Za-z0-9._/-]+$/),
+  project_id: IdentifierSchema,
+  team_id: IdentifierSchema,
+  server_url: CanonicalServerOriginSchema,
+  base_branch: GitRefSchema,
 }).strict();
 export interface ProjectRegistry {
   register(command: RegisterProject): Promise<Result<Project>>;
@@ -438,6 +440,8 @@ export interface ProjectRegistry {
   list(query: ListProjects): Promise<Result<readonly Project[]>>;
 }
 ```
+
+`CanonicalServerOriginSchema` parses URL components and accepts only an HTTPS origin or exact-host `http://localhost[:port]`, with no credentials, path, query, or fragment; it returns one no-trailing-slash canonical origin. `collab init` links an existing Project and never creates one. The versioned local SQLite registry uses `(server_origin, project_id)` identity, a unique canonical preferred path, explicit moved-checkout replacement, and corruption failure. Upward discovery bounds file size, rejects symlink escapes, and keeps every absolute path inside runner/CLI adapters. `projects.name` receives the same 120-character database bound as its shared schema.
 
 - [ ] **Step 4: Verify GREEN**
 

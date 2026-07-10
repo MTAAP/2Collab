@@ -1061,6 +1061,10 @@ server_url = "https://collab.example.com"
 base_branch = "main"
 ```
 
+Project and team identifiers are opaque bounded identifiers. The `proj_` and `team_` prefixes above are illustrative, not a validation or routing rule; clients accept the canonical identifiers issued by the server. `server_url` is a canonical origin, not a general URL: production uses HTTPS, local development may use HTTP only with the exact `localhost` hostname, credentials/query/fragment/path are forbidden, and equivalent trailing-slash spellings normalize to one stored origin. `base_branch` is a normalized Git ref and rejects option-like, absolute, traversal-like, control-containing, and otherwise invalid ref names.
+
+`collab init --project <project-id> --server <origin>` links the current canonical checkout to an existing server Project after authenticating the Member and validating the deployment, team, project, and base branch. It does not create server Projects or silently overwrite `.collab/config.toml`; Project creation remains an owner action in the shared web/API surface. The config file is written atomically only after validation, and retrying an interrupted identical link is safe. Replacing a stale local checkout mapping requires the explicit `--replace-local-mapping` flag after the same server identity and Project are revalidated.
+
 The tracker file is separate from agent guidance files like `AGENTS.md` or `CLAUDE.md`. This keeps machine-readable config clean and avoids parsing ambiguity. Agent guidance can still live in those files and be loaded by the context assembler.
 
 Authorization is **team-scoped**, while credentials remain per-user so grants, approvals, and human edits have a real actor. A local runner is paired with a signed-in user through a one-time code confirmed in the web interface. Its long-lived credential is stored in the OS credential store, never a project file; normal access uses short-lived, audience-restricted, DPoP sender-constrained tokens with rotating refresh credentials. Local agent processes receive short-lived Run Capabilities limited to one Agent Run and its allowed operations rather than a reusable user, team, or runner secret.
@@ -1078,7 +1082,7 @@ From this global view, the user can:
 - Start multiple agents in different projects in parallel.
 - Use git worktrees so each active Agent Run has its own isolated working directory while its sequential Execution Attempts preserve local state.
 
-The global registry maps `project_id` to the local repo path, so `collab start --project proj_abc123` works from any directory. Canonical project state remains on the shared server; the registry stores only local paths, runner metadata, cache pointers, and last access time.
+The versioned global registry keys a Project by canonical `(server_origin, project_id)` and maps it to one preferred canonical checkout, so `collab start --project proj_abc123` works from any directory without merging same-spelled identifiers from different deployments. The canonical path is unique locally; a conflicting Project or second checkout fails visibly unless the explicit, revalidated replacement flow applies. Invoking Collab from a linked Git worktree may use that worktree for the current command but never silently replaces the preferred checkout or records a transient Agent Run Worktree as canonical. Corruption is reported rather than silently deleting or recreating the database. Canonical project state remains on the shared server; the registry stores only local paths, runner metadata, cache pointers, and last access time, and no absolute path crosses a server/domain interface.
 
 The primary command for the global view should be `collab projects`. It lists all known projects with their current state and active Agent Runs. If the user is inside a repo, `collab` with no subcommand can show repo-level status; if outside a repo, it can show the global view. This makes `collab` feel like a command center, not just a per-repo utility.
 
@@ -1088,6 +1092,8 @@ Commands for the global view:
 - `collab start --project <project_id>` — start an agent in the specified project.
 - `collab status --all` — show all active Agent Runs across all projects.
 - `collab flush` — retry queued idempotent runner events after a network interruption.
+
+Inside a repository, `collab list` is the project-local coordination view and `collab status` is its current execution summary. Before run persistence is available, these surfaces report project identity plus an explicit `RUN_STATE_UNAVAILABLE` field rather than inventing an idle or empty run state. Full web/CLI parity for Project discovery is complete only when the later surface-composition slice exposes the same canonical Project ID.
 
 ### Runner Registration and Web Launch
 
