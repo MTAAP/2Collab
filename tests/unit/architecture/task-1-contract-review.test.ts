@@ -296,19 +296,37 @@ describe("reviewed shared contracts", () => {
     expect(
       CollabCommandSchema.safeParse({
         ...command,
-        evidence: { kind: "CHANGED_PATHS", paths: ["src/shared/contracts/result.ts"] },
+        evidence: {
+          kind: "CHANGED_PATHS",
+          baseCommit: fullSha1,
+          observedAt: 1_000,
+          paths: ["src/shared/contracts/result.ts"],
+          truncated: false,
+        },
       }).success,
     ).toBe(true);
     expect(
       CollabCommandSchema.safeParse({
         ...command,
-        evidence: { kind: "CHANGED_PATHS", paths: ["/Users/person/private.ts"] },
+        evidence: {
+          kind: "CHANGED_PATHS",
+          baseCommit: fullSha1,
+          observedAt: 1_000,
+          paths: ["/Users/person/private.ts"],
+          truncated: false,
+        },
       }).success,
     ).toBe(false);
     expect(
       CollabCommandSchema.safeParse({
         ...command,
-        evidence: { kind: "CHANGED_PATHS", paths: ["C:/Users/person/private.ts"] },
+        evidence: {
+          kind: "CHANGED_PATHS",
+          baseCommit: fullSha1,
+          observedAt: 1_000,
+          paths: ["C:/Users/person/private.ts"],
+          truncated: false,
+        },
       }).success,
     ).toBe(false);
     for (const prohibited of [
@@ -424,10 +442,13 @@ describe("reviewed shared contracts", () => {
         kind: "CANCEL_RUN",
         run: cancelledRun,
         termination: {
-          state: "REQUESTED",
-          attemptId: "attempt_1",
-          reason: "CANCELLATION",
-          requestedAt: 1_000,
+          kind: "REQUEST_TERMINATION",
+          request: {
+            state: "REQUESTED",
+            attemptId: "attempt_1",
+            reason: "CANCELLATION",
+            requestedAt: 1_000,
+          },
         },
       }).success,
     ).toBe(true);

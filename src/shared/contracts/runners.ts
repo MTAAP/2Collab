@@ -117,3 +117,13 @@ export const ExecutionSelectionSchema = z
     interaction: z.enum(["HEADLESS", "INTERACTIVE"]),
   })
   .strict();
+
+export const EligibleTargetSchema = z
+  .object({
+    runnerId: IdentifierSchema,
+    profileVersionId: IdentifierSchema,
+    host: z.enum(["NATIVE", "ORCA"]),
+    interaction: z.enum(["HEADLESS", "INTERACTIVE"]),
+    assurance: z.enum(["ADVISORY", "ENFORCED"]),
+  })
+  .strict();

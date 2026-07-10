@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 export const RetryDispositionSchema = z.enum(["NEVER", "REFRESH", "EXPLICIT_RESUME", "SAME_INPUT"]);
+export const AuditIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/);
 
 const SafeDetailKeySchema = z
   .string()
@@ -28,8 +33,8 @@ export type Result<T> =
   | Readonly<{ ok: false; error: DomainError; auditId?: string }>;
 
 export const ResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), value: z.unknown(), auditId: z.string().optional() }).strict(),
+  z.object({ ok: z.literal(true), value: z.unknown(), auditId: AuditIdSchema.optional() }).strict(),
   z
-    .object({ ok: z.literal(false), error: DomainErrorSchema, auditId: z.string().optional() })
+    .object({ ok: z.literal(false), error: DomainErrorSchema, auditId: AuditIdSchema.optional() })
     .strict(),
 ]);

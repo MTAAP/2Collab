@@ -29,7 +29,10 @@ export type {
 } from "./commands.ts";
 
 export {
+  AuthorityPreviewRequestSchema,
+  AuthorityPreviewSchema,
   CollabCommandSchema,
   CommandResultSchema,
   CoordinationQuerySchema,
+  QueryResultSchema,
 } from "./commands.ts";

@@ -2,6 +2,15 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, normalize } from "node:path/posix";
 
 type Layer = "SHARED" | "DOMAIN" | "MODULE" | "ADAPTER" | "ENTRYPOINT";
+type AdapterFamily =
+  | "HTTP"
+  | "MCP"
+  | "WSS"
+  | "GITHUB"
+  | "OUTLINE"
+  | "RUNNER_RUNTIME"
+  | "RUNNER_HOST"
+  | "RUNNER_ENFORCEMENT";
 
 export type ImportDecision = Readonly<{
   allowed: boolean;
@@ -34,6 +43,20 @@ function entrypointFamily(path: string): "CLI" | "WEB" | "SERVER" | undefined {
   return undefined;
 }
 
+function adapterFamily(path: string): AdapterFamily | undefined {
+  const families = [
+    ["src/server/adapters/http/", "HTTP"],
+    ["src/server/adapters/mcp/", "MCP"],
+    ["src/server/adapters/wss/", "WSS"],
+    ["src/server/adapters/github/", "GITHUB"],
+    ["src/server/adapters/outline/", "OUTLINE"],
+    ["src/runner/adapters/runtime/", "RUNNER_RUNTIME"],
+    ["src/runner/adapters/host/", "RUNNER_HOST"],
+    ["src/runner/adapters/enforcement/", "RUNNER_ENFORCEMENT"],
+  ] as const;
+  return families.find(([prefix]) => path.startsWith(prefix))?.[1];
+}
+
 function resolveTarget(importer: string, specifier: string): string | undefined {
   if (specifier.startsWith("@shared/")) return `src/shared/${specifier.slice("@shared/".length)}`;
   if (specifier.startsWith("@/")) return `src/web/${specifier.slice(2)}`;
@@ -56,7 +79,9 @@ export function validateImportEdge(importer: string, specifier: string): ImportD
   };
 
   if (source === "ADAPTER" && destination === "ADAPTER") {
-    return { allowed: false, importer, target, reason: "ADAPTER_TO_ADAPTER" };
+    const allowed =
+      adapterFamily(importer) !== undefined && adapterFamily(importer) === adapterFamily(target);
+    return { allowed, importer, target, reason: allowed ? undefined : "ADAPTER_TO_ADAPTER" };
   }
   if (source === "ADAPTER" && destination === "ENTRYPOINT") {
     return { allowed: false, importer, target, reason: "ADAPTER_TO_ENTRYPOINT" };

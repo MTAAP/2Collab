@@ -97,6 +97,10 @@ export type TerminationRequestMetadata = Readonly<{
   requestedAt: Instant;
 }>;
 
+export type CancellationTermination =
+  | Readonly<{ kind: "NO_ACTIVE_ATTEMPT" }>
+  | Readonly<{ kind: "REQUEST_TERMINATION"; request: TerminationRequestMetadata }>;
+
 type AuthoritySessionBase = Readonly<{
   id: AuthoritySessionId;
   attemptId: ExecutionAttemptId;
@@ -195,7 +199,10 @@ export const EvidenceInputSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("CHANGED_PATHS"),
+      baseCommit: CommitShaSchema,
+      observedAt: InstantSchema,
       paths: z.array(RepositoryRelativePathSchema).max(2_048),
+      truncated: z.boolean(),
     })
     .strict(),
   z
@@ -283,6 +290,16 @@ export const TerminationRequestMetadataSchema = z
   })
   .strict();
 
+export const CancellationTerminationSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("NO_ACTIVE_ATTEMPT") }).strict(),
+  z
+    .object({
+      kind: z.literal("REQUEST_TERMINATION"),
+      request: TerminationRequestMetadataSchema,
+    })
+    .strict(),
+]);
+
 const AuthoritySessionBaseSchema = z.object({
   id: IdentifierSchema,
   attemptId: IdentifierSchema,
@@ -337,5 +354,13 @@ export const RunViewSchema = z
     repositoryAssurance: z.enum(["ADVISORY", "ENFORCED"]),
     revision: RevisionSchema,
     attemptIds: z.array(IdentifierSchema).max(1_024),
+  })
+  .strict();
+
+export const ProjectionViewSchema = z
+  .object({
+    record: CoordinationRecordViewSchema,
+    runs: z.array(RunViewSchema).max(1_024),
+    attempts: z.array(AttemptViewSchema).max(4_096),
   })
   .strict();

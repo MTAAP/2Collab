@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AuthenticatedActor, MemberActor } from "./actors.ts";
-import { AuthenticatedActorSchema } from "./actors.ts";
+import { AuthenticatedActorSchema, MemberActorSchema } from "./actors.ts";
 import type { CoordinationSelection, SourceRef } from "./context.ts";
 import { CoordinationSelectionSchema, SourceRefSchema } from "./context.ts";
 import type {
@@ -23,12 +23,19 @@ import type {
   Sha256,
   TeamDispatchExposureId,
 } from "./ids.ts";
-import { CommitShaSchema, IdentifierSchema, RevisionSchema, Sha256Schema } from "./ids.ts";
+import {
+  CommitShaSchema,
+  IdentifierSchema,
+  InstantSchema,
+  RevisionSchema,
+  Sha256Schema,
+} from "./ids.ts";
 import type { EffectiveRunConfigurationRef } from "./presets.ts";
 import { EffectiveRunConfigurationRefSchema } from "./presets.ts";
 import type {
   AttemptView,
   AuthoritySessionView,
+  CancellationTermination,
   CoordinationRecordView,
   DurableCheckpoint,
   EvidenceInput,
@@ -37,22 +44,27 @@ import type {
   QueuedDispatchMetadata,
   RunResultKind,
   RunView,
-  TerminationRequestMetadata,
 } from "./runs.ts";
 import {
   AttemptEventSchema,
   AttemptViewSchema,
   AuthoritySessionViewSchema,
+  CancellationTerminationSchema,
   CoordinationRecordViewSchema,
   DurableCheckpointSchema,
   EvidenceInputSchema,
   EvidenceRecordSchema,
+  ProjectionViewSchema,
   QueuedDispatchMetadataSchema,
   RunViewSchema,
-  TerminationRequestMetadataSchema,
 } from "./runs.ts";
 import type { ExecutionSelection, RepositoryRequest, RunnerPolicyReplacement } from "./runners.ts";
-import { ExecutionSelectionSchema, GitRefSchema, RepositoryRequestSchema } from "./runners.ts";
+import {
+  EligibleTargetSchema,
+  ExecutionSelectionSchema,
+  GitRefSchema,
+  RepositoryRequestSchema,
+} from "./runners.ts";
 
 export type CommandBase = Readonly<{
   idempotencyKey: IdempotencyKey;
@@ -65,6 +77,15 @@ export type WorkflowAuthorityRef = Readonly<{
   workflowRevision: number;
   effectiveConfigurationDigest: Sha256;
 }>;
+
+const WorkflowAuthorityRefSchema = z
+  .object({
+    workflowExecutionId: IdentifierSchema,
+    stepOccurrenceId: IdentifierSchema,
+    workflowRevision: RevisionSchema,
+    effectiveConfigurationDigest: Sha256Schema,
+  })
+  .strict();
 
 export type LaunchRun = CommandBase &
   Readonly<{
@@ -97,6 +118,9 @@ export type CancelRun = CommandBase &
     runId: AgentRunId;
     expectedRunRevision: number;
     reason: "MEMBER_REQUEST" | "DEADLINE" | "WORKFLOW" | "REVOCATION";
+    termination:
+      | Readonly<{ kind: "NO_ACTIVE_ATTEMPT" }>
+      | Readonly<{ kind: "REQUEST_TERMINATION"; attemptId: ExecutionAttemptId }>;
   }>;
 
 export type ReconciliationObservation =
@@ -106,15 +130,20 @@ export type ReconciliationObservation =
       observedState: "RUNNING" | "EXITED" | "NOT_FOUND" | "ORPHAN_TERMINATED";
       observedAt: number;
     }>
-  | Readonly<{
+  | (Readonly<{
       kind: "SOURCE_REVISION";
       connectorId: ConnectorId;
       sourceKind: SourceRef["kind"];
       sourceItemId: string;
-      availability: "AVAILABLE" | "MISSING" | "FORBIDDEN";
-      observedRevision?: string;
       observedAt: number;
-    }>
+    }> &
+      (
+        | Readonly<{ availability: "AVAILABLE"; observedRevision: string }>
+        | Readonly<{
+            availability: "MISSING" | "FORBIDDEN" | "UNAVAILABLE";
+            observedRevision?: never;
+          }>
+      ))
   | Readonly<{
       kind: "OUTBOX_DELIVERY";
       deliveryId: string;
@@ -372,7 +401,7 @@ export type CommandResult =
   | Readonly<{
       kind: "CANCEL_RUN";
       run: RunView;
-      termination: TerminationRequestMetadata;
+      termination: CancellationTermination;
     }>
   | Readonly<{ kind: "RECONCILE_OBSERVATION"; reconciled: true }>
   | Readonly<{ kind: "ACCEPT_ATTEMPT_EVENT"; run: RunView; attempt: AttemptView }>
@@ -495,15 +524,7 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     repository: RepositoryRequestSchema,
     execution: ExecutionSelectionSchema,
     effectiveConfiguration: EffectiveRunConfigurationRefSchema,
-    workflow: z
-      .object({
-        workflowExecutionId: IdentifierSchema,
-        stepOccurrenceId: IdentifierSchema,
-        workflowRevision: RevisionSchema,
-        effectiveConfigurationDigest: Sha256Schema,
-      })
-      .strict()
-      .optional(),
+    workflow: WorkflowAuthorityRefSchema.optional(),
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("AUTHORIZE_ATTEMPT"),
@@ -522,11 +543,15 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     kind: z.literal("CANCEL_RUN"),
     ...RevisionedRunSchema,
     reason: z.enum(["MEMBER_REQUEST", "DEADLINE", "WORKFLOW", "REVOCATION"]),
+    termination: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("NO_ACTIVE_ATTEMPT") }).strict(),
+      z.object({ kind: z.literal("REQUEST_TERMINATION"), attemptId: IdentifierSchema }).strict(),
+    ]),
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RECONCILE_OBSERVATION"),
     ...RevisionedRunSchema,
-    observation: z.discriminatedUnion("kind", [
+    observation: z.union([
       z
         .object({
           kind: z.literal("RUNNER_ATTEMPT"),
@@ -535,17 +560,31 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
           observedAt: z.number().int().nonnegative(),
         })
         .strict(),
-      z
-        .object({
-          kind: z.literal("SOURCE_REVISION"),
-          connectorId: IdentifierSchema,
-          sourceKind: z.enum(["GITHUB_ISSUE", "GITHUB_PULL_REQUEST", "OUTLINE_DOCUMENT"]),
-          sourceItemId: z.string().min(1).max(256),
-          availability: z.enum(["AVAILABLE", "MISSING", "FORBIDDEN"]),
-          observedRevision: z.string().min(1).max(128).optional(),
-          observedAt: z.number().int().nonnegative(),
-        })
-        .strict(),
+      z.discriminatedUnion("availability", [
+        z
+          .object({
+            kind: z.literal("SOURCE_REVISION"),
+            connectorId: IdentifierSchema,
+            sourceKind: z.enum(["GITHUB_ISSUE", "GITHUB_PULL_REQUEST", "OUTLINE_DOCUMENT"]),
+            sourceItemId: z.string().min(1).max(256),
+            availability: z.literal("AVAILABLE"),
+            observedRevision: z.string().min(1).max(128),
+            observedAt: InstantSchema,
+          })
+          .strict(),
+        ...(["MISSING", "FORBIDDEN", "UNAVAILABLE"] as const).map((availability) =>
+          z
+            .object({
+              kind: z.literal("SOURCE_REVISION"),
+              connectorId: IdentifierSchema,
+              sourceKind: z.enum(["GITHUB_ISSUE", "GITHUB_PULL_REQUEST", "OUTLINE_DOCUMENT"]),
+              sourceItemId: z.string().min(1).max(256),
+              availability: z.literal(availability),
+              observedAt: InstantSchema,
+            })
+            .strict(),
+        ),
+      ]),
       z
         .object({
           kind: z.literal("OUTBOX_DELIVERY"),
@@ -702,7 +741,7 @@ export const CommandResultSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("CANCEL_RUN"),
       run: RunViewSchema,
-      termination: TerminationRequestMetadataSchema,
+      termination: CancellationTerminationSchema,
     })
     .strict(),
   z.object({ kind: z.literal("RECONCILE_OBSERVATION"), reconciled: z.literal(true) }).strict(),
@@ -790,6 +829,25 @@ export const CoordinationQuerySchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+export const QueryResultSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("INSPECT_COORDINATION_RECORD"),
+      record: CoordinationRecordViewSchema,
+    })
+    .strict(),
+  z.object({ kind: z.literal("INSPECT_RUN"), run: RunViewSchema }).strict(),
+  z.object({ kind: z.literal("INSPECT_ATTEMPT"), attempt: AttemptViewSchema }).strict(),
+  z
+    .object({
+      kind: z.literal("INSPECT_EVIDENCE"),
+      evidence: z.array(EvidenceRecordSchema).max(100),
+      next: IdentifierSchema.optional(),
+    })
+    .strict(),
+  z.object({ kind: z.literal("INSPECT_PROJECTION"), projection: ProjectionViewSchema }).strict(),
+]);
+
 export type AuthorityFact = Readonly<{
   subject:
     | "MEMBER"
@@ -823,3 +881,44 @@ export type AuthorityPreview = Readonly<{
   requirements: readonly AuthorityFact[];
   warnings: readonly AuthorityFact[];
 }>;
+
+export const AuthorityFactSchema = z
+  .object({
+    subject: z.enum([
+      "MEMBER",
+      "RUNNER",
+      "EXPOSURE",
+      "PROFILE",
+      "CONNECTOR",
+      "APPROVAL",
+      "REPOSITORY",
+      "MUTATION_LEASE",
+      "WORKFLOW",
+      "DEADLINE",
+    ]),
+    outcome: z.enum(["ALLOWED", "NOT_REQUIRED", "WAITING", "DENIED"]),
+    code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+    revision: z.string().min(1).max(128).optional(),
+    summary: z.string().min(1).max(240),
+  })
+  .strict();
+
+export const AuthorityPreviewRequestSchema = z
+  .object({
+    actor: MemberActorSchema,
+    projectId: IdentifierSchema,
+    coordinationRecordId: IdentifierSchema.optional(),
+    repository: RepositoryRequestSchema,
+    execution: ExecutionSelectionSchema,
+    workflow: WorkflowAuthorityRefSchema.optional(),
+  })
+  .strict();
+
+export const AuthorityPreviewSchema = z
+  .object({
+    evaluatedAt: InstantSchema,
+    eligibleTargets: z.array(EligibleTargetSchema).max(256),
+    requirements: z.array(AuthorityFactSchema).max(256),
+    warnings: z.array(AuthorityFactSchema).max(256),
+  })
+  .strict();
