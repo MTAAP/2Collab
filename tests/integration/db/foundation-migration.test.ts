@@ -26,6 +26,16 @@ function expectConstraint(db: Database, statement: string): void {
   expect(() => db.exec(statement)).toThrow();
 }
 
+function databaseWithHistory(versions: readonly number[]): Database {
+  const db = memoryDatabase();
+  db.exec("CREATE TABLE schema_migrations(version INTEGER NOT NULL, applied_at INTEGER NOT NULL)");
+  const insert = db.query<void, number>(
+    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, 0)",
+  );
+  for (const version of versions) insert.run(version);
+  return db;
+}
+
 describe("openDatabase", () => {
   test("enables foreign keys and a busy timeout without changing in-memory journal mode", () => {
     const db = openDatabase(":memory:");
@@ -62,6 +72,42 @@ describe("openDatabase", () => {
 });
 
 describe("migrate", () => {
+  test("serializes ledger creation, version decision, and migration application", () => {
+    const db = memoryDatabase();
+    const trace: string[] = [];
+    const traced = {
+      exec(statement: string) {
+        trace.push(`EXEC ${statement.replaceAll(/\s+/g, " ").trim()}`);
+        return db.exec(statement);
+      },
+      query(statement: string) {
+        trace.push(`QUERY ${statement.replaceAll(/\s+/g, " ").trim()}`);
+        return db.query(statement);
+      },
+    } as unknown as Database;
+
+    try {
+      migrate(traced);
+      const begin = trace.indexOf("EXEC BEGIN IMMEDIATE");
+      const ledger = trace.findIndex((entry) =>
+        entry.includes("CREATE TABLE IF NOT EXISTS schema_migrations"),
+      );
+      const decision = trace.findIndex((entry) =>
+        entry.includes("QUERY SELECT version FROM schema_migrations"),
+      );
+      const application = trace.findIndex((entry) => entry.includes("CREATE TABLE deployments"));
+      const commit = trace.indexOf("EXEC COMMIT");
+
+      expect(begin).toBeGreaterThanOrEqual(0);
+      expect(ledger).toBeGreaterThan(begin);
+      expect(decision).toBeGreaterThan(ledger);
+      expect(application).toBeGreaterThan(decision);
+      expect(commit).toBeGreaterThan(application);
+    } finally {
+      db.close();
+    }
+  });
+
   test("creates the complete version 1 foundation schema idempotently", () => {
     const db = memoryDatabase();
     try {
@@ -189,13 +235,35 @@ describe("migrate", () => {
   });
 
   test("refuses a database with an unknown newer schema version", () => {
+    const db = databaseWithHistory([1, 2]);
+    try {
+      expect(() => migrate(db)).toThrow("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
+    } finally {
+      db.close();
+    }
+  });
+
+  for (const [versions, label] of [
+    [[0], "non-positive"],
+    [[1, 1], "duplicate"],
+    [[1, 3], "non-contiguous"],
+  ] as const) {
+    test(`rejects a ${label} migration history`, () => {
+      const db = databaseWithHistory(versions);
+      try {
+        expect(() => migrate(db)).toThrow("SCHEMA_MIGRATION_HISTORY_INVALID");
+      } finally {
+        db.close();
+      }
+    });
+  }
+
+  test("rejects a claimed version 1 schema with missing foundation objects", () => {
     const db = memoryDatabase();
     try {
-      db.exec(
-        "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY CHECK(version > 0), applied_at INTEGER NOT NULL CHECK(applied_at >= 0))",
-      );
-      db.exec("INSERT INTO schema_migrations(version, applied_at) VALUES (2, 0)");
-      expect(() => migrate(db)).toThrow("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
+      migrate(db);
+      db.exec("DROP TABLE audit_events");
+      expect(() => migrate(db)).toThrow("SCHEMA_INTEGRITY_INVALID");
     } finally {
       db.close();
     }
