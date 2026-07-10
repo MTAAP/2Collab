@@ -20,7 +20,7 @@
 - Durable server storage may contain bounded authored input, references, revisions, hashes, lifecycle events, typed results, checkpoints, audit, and evidence; it must not contain raw terminal output, interactive transcripts, flattened prompts, fetched source bodies, raw diffs, credentials, private profile arguments, absolute paths, or worktree contents.
 - Native and Orca trusted-host enforcement reports `ADVISORY`; `ENFORCED` fails closed until a real isolation adapter exists.
 - Interactive bytes remain local. Headless live output is bounded, redacted, ephemeral, and absent from SQLite, backups, and outboxes.
-- Operational defaults are positive and finite: invitation 48h, invitation exchange 15m, fresh verification 5m, browser idle/absolute 12h/7d, recovery 15m, host recovery code 10m, OIDC transaction 10m, device pairing/access 10m/10m, device refresh idle/absolute 30d/90d, DPoP clock/replay 5m/10m, permit 30s, authority session/renewal 30s/10s, mutation disconnect grace 15s, heartbeat/offline/lost 10s/30s/90s, WSS frame 64KiB, output chunk/buffer 16KiB/1MiB, reconnect backoff 30s, source refresh grace 5m, diagnostic tail 2MiB/24h.
+- Operational defaults are positive and finite: invitation 48h, invitation exchange 15m, fresh verification/WebAuthn challenge 5m/5m, browser idle/absolute 12h/7d, recovery 15m, host recovery code 10m, OIDC transaction 10m, device pairing/access 10m/10m, device refresh idle/absolute 30d/90d, DPoP clock/replay 5m/10m, permit 30s, authority session/renewal 30s/10s, mutation disconnect grace 15s, heartbeat/offline/lost 10s/30s/90s, WSS frame 64KiB, output chunk/buffer 16KiB/1MiB, reconnect backoff 30s, source refresh grace 5m, diagnostic tail 2MiB/24h.
 - External/timed evidence remains honestly `IN_PROGRESS` until executed; its absence does not block implementation of subsequent phases.
 - Do not push, merge, release, mutate production integrations, or post public comments without explicit authority.
 
@@ -269,6 +269,7 @@ export interface IdentityAuthority {
   beginPasskeyRegistration(command: BeginPasskeyRegistration): Promise<Result<PasskeyChallenge>>;
   finishPasskeyRegistration(command: FinishPasskeyRegistration): Promise<Result<PasskeyCredential>>;
   authenticate(command: AuthenticatePasskey): Promise<Result<MemberSession>>;
+  listPasskeys(query: ListPasskeys): Promise<Result<readonly PasskeyCredential[]>>;
   revokePasskey(command: RevokePasskey): Promise<Result<PasskeyRevocation>>;
   generateRecoveryCodes(command: GenerateRecoveryCodes): Promise<Result<RecoveryCodeSet>>;
   redeemRecoveryCode(command: RedeemRecoveryCode): Promise<Result<RecoverySession>>;

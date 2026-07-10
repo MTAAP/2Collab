@@ -1208,6 +1208,7 @@ V1 ships finite defaults for every security-sensitive lifetime and buffer. Deplo
 | Team invitation expiry | 48 hours |
 | Invitation exchange session | 15 minutes |
 | Fresh privileged verification | 5 minutes |
+| WebAuthn ceremony challenge | 5 minutes |
 | Browser idle / absolute session | 12 hours / 7 days |
 | Recovery session | 15 minutes |
 | Host recovery code | 10 minutes |
