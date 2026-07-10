@@ -20,7 +20,7 @@
 - Durable server storage may contain bounded authored input, references, revisions, hashes, lifecycle events, typed results, checkpoints, audit, and evidence; it must not contain raw terminal output, interactive transcripts, flattened prompts, fetched source bodies, raw diffs, credentials, private profile arguments, absolute paths, or worktree contents.
 - Native and Orca trusted-host enforcement reports `ADVISORY`; `ENFORCED` fails closed until a real isolation adapter exists.
 - Interactive bytes remain local. Headless live output is bounded, redacted, ephemeral, and absent from SQLite, backups, and outboxes.
-- Operational defaults are positive and finite: invitation 48h, invitation exchange 15m, fresh verification/WebAuthn challenge 5m/5m, browser idle/absolute 12h/7d, recovery 15m, host recovery code 10m, OIDC transaction 10m, device pairing/access 10m/10m, device refresh idle/absolute 30d/90d, DPoP clock/replay 5m/10m, permit 30s, authority session/renewal 30s/10s, mutation disconnect grace 15s, heartbeat/offline/lost 10s/30s/90s, WSS frame 64KiB, output chunk/buffer 16KiB/1MiB, reconnect backoff 30s, source refresh grace 5m, diagnostic tail 2MiB/24h.
+- Operational defaults are positive and finite: invitation 48h, invitation exchange 15m, fresh verification/WebAuthn challenge 5m/5m, browser idle/absolute 12h/7d, recovery 15m, host recovery code 10m, OIDC transaction 10m, device/runner pairing and device access 10m, device refresh idle/absolute 30d/90d, DPoP clock/replay 5m/10m, permit 30s, authority session/renewal 30s/10s, mutation disconnect grace 15s, heartbeat/offline/lost 10s/30s/90s, WSS frame 64KiB, WSS runner/run rates 100/50 per second with 200/100 bursts, WSS queue 1,024 frames/1MiB, future clock allowance 30s, output chunk/buffer 16KiB/1MiB, reconnect backoff 30s, source refresh grace 5m, diagnostic tail 2MiB/24h.
 - External/timed evidence remains honestly `IN_PROGRESS` until executed; its absence does not block implementation of subsequent phases.
 - Do not push, merge, release, mutate production integrations, or post public comments without explicit authority.
 
@@ -459,29 +459,31 @@ git commit -m "feat: add project discovery and registry"
 
 ### Task 6: Runner registry, pairing, mappings, and Team Dispatch Exposures
 
-**Requirements:** `FND-004`, `FND-015`, runner prerequisite for `FND-007`.
+**Requirements:** registry portion of `FND-004` and `FND-015`, runner prerequisite for `FND-007`; surface and authority proofs remain `IN_PROGRESS` until Tasks 10 and 13.
 
 **Files:**
 - Create: `src/server/db/migrations/0002_runners.sql`
 - Create: `src/server/db/migrations/0002_runners.verify.ts`
 - Create: `src/server/modules/runners/{contract,runner-registry,exposures}.ts`
+- Modify: `src/shared/contracts/runners.ts`
+- Modify: `src/server/db/{migrate}.ts`
 - Test: `tests/integration/runners/registry.test.ts`
 
 **Interfaces:**
-- Consumes: identity/device credentials, project IDs, connector epochs.
+- Consumes: identity/device credentials and project IDs.
 - Produces: `RunnerRegistry`, pairing, immutable ownership, mappings, policy revisions, heartbeat leases, exact acknowledged exposures, revocation.
 
 - [ ] **Step 1: Write failing runner ownership tests**
 
 ```ts
-test("owner-only runner rejects cross-owner dispatch and stale exposure", async () => {
+test("runner registry preserves ownership and returns stale exposure facts", async () => {
   const f = createRunnerFixture();
   const runner = await f.pair("member_a", "OWNER_ONLY");
-  expect((await f.dispatch(runner, "member_b")).error?.code).toBe("RUNNER_OWNER_REQUIRED");
+  expect((await f.replacePolicy(runner, "member_b", { audience: "TEAM" })).error?.code).toBe("RUNNER_OWNER_REQUIRED");
   const exposure = await f.expose(runner, { mappingRevision: 1, profileVersionId: "profile_1", acknowledgementVersion: 1 });
-  expect((await f.dispatch(runner, "member_b", exposure)).ok).toBe(true);
+  expect((await f.inspectEligibility(runner, exposure)).value?.disposition).toBe("CURRENT");
   await f.replacePolicy(runner, 2);
-  expect((await f.dispatch(runner, "member_b", exposure)).error?.code).toBe("EXPOSURE_STALE");
+  expect((await f.inspectEligibility(runner, exposure)).value?.disposition).toBe("STALE");
 });
 ```
 
@@ -493,28 +495,31 @@ Expected: FAIL because runner schema and registry are missing.
 
 - [ ] **Step 3: Add runner persistence and registry interface**
 
-```sql
-CREATE TABLE runners(id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES members(id), audience TEXT NOT NULL CHECK(audience IN ('OWNER_ONLY','TEAM')), runner_epoch INTEGER NOT NULL, policy_revision INTEGER NOT NULL, heartbeat_at INTEGER, status TEXT NOT NULL CHECK(status IN ('ONLINE','OFFLINE','REVOKED')));
-CREATE TABLE runner_mappings(id TEXT PRIMARY KEY, runner_id TEXT NOT NULL REFERENCES runners(id), project_id TEXT NOT NULL REFERENCES projects(id), local_mapping_key TEXT NOT NULL, revision INTEGER NOT NULL, UNIQUE(runner_id,project_id));
-CREATE TABLE runner_exposures(id TEXT PRIMARY KEY, runner_id TEXT NOT NULL REFERENCES runners(id), mapping_id TEXT NOT NULL REFERENCES runner_mappings(id), profile_version_id TEXT NOT NULL, acknowledgement_version INTEGER NOT NULL, policy_revision INTEGER NOT NULL, revision INTEGER NOT NULL, revoked_at INTEGER);
-CREATE TABLE runner_pairings(id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES members(id), secret_hash BLOB NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER);
-INSERT INTO schema_migrations(version, applied_at) VALUES (2, unixepoch());
-```
+Migration 0002 creates strict, revisioned `runners`, `runner_credentials`, `runner_pairings`, `runner_mappings`, `safe_profile_versions`, `runner_exposure_acknowledgements`, `runner_exposures`, and `runner_revocation_outbox` tables. It enforces immutable owner and acknowledgement rows, hash-only one-time pairing, key-thumbprint-bound runner credentials, `OWNER_ONLY` default, positive runner/policy epochs, bounded concurrency, active mapping uniqueness, exact mapping/profile/policy/security-digest exposure tuples, and nonnegative lifecycle times. It stores server-received heartbeat time but no caller-supplied `ONLINE` status, local path, command, environment, credential cleartext, or connector state.
 
 ```ts
 export interface RunnerRegistry {
-  pair(command: PairRunner): Promise<Result<RegisteredRunner>>;
+  beginPairing(command: BeginRunnerPairing): Promise<Result<RunnerPairingChallenge>>;
+  confirmPairing(command: ConfirmRunnerPairing): Promise<Result<ConfirmedRunnerPairing>>;
+  consumePairing(command: ConsumeRunnerPairing): Promise<Result<RunnerCredentialEnvelope>>;
+  registerMapping(command: RegisterRunnerMapping): Promise<Result<RunnerMapping>>;
+  advertiseProfile(command: AdvertiseSafeProfileVersion): Promise<Result<SafeProfileVersion>>;
+  acknowledgeExposure(command: AcknowledgeTeamExposure): Promise<Result<ExposureAcknowledgement>>;
+  createExposure(command: CreateTeamExposure): Promise<Result<TeamDispatchExposure>>;
   replacePolicy(command: ReplaceRunnerPolicy): Promise<Result<RegisteredRunner>>;
   heartbeat(command: RunnerHeartbeat): Promise<Result<RunnerLeaseView>>;
   revoke(command: RevokeRunner): Promise<Result<RunnerRevocation>>;
+  inspectEligibility(query: InspectRunnerEligibility): Promise<Result<RunnerEligibilityFacts>>;
 }
 ```
+
+Pairing is layered on a current DPoP-bound CLI device session but returns a distinct runner credential and immutable runner owner; a device credential never authenticates WSS as a runner. Registry methods expose exact facts and mutations, not dispatch authorization: `ExecutionAuthority` alone decides whether a dispatcher may launch. Persistence includes runner credentials/key thumbprints, safe profile advertisements, bounded concurrency, append-only acknowledgement content digests, exact exposure tuple revisions, and durable revocation intents. Status is derived from server-received heartbeat time rather than trusted client status. Adding migration 0002 must prove empty-to-v2 and v1-to-v2 upgrades, idempotency, history integrity, and migration rollback. Source-free mappings remain connector-neutral and contain opaque local mapping identifiers only.
 
 - [ ] **Step 4: Verify GREEN**
 
 Run: `bun test src/server/db/migrations/0002_runners.verify.ts tests/integration/runners/registry.test.ts`
 
-Expected: PASS; pairing replay, stale credentials, cross-owner dispatch, exact exposure, acknowledgement refresh, and revocation are enforced.
+Expected: PASS; pairing replay, stale credentials, immutable ownership, exact exposure facts, acknowledgement refresh, and revocation are enforced without duplicating dispatch policy.
 
 - [ ] **Step 5: Commit**
 
@@ -525,10 +530,12 @@ git commit -m "feat: add secure runner registry"
 
 ### Task 7: Typed outbound WSS runner data plane
 
-**Requirements:** `FND-012`; transport portion of `FND-004` and `FND-007`.
+**Requirements:** transport portion of `FND-012`, `FND-004`, and `FND-007`; durable storage/process proofs remain `IN_PROGRESS` until Tasks 9, 10, and 14.
 
 **Files:**
 - Create: `src/server/adapters/wss/{protocol,runner-channel,revocations}.ts`
+- Create: `src/runner/transport/wss-client.ts`
+- Modify: `src/shared/contracts/protocol.ts`
 - Create: `tests/protocol/runner-data-plane.test.ts`
 - Create: `tests/fixtures/runner-channel.ts`
 
@@ -541,10 +548,12 @@ git commit -m "feat: add secure runner registry"
 ```ts
 test("rejects commands, oversized frames, and duplicate messages", async () => {
   const channel = createInMemoryRunnerChannel({ maximumFrameBytes: 65_536 });
-  expect(await channel.receive({ kind: "SHELL", command: "rm -rf /" })).toEqual({ accepted: false, code: "FRAME_KIND_DENIED" });
-  expect(await channel.receive(validFrame({ messageId: "msg_1" }))).toEqual({ accepted: true });
-  expect(await channel.receive(validFrame({ messageId: "msg_1" }))).toEqual({ accepted: false, code: "FRAME_REPLAY" });
-  expect(await channel.receive(validFrame({ payload: "x".repeat(65_537) }))).toEqual({ accepted: false, code: "FRAME_TOO_LARGE" });
+  expect(await channel.receiveText('{"kind":"SHELL","command":"rm -rf /"}')).toEqual({ accepted: false, code: "FRAME_KIND_DENIED" });
+  const wire = encodeRunnerFrame(validFrame({ messageId: "msg_1", sequence: 1 }));
+  expect(await channel.receiveText(wire)).toEqual({ accepted: true });
+  expect(await channel.receiveText(wire)).toEqual({ accepted: false, code: "FRAME_REPLAY" });
+  const oversized = wire.replace("{", `{${" ".repeat(65_537)}`);
+  expect(await channel.receiveText(oversized)).toEqual({ accepted: false, code: "FRAME_TOO_LARGE" });
 });
 ```
 
@@ -557,16 +566,13 @@ Expected: FAIL because runner-channel fixtures and adapters are missing.
 - [ ] **Step 3: Implement the closed port and envelope**
 
 ```ts
-export type RunnerOperation =
-  | Readonly<{ kind: "LAUNCH_ATTEMPT"; attemptId: string; permit: string }>
-  | Readonly<{ kind: "CANCEL_ATTEMPT"; attemptId: string }>
-  | Readonly<{ kind: "EXECUTE_LOCAL_GATE"; gateEvaluationId: string; manifestFingerprint: string }>
-  | Readonly<{ kind: "CANCEL_GATE_EVALUATION"; gateEvaluationId: string }>;
 export interface RunnerControlPort {
-  dispatch(message: Readonly<{ messageId: string; runnerId: string; runId: string; attemptId?: string; issuedAt: number; expiresAt: number; operation: RunnerOperation }>): Promise<Result<Readonly<{ queued: true }>>>;
-  revoke(runnerId: string, runnerEpoch: number): Promise<void>;
+  dispatchCommitted(outboxIds: readonly string[]): Promise<Result<readonly SemanticDeliveryReceipt[]>>;
+  closeStaleConnections(revocation: CommittedRunnerConnectionRevocation): Promise<Result<ConnectionCloseReceipt>>;
 }
 ```
+
+The data plane has authenticated upgrade, `CLIENT_HELLO`/`SERVER_WELCOME` range negotiation, one current connection fence per runner, and separate strict direction-specific envelopes. Each origin assigns a message ID plus monotonically increasing per-connection sequence; actor/runner/epoch come from the authenticated connection, and durable semantic effects retain command/event idempotency across reconnect. Raw UTF-8 bytes are bounded before JSON parsing, binary and compressed application frames are rejected, and time/order/rate/assignment/backpressure checks precede `ExecutionAuthority.execute`. The committed outbox contains only safe permit claims/hash; the signed short-lived capability is reconstructed after commit. Socket send, semantic acknowledgement, and process start remain separate facts. Revocation transport accepts only a committed typed disposition and never infers process termination from a closed socket.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -577,7 +583,7 @@ Expected: PASS; assignment, audience, replay, expiry, size, rate, heartbeat, idl
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/adapters/wss tests/protocol/runner-data-plane.test.ts tests/fixtures/runner-channel.ts
+git add src/shared/contracts/protocol.ts src/server/adapters/wss src/runner/transport/wss-client.ts tests/protocol/runner-data-plane.test.ts tests/fixtures/runner-channel.ts
 git commit -m "feat: add typed runner data plane"
 ```
 
