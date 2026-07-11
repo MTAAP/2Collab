@@ -27,7 +27,7 @@ export function verifyRunnersSchema(database: Database): void {
   const versions = database
     .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
     .all();
-  if (versions.map((row) => row.version).join(",") !== "1,2,3") {
+  if (versions.length < 3 || versions.some((row, index) => row.version !== index + 1)) {
     throw new Error("SCHEMA_MIGRATION_HISTORY_INVALID");
   }
   for (const [type, expected] of [

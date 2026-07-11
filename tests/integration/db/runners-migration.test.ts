@@ -17,7 +17,7 @@ function versionTwoDatabase(): Database {
 }
 
 describe("runner migration", () => {
-  test("migrates empty through v3 idempotently with strict verified schema", () => {
+  test("keeps the v3 runner schema verified after later migrations", () => {
     const database = new Database(":memory:", { strict: true });
     try {
       migrate(database);

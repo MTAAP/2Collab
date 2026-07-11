@@ -8,9 +8,11 @@ import {
   RUNNER_TABLES,
   RUNNER_TRIGGERS,
 } from "./migrations/0003_runners.verify.ts";
+import runsAuthorityMigration from "./migrations/0004_runs_authority.sql" with { type: "text" };
+import { verifyRunsAuthoritySchema } from "./migrations/0004_runs_authority.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-const LATEST_SCHEMA_VERSION = 3;
+const LATEST_SCHEMA_VERSION = 4;
 const FOUNDATION_TABLES = [
   "audit_events",
   "auth_proxy_replays",
@@ -108,6 +110,9 @@ function validateClaimedSchema(database: Database, version: number): void {
       throw new Error("SCHEMA_INTEGRITY_INVALID");
     }
   }
+  if (version >= 4) {
+    verifyRunsAuthoritySchema(database);
+  }
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -156,6 +161,10 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 2) {
       database.exec(runnersMigration);
+      currentVersion = 3;
+    }
+    if (currentVersion === 3) {
+      database.exec(runsAuthorityMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);

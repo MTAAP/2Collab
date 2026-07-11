@@ -13,13 +13,7 @@ import type {
   ProjectId,
   RegisteredRunnerId,
 } from "./ids.ts";
-import {
-  CommitShaSchema,
-  IdentifierSchema,
-  InstantSchema,
-  RevisionSchema,
-  Sha256Schema,
-} from "./ids.ts";
+import { CommitShaSchema, IdentifierSchema, InstantSchema, Sha256Schema } from "./ids.ts";
 import type { RepositoryAssurance, RepositoryMode } from "./runners.ts";
 import { GitRefSchema, RepositoryRelativePathSchema } from "./runners.ts";
 
@@ -171,8 +165,9 @@ export const AttemptEventSchema = z.discriminatedUnion("kind", [
 ]);
 
 const SafeSummarySchema = z.string().min(1).max(2_048);
+const PositiveRevisionSchema = z.number().int().positive();
 const ConnectorEpochsSchema = z
-  .record(IdentifierSchema, RevisionSchema)
+  .record(IdentifierSchema, PositiveRevisionSchema)
   .refine((epochs) => Object.keys(epochs).length <= 32, "At most 32 connector epochs are allowed");
 
 export const EvidenceInputSchema = z.discriminatedUnion("kind", [
@@ -213,7 +208,7 @@ export const EvidenceInputSchema = z.discriminatedUnion("kind", [
       repositoryRevision: CommitShaSchema,
       manifestFingerprint: Sha256Schema,
       outcome: z.enum(["PASSED", "FAILED", "TIMED_OUT", "CANCELLED"]),
-      evidenceRevision: RevisionSchema,
+      evidenceRevision: PositiveRevisionSchema,
     })
     .strict(),
   z
@@ -248,7 +243,7 @@ export const CoordinationRecordViewSchema = z
     id: IdentifierSchema,
     projectId: IdentifierSchema,
     title: z.string().min(1).max(160),
-    revision: RevisionSchema,
+    revision: PositiveRevisionSchema,
     runIds: z.array(IdentifierSchema).max(1_024),
   })
   .strict();
@@ -268,7 +263,7 @@ export const AttemptViewSchema = z
       "TIMED_OUT",
       "LOST",
     ]),
-    revision: RevisionSchema,
+    revision: PositiveRevisionSchema,
   })
   .strict();
 
@@ -303,14 +298,14 @@ export const CancellationTerminationSchema = z.discriminatedUnion("kind", [
 const AuthoritySessionBaseSchema = z.object({
   id: IdentifierSchema,
   attemptId: IdentifierSchema,
-  fence: RevisionSchema,
+  fence: PositiveRevisionSchema,
   issuedAt: InstantSchema,
   expiresAt: InstantSchema,
   repositoryAssurance: z.enum(["ADVISORY", "ENFORCED"]),
   connectorEpochs: ConnectorEpochsSchema,
 });
 const MutationLeaseSchema = z
-  .object({ leaseId: IdentifierSchema, fence: RevisionSchema, expiresAt: InstantSchema })
+  .object({ leaseId: IdentifierSchema, fence: PositiveRevisionSchema, expiresAt: InstantSchema })
   .strict();
 
 export const AuthoritySessionViewSchema = z.discriminatedUnion("repositoryMode", [
@@ -352,7 +347,7 @@ export const RunViewSchema = z
     goal: z.string().min(1).max(16_384),
     repositoryMode: z.enum(["MUTATING", "INSPECT_ONLY"]),
     repositoryAssurance: z.enum(["ADVISORY", "ENFORCED"]),
-    revision: RevisionSchema,
+    revision: PositiveRevisionSchema,
     attemptIds: z.array(IdentifierSchema).max(1_024),
   })
   .strict();
