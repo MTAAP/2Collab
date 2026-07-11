@@ -1,5 +1,7 @@
 # Outline Evidence
 
+> Exit when two members can co-edit an Outline document through Collab with correct native attribution; an agent can iterate only inside an exact grant; concurrent external edits create a conflict proposal; revoked member and bot grants stop new external operations; and no raw document body appears in run logs, backups outside encrypted connector storage, or runner outboxes.
+
 Status: `NOT_RUN`
 
 | Requirement | Build | Git revision | Outline workspace/document revision | Collab run/grant/proposal/audit IDs | Journey/command | Result | Reviewer | Blocker |

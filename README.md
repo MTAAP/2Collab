@@ -2,7 +2,7 @@
 
 2Collab is a self-hosted coordination surface for solo developers and 1-3 person teams working with local coding agents. The shared service coordinates work, authority, evidence, and integrations; trusted developer machines execute agent runtimes locally.
 
-This repository is an implementation-ready foundation, not a production-complete 2Collab release. The executable baseline proves the Bun, Hono, React, Vite, Tailwind, shadcn/ui, test, and container toolchain while the product behavior remains specified in the canonical documentation.
+This repository contains substantial local implementations of Foundation, GitHub coordination, Outline collaboration, and bounded automation. It is not yet a production-complete v1: local tests and fixture journeys are implementation proof, while the two-machine/seven-day Foundation observation and provider-backed GitHub, Outline, and real-PR automation exits remain external acceptance obligations.
 
 ## Start here
 
@@ -24,12 +24,12 @@ The [Product Spec](docs/product/PRODUCT-SPEC.md) is canonical. Derived guidance,
 
 ## Repository shape
 
-- `src/server` contains the Hono service entry point and API shell.
+- `src/server` contains the import-safe Hono service, coordination modules, connector adapters, authority enforcement, and durable workflow services.
 - `src/cli` contains the local `collab` command entry point.
 - `src/shared` contains stable cross-entry-point types and metadata.
 - `src/web` contains the React application and source-owned shadcn/ui components.
 - `docs` contains the canonical specification, derived architecture, accepted decisions, UX evidence, acceptance criteria, and implementation plans.
-- `tests` contains unit, integration, and browser smoke tests.
+- `tests` contains unit, integration, protocol, runner, drill, and browser journeys. Passing fixtures never promote a live acceptance row.
 - `scripts` contains portable Bun-based contributor and release checks.
 
 ## Prerequisites
@@ -62,13 +62,20 @@ bun run audit:public
 
 `bun run build:cli` produces a binary for the current operating system and architecture. Do not treat that host-native output as a portable release artifact.
 
+Evidence validators are available through `bun run evidence:verify`, `bun run github:evidence:validate`, `bun run outline:evidence:validate`, and `bun run automation:evidence:validate`. Live promotion additionally requires a clean, exact-revision evidence envelope with artifact, lockfile, manifest, report, and reviewer provenance.
+
 ## Container development
 
-Copy the example environment and replace the session secret with at least 32 random characters:
+The exact configuration gate is self-contained and does not require secrets:
+
+```bash
+docker compose config --quiet
+```
+
+Before starting the container, copy the example environment, replace the session secret with at least 32 random characters, and create the configured secret files. Empty/default configuration values make inspection possible but remain invalid at runtime:
 
 ```bash
 cp .env.example .env
-docker compose config --quiet
 docker compose up --build
 ```
 
@@ -93,4 +100,3 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before changi
 ## License
 
 2Collab is available under the [MIT License](LICENSE).
-

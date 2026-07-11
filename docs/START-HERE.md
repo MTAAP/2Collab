@@ -12,11 +12,13 @@ This is the maintainer and implementation-agent entry point for 2Collab.
 6. [Master Implementation Plan](plans/00-MASTER-IMPLEMENTATION-PLAN.md) and its four phase plans define delivery order.
 7. [Implementation Handoff](../agent_docs/IMPLEMENT.md) is the standalone execution brief for a fresh agent.
 
-## Repository Baseline
+## Current implementation and acceptance state
 
-The checked-in executable is intentionally small. It proves the Bun/Hono server, React/Vite/shadcn web shell, local CLI, tests, container, and public-repository controls. It does not contain fake authentication, fake connectors, an in-memory product database, demo runs, or placeholder workflow behavior.
+The checked-in executable now contains substantial implementations for all four delivery slices: Foundation, GitHub coordination, Outline collaboration, and bounded automation. The implementation includes durable server modules, shared ExecutionAuthority consumption, local runner/runtime adapters, connector projections and guarded mutations, typed executable workflows, CLI/MCP/HTTP surfaces, and browser journeys.
 
-Start product work with Phase 1 and a failing test. Do not infer product behavior from the scaffold page.
+Implementation coverage is not acceptance. The Foundation two-machine/seven-day observation and the approved provider-backed GitHub, Outline, and real-pull-request automation journeys remain external obligations. Consult `docs/evidence/`; local fixtures, UI state, and historical command summaries cannot be recorded as live `PASS`.
+
+New evidence must use the shared clean-build envelope, name the exact repository revision and artifact/lock/manifest digests, include non-synthetic test-report provenance with zero skips, identify reviewers, and retain the canonical phase exit criterion verbatim.
 
 ## Required Verification
 

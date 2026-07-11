@@ -12,9 +12,9 @@ services:
       PORT: 3210
       DATA_DIR: /data
       BACKUP_DIR: /backups
-      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:?WEBAUTHN_RP_ID is required}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3210}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       DEPLOYMENT_MASTER_KEY_FILE: /run/secrets/deployment_master_key
       BOOTSTRAP_SECRET_FILE: /run/secrets/bootstrap_secret
     secrets:
@@ -43,11 +43,10 @@ services:
 
 secrets:
   deployment_master_key:
-    file: ${DEPLOYMENT_MASTER_KEY_FILE:?DEPLOYMENT_MASTER_KEY_FILE is required}
+    file: ${DEPLOYMENT_MASTER_KEY_FILE:-./deploy/secrets/deployment_master_key}
   bootstrap_secret:
-    file: ${BOOTSTRAP_SECRET_FILE:?BOOTSTRAP_SECRET_FILE is required}
+    file: ${BOOTSTRAP_SECRET_FILE:-./deploy/secrets/bootstrap_secret}
 
 volumes:
   collab-data:
   collab-backups:
-

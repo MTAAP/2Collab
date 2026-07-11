@@ -1,3 +1,10 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import {
+  PHASE_EXIT_QUOTES,
+  validateEvidenceEnvelope,
+} from "../../scripts/evidence/evidence-envelope.ts";
+
 export const OUTLINE_REQUIREMENTS = [
   "OUT-001",
   "OUT-002",
@@ -142,10 +149,61 @@ type PlaywrightSuite = Readonly<{
 
 export function validateLivePlaywrightReport(
   input: unknown,
+  expected?: Readonly<{ buildId: string; workspaceId: string; approvalId: string }>,
 ): Readonly<{ valid: boolean; reason?: string }> {
   if (!input || typeof input !== "object")
     return { valid: false, reason: "PLAYWRIGHT_REPORT_INVALID" };
-  const report = input as { suites?: readonly PlaywrightSuite[]; errors?: readonly unknown[] };
+  const wrapper = input as {
+    schemaVersion?: unknown;
+    report?: { suites?: readonly PlaywrightSuite[]; errors?: readonly unknown[] };
+    envelope?: unknown;
+    journey?: unknown;
+  };
+  if (wrapper.schemaVersion !== 2 || !wrapper.report || !expected)
+    return { valid: false, reason: "LIVE_OUTLINE_EVIDENCE_STRUCTURE_INVALID" };
+  const envelope = validateEvidenceEnvelope(wrapper.envelope, {
+    phase: "OUTLINE",
+    buildId: expected.buildId,
+    canonicalExitQuote: PHASE_EXIT_QUOTES.OUTLINE,
+  });
+  if (!envelope.valid) return { valid: false, reason: envelope.reasons[0] };
+  const journeySchema = z
+    .object({
+      source: z.literal("PROVIDER"),
+      journeyId: z.string().min(3),
+      workspaceId: z.string().min(3),
+      approvalId: z.string().min(3),
+      memberIds: z.array(z.string().min(3)).length(2),
+      providerResourceIds: z.array(z.string().min(3)).min(1),
+      collabResourceIds: z.array(z.string().min(3)).min(1),
+      auditEventIds: z.array(z.string().min(3)).min(1),
+      providerRevisions: z.array(z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/)).min(1),
+      completedAt: z.string().datetime({ offset: true }),
+    })
+    .strict();
+  const journey = journeySchema.safeParse(wrapper.journey);
+  if (!journey.success) return { valid: false, reason: "LIVE_OUTLINE_JOURNEY_INVALID" };
+  if (
+    journey.data.workspaceId !== expected.workspaceId ||
+    journey.data.approvalId !== expected.approvalId
+  )
+    return { valid: false, reason: "LIVE_OUTLINE_TARGET_MISMATCH" };
+  for (const values of [
+    journey.data.memberIds,
+    journey.data.providerResourceIds,
+    journey.data.collabResourceIds,
+    journey.data.auditEventIds,
+  ])
+    if (new Set(values).size !== values.length)
+      return { valid: false, reason: "LIVE_OUTLINE_IDENTIFIER_DUPLICATE" };
+  const report = wrapper.report;
+  const reportDigest = createHash("sha256").update(JSON.stringify(report)).digest("hex");
+  if (
+    !envelope.envelope?.testReports.some(
+      (provenance) => provenance.runner === "PLAYWRIGHT" && provenance.sha256 === reportDigest,
+    )
+  )
+    return { valid: false, reason: "LIVE_OUTLINE_REPORT_PROVENANCE_MISMATCH" };
   const specs: PlaywrightSpec[] = [];
   const visit = (suite: PlaywrightSuite) => {
     specs.push(...(suite.specs ?? []));

@@ -4,11 +4,15 @@ Local fixtures and live provider-backed evidence are separate proof classes. A l
 
 | Requirement | Proof class | Status | Required evidence |
 |---|---|---|---|
-| AUT-001–AUT-013 | LOCAL | PASS | Build `7989025`; 70 scoped tests passed; production build and public audit passed |
-| AUT-014 local safety paths | LOCAL | PASS | Build `7989025`; four Chromium journeys passed, including clean/major routing and explicit live-blocked state; restart, duplicate-event, deadline, and no-parked-process drills passed |
-| AUT-014 canonical dogfood | LIVE | BLOCKED | Approved disposable PR URL, exact head SHA, live Claude and Codex Run IDs, template/preset/workflow IDs, gate/result IDs, and sanitized audit IDs |
+| AUT-001–AUT-013 | LOCAL | LOCAL_PROOF_AVAILABLE | Historical scoped results exist, but no clean-build evidence envelope and reviewed test-report provenance are attached yet |
+| AUT-014 local safety paths | LOCAL | LOCAL_PROOF_AVAILABLE | Fixture and UI paths exercise local behavior; React toggles and fixture journeys are not runtime proof |
+| AUT-014 canonical dogfood | LIVE | IN_PROGRESS_EXTERNAL | Approved disposable PR URL, exact head SHA, live Claude and Codex Run IDs, template/preset/workflow IDs, gate/result IDs, and sanitized audit IDs remain required |
 
-## Captured local run
+## Canonical Product Spec exit criterion
+
+> Exit when the team dogfoods **Implementation -> parallel Claude and Codex review -> conditional Fix -> Terminal** on a real pull request with different runtimes or models per step; validation catches missing terminal and fix paths; restart and duplicate events create no duplicate run; pause and waiting do not extend the deadline; and no process remains parked for a human decision.
+
+## Historical local run (not promoted evidence)
 
 Build: `7989025`
 
@@ -31,7 +35,7 @@ The repository-wide test command also ran during this implementation wave: 570 t
 
 ## Status rules
 
-- `LOCAL PASS` requires the named command to run against the recorded committed build.
+- `LOCAL_PROOF_AVAILABLE` means a named test exists or a historical result was recorded; it is not accepted evidence until a clean-build envelope, report digest, and review provenance bind it to the frozen build.
 - `LIVE PASS` requires the named disposable-resource journey to run with explicit authority.
 - `BLOCKED` is not `SKIPPED` and is never inferred as success.
 - Strict fixtures, mocks, screenshots, or a healthy build cannot satisfy a live row.
