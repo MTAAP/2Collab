@@ -1157,6 +1157,10 @@ git commit -m "feat: add bounded offline continuity"
 **Files:**
 - Create: `src/server/operations/{backup,restore,key-rotation}.ts`
 - Create: `src/server/commands/{backup,restore,key-rotation,auth-recover}.ts`
+- Create: `src/server/command.ts`
+- Modify: `src/server/db/migrations/0004_foundation_operations.sql`
+- Modify: `src/server/db/migrations/0004_foundation_operations.verify.ts`
+- Modify: `src/shared/environment.ts`
 - Test: `tests/drills/backup-restore.test.ts`
 
 **Interfaces:**
@@ -1188,18 +1192,42 @@ Expected: FAIL because backup and restore operations do not exist.
 - [ ] **Step 3: Implement authenticated manifest and isolated restore ordering**
 
 ```ts
-export type BackupManifest = Readonly<{ format: "2COLLAB_BACKUP_V1"; schemaVersion: 4; keyId: string; databaseSha256: string; createdAt: number }>;
+export type BackupManifest = Readonly<{
+  format: "2COLLAB_BACKUP_V1";
+  manifestVersion: 1;
+  backupId: string;
+  deploymentFingerprint: string;
+  sourceAuthorityIncarnation: string;
+  productVersion: string;
+  schemaVersion: 4;
+  migrationDigest: string;
+  algorithm: "AES_256_GCM_CHUNKED_V1";
+  keyId: string;
+  chunkBytes: number;
+  plaintextBytes: number;
+  plaintextSha256: string;
+  ciphertextBytes: number;
+  ciphertextSha256: string;
+  createdAt: number;
+}>;
 export async function restoreBackup(input: RestoreInput): Promise<Result<RestoreResult>> {
-  if (input.listenersOpen) return err("RESTORE_REQUIRES_ISOLATION", "Restore requires closed network listeners.", "NEVER");
+  const offline = await input.offlineCommand.acquireExclusiveDataLock();
+  if (!offline.ok) return offline;
   const verified = await authenticateAndDecrypt(input.backup, input.masterKey);
   if (!verified.ok) return verified;
   if (verified.value.manifest.schemaVersion !== 4) return err("BACKUP_SCHEMA_MISMATCH", "Backup schema is incompatible.", "NEVER");
-  await replaceDatabaseAtomically(input.targetPath, verified.value.databaseBytes);
-  await invalidateSessionsAndIncrementEpochs(input.targetPath);
-  await requireConnectorReview(input.targetPath);
+  const staged = await stageAndValidateDatabase(offline.value, verified.value.databaseBytes);
+  await invalidateAuthorityAndInstallFreshIncarnation(staged);
+  await requireConnectorReview(staged);
+  await auditAndRevalidateStaging(staged, verified.value.manifest);
+  await promoteStagedDatabaseAtomically(offline.value, staged);
   return ok({ schemaVersion: 4, connectorReview: "REQUIRED" });
 }
 ```
+
+The `collab-server` command root has mutually exclusive listener and offline-operation modes; restore cannot be authorized by a caller-supplied boolean and never constructs network/external workers. Backups use a SQLite-consistent snapshot, restrictive temp files, fsync+atomic rename, independently reopen/decrypt/integrity-verify before success, and retain the previous verified backup on failure. The strict canonical authenticated manifest and chunked AES-256-GCM/HKDF key hierarchy follow the Product Spec. Master key comes from a secret file outside data/backup paths.
+
+Migration 0004 adds deployment authority incarnation/restore marker, versioned wrapped credential-class keys, constrained credential algorithm/key-version metadata, resumable rotation state, and safe backup/retention audit metadata. Restore invalidates every session/challenge/pairing/capability/permit/authority/lease/operation proof, advances epochs, holds queued external writes, and preserves immutable history before staging promotion. Credential-class rotation rewrites only its class and activates after full verification; master-key rotation rewraps data keys and accounts for retained backups. Retention is finite but never deletes the sole verified usable backup.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -1210,7 +1238,7 @@ Expected: PASS for authentication tag, manifest digest, wrong/missing key, schem
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/operations src/server/commands tests/drills/backup-restore.test.ts
+git add src/shared/environment.ts src/server/db/migrations/0004_foundation_operations.sql src/server/db/migrations/0004_foundation_operations.verify.ts src/server/operations src/server/commands src/server/command.ts tests/drills/backup-restore.test.ts
 git commit -m "feat: add authenticated recovery operations"
 ```
 

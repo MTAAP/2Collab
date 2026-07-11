@@ -1215,6 +1215,10 @@ The server stores coordination state and connector credentials, not developer gi
 
 The documented restore drill starts in an isolated target, verifies backup integrity and schema compatibility before opening network listeners, restores with an explicitly supplied master key, invalidates server sessions and short-lived capabilities, increments connector and runner authority epochs, and requires owners to review or reauthorize external connectors before queued mutations resume. Losing the encryption key is reported as unrecoverable credential loss rather than bypassed; restoring an old backup cannot resurrect a revoked token or permit. Key rotation, backup retention and deletion, restore time, and connector reauthorization outcomes are audited. Local runner communication uses the paired runner identity, sender-constrained short-lived access tokens, and short-lived Run Capabilities over the outbound WSS channel. Connector webhooks and outbox events are idempotent so retries are safe.
 
+Restore is an offline command mode that never constructs listeners, schedulers, webhook handlers, connector workers, or runner transports and holds an exclusive data-directory lock. It authenticates and decrypts into restrictive staging, validates SQLite integrity/foreign keys/migration and application invariants, installs a cryptographically fresh deployment authority incarnation, invalidates all sessions/capabilities/permits/leases/operation authorizations, advances runner and connector epochs, marks connectors `REVIEW_REQUIRED`, writes the restore audit, and revalidates staging before atomic promotion. The previous target remains active until that safe staged database is fsynced and promoted; normal startup refuses an incomplete restore marker. The authority incarnation is bound into every replayable credential/capability so restoring onto a fresh machine cannot collide with an integer epoch from later than the backup.
+
+Backup payloads use versioned chunked AES-256-GCM with unique random 96-bit nonces and an HKDF-derived, domain-separated backup key from the external deployment master key. A canonical authenticated manifest binds format/build/schema/migration digest, backup and deployment fingerprints, source authority incarnation, key ID, algorithm/chunk parameters, lengths, digests, and creation time. The master key is read from a restrictive secret file outside data and backup volumes and is never supplied on argv or persisted. Versioned per-credential-class data keys are wrapped by the master key; credential row identity/class/key version/revision form AEAD associated data. Class-key rotation is resumable and isolated; master-key rotation rewraps class keys and preserves access to retained verified backups until they are deliberately re-encrypted or retired.
+
 ### Operational Bounds V1
 
 V1 ships finite defaults for every security-sensitive lifetime and buffer. Deployments may configure them only within positive validated ranges, and an Agent Run snapshots every effective bound that governs it so a later configuration change cannot widen work already in progress.
@@ -1246,6 +1250,7 @@ V1 ships finite defaults for every security-sensitive lifetime and buffer. Deplo
 | Runner safe context cache | 64 MiB total, 4 MiB per run, 7 days |
 | Runner durable semantic outbox | 10,000 events and 64 MiB, with 10% reserved for terminal/checkpoint events |
 | Accepted runner-event dedup retention | 90 days |
+| Verified backup retention | 30 days, 10 backups, and 10 GiB; never prune the sole verified backup |
 | Source-unavailable automatic refresh grace | 5 minutes |
 | Encrypted local diagnostic tail | 2 MiB and 24 hours |
 | Resolved Inbox retention | 90 days |
