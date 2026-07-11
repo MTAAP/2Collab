@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 export const COORDINATION_MAPPING_TABLES = [
   "github_source_aliases",
   "coordination_record_aliases",
+  "coordination_coalescing_permits",
 ] as const;
 
 export function verifyCoordinationSourceMappingSchema(database: Database): void {
@@ -18,6 +19,10 @@ export function verifyCoordinationSourceMappingSchema(database: Database): void 
   for (const trigger of [
     "coordination_record_alias_immutable",
     "coordination_record_alias_no_chain",
+    "agent_run_provenance_immutable",
+    "coordination_source_reference_immutable",
+    "mutation_guard_identity_immutable",
+    "mutation_guard_override_immutable",
   ]) {
     if (
       !database

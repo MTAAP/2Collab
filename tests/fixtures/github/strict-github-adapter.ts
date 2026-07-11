@@ -314,6 +314,14 @@ export class StrictGitHubAdapter implements GitHubPort {
       itemCount: supported.length,
       unsupportedRepositoryItems: project.items.length - supported.length,
       fields: [],
+      items: supported.map((item) => ({
+        itemId: item.itemId,
+        content: {
+          kind: item.kind,
+          repositoryId: item.repositoryId,
+          number: item.number,
+        },
+      })),
     };
   }
 
@@ -345,7 +353,12 @@ export class StrictGitHubAdapter implements GitHubPort {
     reference: GitHubReference,
   ): Promise<Result<Observed<GitHubProjection>>> {
     const allowed = this.scope(scope, reference, {
-      name: reference.kind === "PROJECT" ? "organization_projects" : "issues",
+      name:
+        reference.kind === "PROJECT"
+          ? "organization_projects"
+          : reference.kind === "PULL_REQUEST"
+            ? "pull_requests"
+            : "issues",
       level: "read",
     });
     if (!allowed.ok) return allowed;
@@ -609,6 +622,7 @@ export class StrictGitHubAdapter implements GitHubPort {
           connectorEpoch: scope.connectorEpoch,
           kind: "MUTATION_CONFIRMATION",
         },
+        consistency: "RESIDUAL_RACE",
       },
     };
   }

@@ -7,6 +7,7 @@ export type PublishedGitCheckReference = Readonly<{
   commitSha: string;
   scopeDigest: string;
   requiredCheckName: string;
+  acceptableConclusions?: readonly GitHubCheckObservation["conclusion"][];
 }>;
 export type GitHubCheckEvidence = Readonly<{
   checkRunId: string;
@@ -33,6 +34,15 @@ export function evaluateCheck(
       error: {
         code: "GATE_EVALUATION_STALE",
         message: "GitHub check observation is stale.",
+        retry: "REFRESH",
+      },
+    };
+  if (!(published.acceptableConclusions ?? ["SUCCESS"]).includes(observation.conclusion))
+    return {
+      ok: false,
+      error: {
+        code: "GATE_CHECK_FAILED",
+        message: "GitHub check conclusion is not accepted.",
         retry: "REFRESH",
       },
     };

@@ -21,6 +21,8 @@ import type { Result } from "../shared/contracts/result.ts";
 import type { GitHubWebhookRouteDependencies } from "./adapters/http/routes/connectors-github.ts";
 import type { GitHubIssueRouteDependencies } from "./adapters/http/routes/github-issues.ts";
 import type { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
+import type { createInboxRoutes } from "./adapters/http/routes/inbox.ts";
+import type { PublicRunOperations } from "./modules/public-surface/contract.ts";
 
 export type ServerResources = Readonly<{
   docsRoot?: string;
@@ -29,6 +31,14 @@ export type ServerResources = Readonly<{
     issues: GitHubIssueRouteDependencies;
     planning: Parameters<typeof createGitHubPlanningRoutes>[0];
   }>;
+  inbox?: Parameters<typeof createInboxRoutes>[0];
+  foundation?: Readonly<{
+    authentication: PublicAuthenticationPort;
+    rateLimits: PublicRateLimitPort;
+    runs: PublicRunOperations;
+    mcp?: (request: Request) => Promise<Response>;
+  }>;
+  startup?: () => Promise<void> | void;
   webRoot?: string;
 }>;
 
@@ -146,17 +156,21 @@ export async function createServerDependencies(
   const configuredOrigin = environment.publicBaseUrl;
   const dependencies: FoundationHttpDependencies = {
     configuredOrigin,
-    authentication: notImplementedAuthentication(),
-    rateLimits: allowAllRateLimits(),
-    runs: createStubRunOperations(),
+    authentication: resources.foundation?.authentication ?? notImplementedAuthentication(),
+    rateLimits: resources.foundation?.rateLimits ?? allowAllRateLimits(),
+    runs: resources.foundation?.runs ?? createStubRunOperations(),
+    mcp: resources.foundation?.mcp,
   };
   const app = createApp(dependencies, {
     docsRoot: resources.docsRoot,
     githubWebhooks: resources.github?.webhooks,
     githubIssues: resources.github?.issues,
     githubPlanning: resources.github?.planning,
+    inbox: resources.inbox,
     webRoot: resources.webRoot,
   });
 
-  return createProductionServer(environment, app);
+  const server = await createProductionServer(environment, app);
+  await resources.startup?.();
+  return server;
 }

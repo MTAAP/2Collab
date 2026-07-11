@@ -136,10 +136,21 @@ const ProjectProjectionSchema = z
             id: GitHubNodeIdSchema,
             name: GitHubNameSchema,
             dataType: z.string().min(1).max(64),
+            optionIds: z.array(GitHubNodeIdSchema).max(256),
           })
           .strict(),
       )
       .max(100),
+    items: z
+      .array(
+        z
+          .object({
+            itemId: GitHubNodeIdSchema,
+            content: GitHubWorkItemReferenceSchema,
+          })
+          .strict(),
+      )
+      .max(1_000),
   })
   .strict();
 const ProjectItemProjectionSchema = z

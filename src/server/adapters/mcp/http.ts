@@ -3,12 +3,20 @@ import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import type { PublicRunOperations } from "../../modules/public-surface/contract.ts";
 import { createPublicMcpServer } from "./server.ts";
+import type { GitHubMutation, GitHubProjection } from "../../../shared/contracts/github.ts";
+import type { ExactRevisionMutation, Observed } from "../../modules/connectors/contract.ts";
 
 type Dependencies = Readonly<{
   authentication: Readonly<{
     authenticateDevice(request: Request): Promise<Result<MemberActor>>;
   }>;
   runs: PublicRunOperations;
+  github?: Readonly<{
+    mutate(
+      actor: MemberActor,
+      command: ExactRevisionMutation<GitHubMutation>,
+    ): Promise<Result<Observed<GitHubProjection>>>;
+  }>;
 }>;
 
 export function createMcpHttpHandler(dependencies: Dependencies) {
@@ -33,6 +41,7 @@ export function createMcpHttpHandler(dependencies: Dependencies) {
     const server = createPublicMcpServer({
       actor: authenticated.value,
       runs: dependencies.runs,
+      github: dependencies.github,
     });
     await server.connect(transport);
     return transport.handleRequest(request);

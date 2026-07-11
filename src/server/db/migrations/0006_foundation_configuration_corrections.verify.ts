@@ -37,6 +37,8 @@ const EXPECTED_COLUMNS: Readonly<
 
 const FOUNDATION_CONFIGURATION_SCHEMA_SHA256 =
   "e2abf315beb4aaf95a8527a30b84eb0c4f9bb87e84f1097d858c6e3c5dc83b4c";
+const COALESCING_FOUNDATION_CONFIGURATION_SCHEMA_SHA256 =
+  "681651cc5f76479f002298af08469922f656d7085b0accc5ff80e60fe653fd34";
 
 function names(database: Database, type: "index" | "table" | "trigger"): Set<string> {
   return new Set(
@@ -95,7 +97,13 @@ export function verifyFoundationConfigurationCorrectionsSchema(database: Databas
   const schemaDigest = new Bun.CryptoHasher("sha256")
     .update(JSON.stringify(canonicalObjects))
     .digest("hex");
-  if (schemaDigest !== FOUNDATION_CONFIGURATION_SCHEMA_SHA256) {
+  if (
+    schemaDigest !== FOUNDATION_CONFIGURATION_SCHEMA_SHA256 &&
+    !(
+      (versions.at(-1) ?? 0) >= 8 &&
+      schemaDigest === COALESCING_FOUNDATION_CONFIGURATION_SCHEMA_SHA256
+    )
+  ) {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
   if (

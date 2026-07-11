@@ -56,6 +56,7 @@ export type Observed<T> = Readonly<{
   sourceUpdatedAt?: number;
   freshness: "FRESH" | "STALE" | "UNAVAILABLE" | "REDACTED";
   provenance: ObservationProvenance;
+  consistency?: "ATOMIC" | "RESIDUAL_RACE";
 }>;
 
 export type EphemeralObserved<T> = Readonly<{
@@ -144,6 +145,7 @@ export function ObservedSchema<T extends z.ZodType>(valueSchema: T) {
       sourceUpdatedAt: InstantSchema.optional(),
       freshness: z.enum(["FRESH", "STALE", "UNAVAILABLE", "REDACTED"]),
       provenance: ObservationProvenanceSchema,
+      consistency: z.enum(["ATOMIC", "RESIDUAL_RACE"]).optional(),
     })
     .strict();
 }
