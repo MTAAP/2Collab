@@ -100,7 +100,7 @@ test("one typed major finding launches exactly one Fix Agent Run", async () => {
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(command);

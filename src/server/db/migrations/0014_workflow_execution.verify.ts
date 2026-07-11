@@ -7,6 +7,8 @@ const TABLES = [
   "workflow_event_receipts",
   "workflow_start_receipts",
   "workflow_join_states",
+  "workflow_cycle_edge_counters",
+  "workflow_cycle_counters",
   "workflow_decisions",
   "workflow_cancellation_outbox",
   "workflow_control_receipts",

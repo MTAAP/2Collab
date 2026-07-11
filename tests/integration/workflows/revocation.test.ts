@@ -42,7 +42,7 @@ test("Foundation member revocation durably waits and cancels active child runs",
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(startCommand);

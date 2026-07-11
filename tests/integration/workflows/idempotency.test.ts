@@ -22,7 +22,7 @@ test("duplicate starts and terminal events cannot launch twice", async () => {
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   expect(await engine.start(startCommand)).toEqual(await engine.start(startCommand));
@@ -66,7 +66,7 @@ test("a contract-invalid result leaves the durable occurrence active", async () 
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(startCommand);

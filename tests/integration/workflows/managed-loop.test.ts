@@ -5,8 +5,11 @@ import migration15 from "../../../src/server/db/migrations/0015_gates_telemetry.
 };
 import {
   advanceManagedLoop,
+  authorizeManagedLoopIteration,
   createManagedLoopStore,
 } from "../../../src/server/modules/workflows/managed-loops.ts";
+import type { AuthorizeAttempt } from "../../../src/shared/contracts/commands.ts";
+import type { ExecutionAuthority } from "../../../src/shared/contracts/execution-authority.ts";
 
 test("failed starts and lost attempts consume the same immutable maximum", () => {
   const base = {
@@ -138,5 +141,57 @@ test("the loop deadline cannot be disabled or extended", () => {
   expect(advanceManagedLoop(state, { kind: "REQUEST_NEXT", observedAt: 500 })).toMatchObject({
     ok: false,
     error: { code: "WORKFLOW_DEADLINE_EXCEEDED" },
+  });
+});
+
+test("every managed-loop iteration resolves fresh authority and fails closed when unavailable", async () => {
+  const command = {
+    kind: "AUTHORIZE_ATTEMPT",
+    idempotencyKey: "loop_iteration_1",
+    actor: {
+      kind: "SCHEDULER",
+      originalDispatcherId: "member_1",
+      workflowExecutionId: "workflow_1",
+    },
+    runId: "run_1",
+    expectedRunRevision: 1,
+    cause: { kind: "MANAGED_LOOP", iteration: 1 },
+    execution: {
+      runnerId: "runner_1",
+      expectedRunnerEpoch: 1,
+      projectMappingRevision: 1,
+      profileVersionId: "profile_1",
+      expectedProfileVersion: 1,
+      host: "NATIVE",
+      interaction: "HEADLESS",
+    },
+  } as AuthorizeAttempt;
+  const executedBy: number[] = [];
+  let resolution = 0;
+  const provider = {
+    resolveCurrentAuthority: () => {
+      resolution += 1;
+      const identity = resolution;
+      return {
+        execute: async () => {
+          executedBy.push(identity);
+          return { ok: false, error: { code: "TEST", message: "Test.", retry: "NEVER" } };
+        },
+      } as unknown as ExecutionAuthority;
+    },
+  };
+  await authorizeManagedLoopIteration(provider, command);
+  await authorizeManagedLoopIteration(provider, {
+    ...command,
+    idempotencyKey: "loop_iteration_2" as never,
+    cause: { kind: "MANAGED_LOOP", iteration: 2 },
+  });
+  expect(executedBy).toEqual([1, 2]);
+
+  expect(
+    await authorizeManagedLoopIteration({ resolveCurrentAuthority: () => null }, command),
+  ).toMatchObject({
+    ok: false,
+    error: { code: "EXECUTION_AUTHORITY_UNAVAILABLE", retry: "REFRESH" },
   });
 });

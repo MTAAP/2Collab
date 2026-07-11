@@ -55,7 +55,7 @@ test("a durable decision survives restart and schedules its choice once", async 
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   expect(await engine.start(command)).toMatchObject({ ok: true, value: { state: "WAITING" } });
@@ -63,7 +63,7 @@ test("a durable decision survives restart and schedules its choice once", async 
   const restarted = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   const decision = {

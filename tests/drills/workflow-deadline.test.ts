@@ -22,7 +22,7 @@ test("pause and restart never extend the absolute deadline", async () => {
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => now,
+    clockMs: () => now,
     allowInlineLaunchesForTesting: true,
   });
   const started = await engine.start(startCommand);
@@ -43,7 +43,7 @@ test("pause and restart never extend the absolute deadline", async () => {
   const restarted = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => now,
+    clockMs: () => now,
     allowInlineLaunchesForTesting: true,
   });
   await restarted.tick();
@@ -75,7 +75,7 @@ test("results arriving while paused do not launch the next step until resume", a
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(startCommand);

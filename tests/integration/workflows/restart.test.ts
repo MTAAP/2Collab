@@ -22,7 +22,7 @@ test("a committed launch intent creates one child run after restart", async () =
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(startCommand);
@@ -31,7 +31,7 @@ test("a committed launch intent creates one child run after restart", async () =
   const restarted = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   await restarted.tick();
