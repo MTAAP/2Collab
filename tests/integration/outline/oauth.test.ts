@@ -7,7 +7,8 @@ import { createOutlineConnectorRoutes } from "../../../src/server/adapters/http/
 import { StrictOutlineOAuthProvider } from "../../fixtures/outline/strict-outline-adapter.ts";
 
 function store(): OutlineOAuthTransactionStore {
-  const entries = new Map<string, any>();
+  type StoredTransaction = Parameters<OutlineOAuthTransactionStore["save"]>[0];
+  const entries = new Map<string, StoredTransaction>();
   return {
     async save(transaction) {
       entries.set(transaction.id, transaction);

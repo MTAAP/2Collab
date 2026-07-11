@@ -147,6 +147,14 @@ function invalidPatch(): Result<never> {
   };
 }
 
+function containsForbiddenControl(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) return true;
+  }
+  return false;
+}
+
 export async function validateAuthoredDocumentPatch(
   input: unknown,
 ): Promise<Result<AuthoredDocumentPatch>> {
@@ -155,8 +163,8 @@ export async function validateAuthoredDocumentPatch(
   const bytes = new TextEncoder().encode(parsed.data.value);
   if (
     bytes.byteLength > 131_072 ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(parsed.data.value) ||
-    !/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?:\n[ +\-].*)+$/u.test(parsed.data.value) ||
+    containsForbiddenControl(parsed.data.value) ||
+    !/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?:\n[ +-].*)+$/u.test(parsed.data.value) ||
     !parsed.data.value.split("\n").some((line) => line.startsWith("+") || line.startsWith("-")) ||
     createHash("sha256").update(bytes).digest("hex") !== parsed.data.digest
   ) {
