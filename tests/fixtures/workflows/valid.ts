@@ -29,7 +29,8 @@ export const validDefinition: WorkflowDefinition = {
   transitions: [
     { from: "start", resultKey: "STARTED", to: "implement" },
     { from: "implement", resultKey: "READY_FOR_REVIEW", to: "review" },
-    { from: "review", resultKey: "RESULT", to: "review_result" },
+    { from: "review", resultKey: "APPROVED", to: "review_result" },
+    { from: "review", resultKey: "CHANGES_REQUESTED", to: "review_result" },
     { from: "review_result", resultKey: "APPROVED", to: "done" },
     { from: "review_result", resultKey: "CHANGES_REQUESTED", to: "implement" },
     { from: "review_result", resultKey: "FALLBACK", to: "failed" },
