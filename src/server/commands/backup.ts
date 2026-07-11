@@ -43,10 +43,18 @@ export function createBackupCommand(dependencies: Dependencies) {
     },
 
     async enforceRetention() {
+      const masterKey = await readDeploymentMasterKeyFile({
+        secretFile: dependencies.masterKeyFile,
+        dataDirectory: dependencies.dataDirectory,
+        backupDirectory: dependencies.backupDirectory,
+      });
+      if (!masterKey.ok) return masterKey;
       return enforceBackupRetention({
         database: dependencies.database,
         backupDirectory: dependencies.backupDirectory,
         now: dependencies.clock(),
+        migrations: dependencies.migrations,
+        masterKeys: new Map([[masterKey.value.keyId, masterKey.value.bytes]]),
         id: dependencies.id,
       });
     },

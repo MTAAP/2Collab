@@ -692,6 +692,96 @@ export type BackupRetentionPolicy = Readonly<{
   minimumUsableBackups?: number;
 }>;
 
+type RetentionRow = Readonly<{
+  id: string;
+  format: string;
+  manifest_version: number;
+  deployment_fingerprint: string;
+  source_authority_incarnation: string;
+  product_version: string;
+  schema_version: number;
+  migration_digest: string;
+  algorithm: string;
+  key_id: string;
+  chunk_bytes: number;
+  plaintext_bytes: number;
+  plaintext_sha256: string;
+  ciphertext_bytes: number;
+  ciphertext_sha256: string;
+  created_at: number;
+}>;
+
+type BackupUsability =
+  | Readonly<{ kind: "USABLE" }>
+  | Readonly<{ kind: "CORRUPT"; reason: string }>
+  | Readonly<{ kind: "UNAVAILABLE" }>;
+
+function manifestMatchesRecord(manifest: BackupManifest, row: RetentionRow): boolean {
+  return (
+    manifest.backupId === row.id &&
+    manifest.format === row.format &&
+    manifest.manifestVersion === row.manifest_version &&
+    manifest.deploymentFingerprint === row.deployment_fingerprint &&
+    manifest.sourceAuthorityIncarnation === row.source_authority_incarnation &&
+    manifest.productVersion === row.product_version &&
+    manifest.schemaVersion === row.schema_version &&
+    manifest.migrationDigest === row.migration_digest &&
+    manifest.algorithm === row.algorithm &&
+    manifest.keyId === row.key_id &&
+    manifest.chunkBytes === row.chunk_bytes &&
+    manifest.plaintextBytes === row.plaintext_bytes &&
+    manifest.plaintextSha256 === row.plaintext_sha256 &&
+    manifest.ciphertextBytes === row.ciphertext_bytes &&
+    manifest.ciphertextSha256 === row.ciphertext_sha256 &&
+    manifest.createdAt === row.created_at
+  );
+}
+
+async function assessBackupUsability(
+  input: Readonly<{
+    row: RetentionRow;
+    backupDirectory: string;
+    masterKeys: ReadonlyMap<string, Uint8Array>;
+    migrations: MigrationCatalog;
+  }>,
+): Promise<BackupUsability> {
+  const path = join(resolve(input.backupDirectory), `${input.row.id}.2collab-backup`);
+  const metadata = await stat(path).catch(() => null);
+  if (!metadata?.isFile()) return { kind: "CORRUPT", reason: "MISSING" };
+  if (metadata.size < 1 || metadata.size > MAX_BACKUP_BYTES) {
+    return { kind: "CORRUPT", reason: "SIZE_INVALID" };
+  }
+  const parsed = await readUnauthenticatedBackupManifest(path);
+  if (!parsed.ok || !manifestMatchesRecord(parsed.value, input.row)) {
+    return { kind: "CORRUPT", reason: "MANIFEST_INVALID" };
+  }
+  const masterKey = input.masterKeys.get(input.row.key_id);
+  if (!masterKey) return { kind: "UNAVAILABLE" };
+  const verified = await authenticateAndDecryptBackup(path, masterKey);
+  if (!verified.ok) {
+    return verified.error.code === "BACKUP_AUTHENTICATION_FAILED"
+      ? { kind: "UNAVAILABLE" }
+      : { kind: "CORRUPT", reason: "INTEGRITY_INVALID" };
+  }
+  if (
+    !input.migrations.supportsRestoreFrom(verified.value.manifest.schemaVersion) ||
+    input.migrations.digestForVersion(verified.value.manifest.schemaVersion) !==
+      verified.value.manifest.migrationDigest
+  ) {
+    return { kind: "UNAVAILABLE" };
+  }
+  let database: Database | undefined;
+  try {
+    database = Database.deserialize(verified.value.databaseBytes, { readonly: true, strict: true });
+    input.migrations.verifyClaimedSchema(database, verified.value.manifest.schemaVersion);
+    return { kind: "USABLE" };
+  } catch {
+    return { kind: "CORRUPT", reason: "DATABASE_INVALID" };
+  } finally {
+    database?.close();
+  }
+}
+
 /** Applies all bounds together and always preserves at least one verified usable backup. */
 export async function enforceBackupRetention(
   input: Readonly<{
@@ -699,6 +789,8 @@ export async function enforceBackupRetention(
     backupDirectory: string;
     now: number;
     policy?: BackupRetentionPolicy;
+    migrations: MigrationCatalog;
+    masterKeys: ReadonlyMap<string, Uint8Array>;
     id: (prefix: string) => string;
   }>,
 ): Promise<Result<Readonly<{ deleted: number; retained: number }>>> {
@@ -723,16 +815,59 @@ export async function enforceBackupRetention(
   ) {
     return failure("BACKUP_RETENTION_INVALID", "Backup retention policy is invalid.");
   }
-  type Row = Readonly<{ id: string; created_at: number; ciphertext_bytes: number }>;
   const rows = input.database
-    .query<Row, []>(
-      `SELECT id, created_at, ciphertext_bytes FROM backup_records
+    .query<RetentionRow, []>(
+      `SELECT id, format, manifest_version, deployment_fingerprint,
+         source_authority_incarnation, product_version, schema_version, migration_digest,
+         algorithm, key_id, chunk_bytes, plaintext_bytes, plaintext_sha256,
+         ciphertext_bytes, ciphertext_sha256, created_at
+       FROM backup_records
        WHERE state IN ('VERIFIED', 'RETAINED') ORDER BY created_at DESC, id DESC`,
     )
     .all();
+  const usable: RetentionRow[] = [];
+  try {
+    for (const row of rows) {
+      const assessment = await assessBackupUsability({
+        row,
+        backupDirectory: input.backupDirectory,
+        masterKeys: input.masterKeys,
+        migrations: input.migrations,
+      });
+      if (assessment.kind === "USABLE") {
+        usable.push(row);
+        continue;
+      }
+      if (assessment.kind === "CORRUPT") {
+        inImmediateTransaction(input.database, () => {
+          const changed = input.database
+            .query<void, [string]>(
+              "UPDATE backup_records SET state = 'FAILED' WHERE id = ? AND state IN ('VERIFIED', 'RETAINED')",
+            )
+            .run(row.id);
+          if (changed.changes !== 1) throw new Error("BACKUP_RETENTION_STATE_CHANGED");
+          input.database
+            .query<void, [string, string, string, number]>(
+              `INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at)
+               VALUES (?, 'BACKUP_MARKED_UNUSABLE', 'HOST', 'CONTAINER', ?, ?, ?)`,
+            )
+            .run(input.id("audit"), row.id, canonical({ reason: assessment.reason }), input.now);
+        });
+      }
+    }
+  } catch {
+    return failure("BACKUP_RETENTION_FAILED", "Backup retention failed.", "SAME_INPUT");
+  }
+  if (usable.length < policy.minimumUsableBackups) {
+    return failure(
+      "BACKUP_RETENTION_MINIMUM_UNAVAILABLE",
+      "Backup retention minimum is unavailable.",
+      "SAME_INPUT",
+    );
+  }
   let retainedBytes = 0;
   const retain = new Set<string>();
-  for (const row of rows) {
+  for (const row of usable) {
     const requiredMinimum = retain.size < policy.minimumUsableBackups;
     const withinCount = retain.size < policy.maximumVerifiedBackups;
     const withinAge = input.now - row.created_at <= policy.maximumAgeSeconds;
@@ -742,7 +877,7 @@ export async function enforceBackupRetention(
       retainedBytes += row.ciphertext_bytes;
     }
   }
-  const deletions = rows.filter((row) => !retain.has(row.id));
+  const deletions = usable.filter((row) => !retain.has(row.id));
   try {
     const alreadyDeleted = input.database
       .query<{ id: string }, []>("SELECT id FROM backup_records WHERE state = 'DELETED'")

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -150,4 +150,30 @@ test("default entry boots composed Task6 auth and exchanges authenticated runner
       else Bun.env[key] = value;
     }
   }
+});
+
+test("default entry refuses an incomplete restore before composition or database startup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "collab-incomplete-restore-"));
+  directories.push(directory);
+  await writeFile(join(directory, ".2collab-restore-incomplete"), "restore_1\n", {
+    mode: 0o600,
+  });
+  const entry = pathToFileURL(join(import.meta.dir, "../../src/server/index.ts")).href;
+  const child = Bun.spawn([process.execPath, "-e", `await import(${JSON.stringify(entry)})`], {
+    env: {
+      ...process.env,
+      DATA_DIR: directory,
+      NODE_ENV: "test",
+      RUNNER_COMPOSITION_MODULE: pathToFileURL(join(directory, "must-not-import.ts")).href,
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect(exitCode).not.toBe(0);
+  expect(stderr).toContain("RESTORE_INCOMPLETE");
+  expect(stderr).not.toContain("must-not-import.ts");
+  expect(await Bun.file(join(directory, "collab.sqlite")).exists()).toBeFalse();
+  expect(await Bun.file(join(directory, "collab.sqlite-wal")).exists()).toBeFalse();
+  expect(await Bun.file(join(directory, ".2collab-restore-incomplete")).text()).toBe("restore_1\n");
 });

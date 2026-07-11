@@ -12,6 +12,7 @@ import {
 } from "../modules/connectors/credentials.ts";
 
 const CLASSES = ["PROVIDER", "MEMBER_OAUTH", "DEVICE_REFRESH"] as const;
+const ROTATION_ACCESS = Symbol("2collab.credential-key-rotation");
 const encoder = new TextEncoder();
 
 function failure(
@@ -127,7 +128,7 @@ export function createCredentialKeyManager(dependencies: ManagerDependencies) {
       )
       .get(credentialClass, version);
 
-  const unwrapRow = (row: WrappingKeyRow): Buffer =>
+  const unwrapAnyRow = (row: WrappingKeyRow): Buffer =>
     openSealed(
       row.wrapped_key,
       masterKey,
@@ -136,16 +137,20 @@ export function createCredentialKeyManager(dependencies: ManagerDependencies) {
       wrappingAad(row.credential_class, row.key_version, row.id),
     );
 
-  const classKeyFor = (credentialClass: CredentialClass, version: number): Buffer => {
-    const exact = rowAtVersion(credentialClass, version);
-    if (exact) {
-      try {
-        return unwrapRow(exact);
-      } catch {
-        // Master rotation retires an old wrapper and installs the same class key under the new
-        // master. Credential ciphertext keeps its original AAD/version and remains untouched.
-      }
+  const unwrapRow = (row: WrappingKeyRow): Buffer => {
+    const active = activeRow(row.credential_class);
+    if (
+      row.state !== "ACTIVE" ||
+      !active ||
+      active.id !== row.id ||
+      row.wrapping_key_id !== masterKeyId
+    ) {
+      throw new Error("CREDENTIAL_KEY_NOT_ACTIVE");
     }
+    return unwrapAnyRow(row);
+  };
+
+  const classKeyFor = (credentialClass: CredentialClass, _version: number): Buffer => {
     const active = activeRow(credentialClass);
     if (!active) throw new Error("CREDENTIAL_KEY_UNAVAILABLE");
     return unwrapRow(active);
@@ -200,6 +205,10 @@ export function createCredentialKeyManager(dependencies: ManagerDependencies) {
     activeRow,
     rowAtVersion,
     unwrapRow,
+    unwrapForRotation(access: symbol, row: WrappingKeyRow) {
+      if (access !== ROTATION_ACCESS) throw new Error("CREDENTIAL_ROTATION_ACCESS_DENIED");
+      return unwrapAnyRow(row);
+    },
     wrapClassKey(credentialClass: CredentialClass, version: number, id: string, key: Uint8Array) {
       return seal(key, masterKey, wrappingAad(credentialClass, version, id), random);
     },
@@ -428,8 +437,8 @@ export async function rotateCredentialClassKey(
       activeRotation.to_key_version,
     );
     if (!oldKeyRow || !nextKeyRow) throw new Error("ROTATION_KEY_MISSING");
-    const oldKey = input.manager.unwrapRow(oldKeyRow);
-    const nextKey = input.manager.unwrapRow(nextKeyRow);
+    const oldKey = input.manager.unwrapForRotation(ROTATION_ACCESS, oldKeyRow);
+    const nextKey = input.manager.unwrapForRotation(ROTATION_ACCESS, nextKeyRow);
     const rows = database
       .query<CredentialRow, [CredentialClass, string, number]>(
         `SELECT * FROM encrypted_credentials WHERE credential_class = ? AND id > ?
@@ -616,7 +625,10 @@ export async function rotateMasterWrappingKey(
     .map((row) => row.key_id)
     .filter((keyId) => keyId !== input.nextMasterKeyId);
   try {
-    const unwrapped = active.map((row) => ({ row, key: input.manager.unwrapRow(row) }));
+    const unwrapped = active.map((row) => ({
+      row,
+      key: input.manager.unwrapForRotation(ROTATION_ACCESS, row),
+    }));
     const nextRows = unwrapped.map(({ row, key }) => {
       const id = input.manager.id("class_key");
       const version = row.key_version + 1;

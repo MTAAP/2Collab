@@ -706,14 +706,25 @@ describe("credential and master wrapping-key rotation", () => {
 
   test("master rotation rewraps class keys and preserves retained-backup key accountability", async () => {
     const f = await fixture();
+    let nextId = 0;
     const manager = createCredentialKeyManager({
       database: f.database,
       masterKey: key,
       masterKeyId: "master_1",
       clock: () => 400,
-      id: (prefix) => `${prefix}_${crypto.randomUUID()}`,
+      id: (prefix) => `${prefix}_${++nextId}`,
     });
     await manager.initializeClass("PROVIDER");
+    const credential = await manager.sealCredential({
+      credentialClass: "PROVIDER",
+      ownerKind: "CONNECTOR",
+      ownerId: "github_1",
+      connectorId: "github_1",
+      credentialOwnerId: "installation_1",
+      cleartext: new TextEncoder().encode("secret"),
+      expectedRevision: 0,
+    });
+    if (!credential.ok) throw new Error(credential.error.code);
     f.database
       .query<
         void,
@@ -771,34 +782,67 @@ describe("credential and master wrapping-key rotation", () => {
         )
         .get(),
     ).toEqual({ count: 1 });
+    const restartedWithNew = createCredentialKeyManager({
+      database: f.database,
+      masterKey: wrongKey,
+      masterKeyId: "master_2",
+      clock: () => 401,
+      id: (prefix) => `${prefix}_${++nextId}`,
+    });
+    const reopened = await restartedWithNew.openCredential(credential.value.id);
+    expect(reopened.ok && new TextDecoder().decode(reopened.value)).toBe("secret");
+    const restartedWithOld = createCredentialKeyManager({
+      database: f.database,
+      masterKey: key,
+      masterKeyId: "master_1",
+      clock: () => 401,
+      id: (prefix) => `${prefix}_${++nextId}`,
+    });
+    expect(await restartedWithOld.openCredential(credential.value.id)).toMatchObject({
+      ok: false,
+      error: { code: "CREDENTIAL_DECRYPTION_FAILED" },
+    });
+    const retired = f.database
+      .query<Parameters<typeof restartedWithOld.unwrapRow>[0], []>(
+        "SELECT * FROM credential_wrapping_keys WHERE state = 'RETIRED'",
+      )
+      .get();
+    if (!retired) throw new Error("RETIRED_KEY_MISSING");
+    expect(() => restartedWithOld.unwrapRow(retired)).toThrow("CREDENTIAL_KEY_NOT_ACTIVE");
     f.database.close();
   });
 
   test("retention enforces count, age, and bytes but never deletes the sole verified usable backup", async () => {
     const f = await fixture();
-    const insert = f.database.query(`INSERT INTO backup_records(
+    const old = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 100,
+      id: (prefix) => (prefix === "backup" ? "old" : `${prefix}_old`),
+    });
+    const newest = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 900,
+      id: (prefix) => (prefix === "backup" ? "newest" : `${prefix}_newest`),
+    });
+    if (!old.ok || !newest.ok) throw new Error("BACKUP_FIXTURE_FAILED");
+    f.database.exec(`INSERT INTO backup_records(
       id, format, manifest_version, deployment_fingerprint, source_authority_incarnation,
       product_version, schema_version, migration_digest, algorithm, key_id, chunk_bytes,
       plaintext_bytes, plaintext_sha256, ciphertext_bytes, ciphertext_sha256,
-      state, created_at, verified_at
-    ) VALUES (?, '2COLLAB_BACKUP_V1', 1, ?, ?, '0.1.0', 6, ?,
-      'AES_256_GCM_CHUNKED_V1', 'master_1', 4096, 1, ?, ?, ?, ?, ?, ?)`);
-    insert.run(
-      "newest",
-      digest,
-      "1".repeat(64),
-      digest,
-      digest,
-      11 * 1024 * 1024 * 1024,
-      digest,
-      "VERIFIED",
-      900,
-      900,
-    );
-    insert.run("old", digest, "1".repeat(64), digest, digest, 1, digest, "VERIFIED", 100, 100);
-    insert.run("failed", digest, "1".repeat(64), digest, digest, 1, digest, "FAILED", 50, null);
-    await writeFile(join(f.backupDir, "newest.2collab-backup"), "new", { mode: 0o600 });
-    await writeFile(join(f.backupDir, "old.2collab-backup"), "old", { mode: 0o600 });
+      state, created_at
+    ) VALUES ('failed', '2COLLAB_BACKUP_V1', 1, '${digest}', '${"1".repeat(64)}',
+      '0.1.0', 6, '${digest}', 'AES_256_GCM_CHUNKED_V1', 'master_1', 4096,
+      1, '${digest}', 1, '${digest}', 'FAILED', 50)`);
     const retained = await enforceBackupRetention({
       database: f.database,
       backupDirectory: f.backupDir,
@@ -806,9 +850,11 @@ describe("credential and master wrapping-key rotation", () => {
       policy: {
         maximumAgeSeconds: 10,
         maximumVerifiedBackups: 1,
-        maximumBytes: 10 * 1024 * 1024 * 1024,
+        maximumBytes: newest.value.manifest.ciphertextBytes,
         minimumUsableBackups: 1,
       },
+      migrations: migrationCatalog,
+      masterKeys: new Map([["master_1", key]]),
       id: (prefix) => `${prefix}_${crypto.randomUUID()}`,
     });
     expect(retained).toMatchObject({ ok: true, value: { deleted: 1, retained: 1 } });
@@ -827,26 +873,147 @@ describe("credential and master wrapping-key rotation", () => {
     f.database.close();
   });
 
+  test("retention rejects a newer missing row and preserves the only authenticated physical backup", async () => {
+    const f = await fixture();
+    const old = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 100,
+      id: () => "backup_old",
+    });
+    const newer = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 900,
+      id: () => "backup_new",
+    });
+    if (!old.ok || !newer.ok) throw new Error("BACKUP_FIXTURE_FAILED");
+    await rm(newer.value.path);
+    const retained = await enforceBackupRetention({
+      database: f.database,
+      backupDirectory: f.backupDir,
+      now: 1000,
+      policy: {
+        maximumAgeSeconds: 10,
+        maximumVerifiedBackups: 1,
+        maximumBytes: 10 * 1024 * 1024 * 1024,
+        minimumUsableBackups: 1,
+      },
+      migrations: migrationCatalog,
+      masterKeys: new Map([["master_1", key]]),
+      id: (prefix) => `${prefix}_${crypto.randomUUID()}`,
+    });
+    expect(retained).toMatchObject({ ok: true, value: { deleted: 0, retained: 1 } });
+    expect(await Bun.file(old.value.path).exists()).toBeTrue();
+    expect(
+      f.database
+        .query<{ id: string; state: string }, []>(
+          "SELECT id, state FROM backup_records ORDER BY id",
+        )
+        .all(),
+    ).toEqual([
+      { id: "backup_new", state: "FAILED" },
+      { id: "backup_old", state: "VERIFIED" },
+    ]);
+    expect(
+      f.database
+        .query<{ count: number }, []>(
+          "SELECT count(*) AS count FROM audit_events WHERE kind = 'BACKUP_MARKED_UNUSABLE'",
+        )
+        .get(),
+    ).toEqual({ count: 1 });
+    f.database.close();
+  });
+
+  test("retention marks a corrupt physical backup unusable before selecting survivors", async () => {
+    const f = await fixture();
+    const old = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 100,
+      id: (prefix) => (prefix === "backup" ? "backup_old" : `${prefix}_old`),
+    });
+    const corrupt = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 900,
+      id: (prefix) => (prefix === "backup" ? "backup_corrupt" : `${prefix}_corrupt`),
+    });
+    if (!old.ok || !corrupt.ok) throw new Error("BACKUP_FIXTURE_FAILED");
+    const bytes = await readFile(corrupt.value.path);
+    const offset = bytes.length - 20;
+    bytes[offset] = (bytes[offset] ?? 0) ^ 0xff;
+    await writeFile(corrupt.value.path, bytes, { mode: 0o600 });
+    const retained = await enforceBackupRetention({
+      database: f.database,
+      backupDirectory: f.backupDir,
+      now: 1000,
+      policy: {
+        maximumAgeSeconds: 10,
+        maximumVerifiedBackups: 1,
+        maximumBytes: 10 * 1024 * 1024 * 1024,
+        minimumUsableBackups: 1,
+      },
+      migrations: migrationCatalog,
+      masterKeys: new Map([["master_1", key]]),
+      id: (prefix) => `${prefix}_${crypto.randomUUID()}`,
+    });
+    expect(retained).toMatchObject({ ok: true, value: { deleted: 0, retained: 1 } });
+    expect(await Bun.file(old.value.path).exists()).toBeTrue();
+    expect(
+      f.database
+        .query<{ state: string }, []>(
+          "SELECT state FROM backup_records WHERE id = 'backup_corrupt'",
+        )
+        .get(),
+    ).toEqual({ state: "FAILED" });
+    f.database.close();
+  });
+
   test("retention persistence failure never removes a file still marked verified", async () => {
     const f = await fixture();
+    const old = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 100,
+      id: (prefix) => (prefix === "backup" ? "old" : `${prefix}_old`),
+    });
+    const newest = await createAuthenticatedBackup({
+      database: f.database,
+      destinationDirectory: f.backupDir,
+      masterKey: key,
+      keyId: "master_1",
+      productVersion: "0.1.0",
+      migrations: migrationCatalog,
+      clock: () => 900,
+      id: (prefix) => (prefix === "backup" ? "newest" : `${prefix}_newest`),
+    });
+    if (!old.ok || !newest.ok) throw new Error("BACKUP_FIXTURE_FAILED");
     f.database.exec(`
-      INSERT INTO backup_records(
-        id, format, manifest_version, deployment_fingerprint, source_authority_incarnation,
-        product_version, schema_version, migration_digest, algorithm, key_id, chunk_bytes,
-        plaintext_bytes, plaintext_sha256, ciphertext_bytes, ciphertext_sha256,
-        state, created_at, verified_at
-      ) VALUES
-        ('newest', '2COLLAB_BACKUP_V1', 1, '${digest}', '${"1".repeat(64)}', '0.1.0', 6,
-          '${digest}', 'AES_256_GCM_CHUNKED_V1', 'master_1', 4096, 1, '${digest}', 1,
-          '${digest}', 'VERIFIED', 900, 900),
-        ('old', '2COLLAB_BACKUP_V1', 1, '${digest}', '${"1".repeat(64)}', '0.1.0', 6,
-          '${digest}', 'AES_256_GCM_CHUNKED_V1', 'master_1', 4096, 1, '${digest}', 1,
-          '${digest}', 'VERIFIED', 100, 100);
       CREATE TRIGGER fail_retention_audit BEFORE INSERT ON audit_events
       WHEN NEW.kind = 'BACKUP_RETIRED' BEGIN SELECT RAISE(ABORT, 'FAIL'); END;
     `);
-    const oldPath = join(f.backupDir, "old.2collab-backup");
-    await writeFile(oldPath, "old", { mode: 0o600 });
+    const oldPath = old.value.path;
     const result = await enforceBackupRetention({
       database: f.database,
       backupDirectory: f.backupDir,
@@ -857,6 +1024,8 @@ describe("credential and master wrapping-key rotation", () => {
         maximumBytes: 10,
         minimumUsableBackups: 1,
       },
+      migrations: migrationCatalog,
+      masterKeys: new Map([["master_1", key]]),
       id: (prefix) => `${prefix}_1`,
     });
     expect(result).toMatchObject({ ok: false, error: { code: "BACKUP_RETENTION_FAILED" } });
