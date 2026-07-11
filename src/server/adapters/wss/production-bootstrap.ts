@@ -105,8 +105,12 @@ export async function createProductionServer(
       messageId: () => id("server_message"),
       secureTransport: (request) => new URL(request.url).protocol === "https:",
       loadCommitted: dispatch.loadCommitted,
-      heartbeat: (principal) =>
-        runners.registry.heartbeat({ idempotencyKey: id("heartbeat") as never, principal }),
+      heartbeat: (principal, repositoryObservations) =>
+        runners.registry.heartbeat({
+          idempotencyKey: id("heartbeat") as never,
+          principal,
+          repositoryObservations: repositoryObservations as never,
+        }),
       acknowledgeDelivery: (principal, deliveryId, semanticDigest) => {
         const row = database
           .query<{ runner_id: string; semantic_digest: string; status: string }, [string]>(

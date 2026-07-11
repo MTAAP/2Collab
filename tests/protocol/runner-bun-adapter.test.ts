@@ -73,7 +73,7 @@ function heartbeat(sequence = 1): RunnerEnvelope {
     sequence,
     issuedAt: 1_000,
     expiresAt: 1_010,
-    body: { kind: "HEARTBEAT" },
+    body: { kind: "HEARTBEAT", repositoryObservations: [] },
   };
 }
 

@@ -8,7 +8,8 @@ import type {
   RegisteredRunnerId,
   SafeProfileId,
 } from "../../../shared/contracts/ids.ts";
-import { IdentifierSchema, Sha256Schema } from "../../../shared/contracts/ids.ts";
+import { CommitShaSchema, IdentifierSchema, Sha256Schema } from "../../../shared/contracts/ids.ts";
+import { GitRefSchema } from "../../../shared/contracts/runners.ts";
 import { MemberActorSchema } from "../../../shared/contracts/actors.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import type {
@@ -1525,6 +1526,19 @@ export function createRunnerServices(dependencies: Dependencies) {
               accessExpiresAt: z.number().int().nonnegative(),
             })
             .strict(),
+          repositoryObservations: z
+            .array(
+              z
+                .object({
+                  projectId: IdentifierSchema,
+                  mappingRevision: PositiveRevisionSchema,
+                  baseBranch: GitRefSchema,
+                  baseCommit: CommitShaSchema,
+                })
+                .strict(),
+            )
+            .max(128)
+            .default([]),
         })
         .strict()
         .safeParse(command);
@@ -1539,6 +1553,7 @@ export function createRunnerServices(dependencies: Dependencies) {
           runnerId: input.data.principal.runnerId,
           runnerEpoch: input.data.principal.runnerEpoch,
           accessExpiresAt: input.data.principal.accessExpiresAt,
+          repositoryObservations: input.data.repositoryObservations,
         },
       );
       const prior = replayWrite<RunnerLeaseView>(ticket);
@@ -1549,6 +1564,29 @@ export function createRunnerServices(dependencies: Dependencies) {
         const now = dependencies.clock();
         if (now >= input.data.principal.accessExpiresAt) {
           return failure("RUNNER_AUTHENTICATION_INVALID", "Runner authentication is invalid.");
+        }
+        const observationKeys = new Set<string>();
+        for (const observation of input.data.repositoryObservations) {
+          const observationKey = `${observation.projectId}\0${observation.mappingRevision}`;
+          const mapping = dependencies.database
+            .query<{ base_branch: string }, [string, string, number]>(
+              `SELECT projects.base_branch
+               FROM runner_mapping_versions AS mappings
+               JOIN projects ON projects.id = mappings.project_id
+               WHERE mappings.runner_id = ? AND mappings.project_id = ?
+                 AND mappings.revision = ? AND mappings.revoked_at IS NULL`,
+            )
+            .get(input.data.principal.runnerId, observation.projectId, observation.mappingRevision);
+          if (
+            observationKeys.has(observationKey) ||
+            !mapping ||
+            mapping.base_branch !== observation.baseBranch
+          )
+            return failure(
+              "RUNNER_REPOSITORY_OBSERVATION_INVALID",
+              "Runner repository observation is invalid.",
+            );
+          observationKeys.add(observationKey);
         }
         const changed = dependencies.database
           .query(
@@ -1568,6 +1606,29 @@ export function createRunnerServices(dependencies: Dependencies) {
         if (changed.changes !== 1) {
           return failure("RUNNER_AUTHENTICATION_INVALID", "Runner authentication is invalid.");
         }
+        for (const observation of input.data.repositoryObservations) {
+          dependencies.database
+            .query(
+              `INSERT INTO runner_repository_observations(
+                 runner_id, runner_epoch, project_id, mapping_revision,
+                 base_branch, base_commit, observed_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(runner_id, project_id, mapping_revision) DO UPDATE SET
+                 runner_epoch = excluded.runner_epoch,
+                 base_branch = excluded.base_branch,
+                 base_commit = excluded.base_commit,
+                 observed_at = excluded.observed_at`,
+            )
+            .run(
+              input.data.principal.runnerId,
+              input.data.principal.runnerEpoch,
+              observation.projectId,
+              observation.mappingRevision,
+              observation.baseBranch,
+              observation.baseCommit,
+              now,
+            );
+        }
         const result = { ok: true as const, value: inspectLease(input.data.principal.runnerId) };
         return storeWrite(ticket, result, {
           auditKind: "RUNNER_HEARTBEAT_ACCEPTED",
@@ -1577,6 +1638,7 @@ export function createRunnerServices(dependencies: Dependencies) {
           safeDetails: {
             ownerMemberId: input.data.principal.ownerMemberId,
             runnerEpoch: input.data.principal.runnerEpoch,
+            repositoryObservationCount: input.data.repositoryObservations.length,
           },
         });
       });

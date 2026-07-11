@@ -14,7 +14,7 @@ test("applies strict grant and proposal schemas after canonical reserved migrati
       database
         .query<{ version: number }, []>("SELECT max(version) AS version FROM schema_migrations")
         .get()?.version,
-    ).toBe(15);
+    ).toBe(16);
   } finally {
     database.close();
   }

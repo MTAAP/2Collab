@@ -3559,6 +3559,7 @@ function executeQuery(
           interaction: version.interaction,
           repositoryMode: version.repositoryMode,
           repositoryAssurance: version.repositoryAssurance,
+          repository: requested.repository,
         };
       }
       return {

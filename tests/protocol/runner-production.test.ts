@@ -188,7 +188,9 @@ test("production runner data plane dispatches server work and routes redacted ho
     "SEMANTIC_EVENT_ACK",
   ]);
   expect(server.runnerControl.pendingDeliveryIds()).toEqual([]);
-  expect(client.send({ kind: "HEARTBEAT" })).toMatchObject({ ok: true });
+  expect(client.send({ kind: "HEARTBEAT", repositoryObservations: [] })).toMatchObject({
+    ok: true,
+  });
   await settle();
   expect(heartbeats).toEqual(["runner_1"]);
   expect(received.at(-1)?.body).toEqual({

@@ -310,7 +310,7 @@ describe("runner WSS client", () => {
       maximumOutboundItems: 2,
       maximumOutboundBytes: 1_024,
     });
-    expect(client.send({ kind: "HEARTBEAT" })).toMatchObject({
+    expect(client.send({ kind: "HEARTBEAT", repositoryObservations: [] })).toMatchObject({
       ok: false,
       error: { code: "RUNNER_CONNECTION_INACTIVE" },
     });
@@ -318,7 +318,10 @@ describe("runner WSS client", () => {
     socket.dispatchEvent(new Event("open"));
     socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(welcome) }));
     socket.bufferedAmount = 1024 * 1024;
-    expect(client.send({ kind: "HEARTBEAT" })).toMatchObject({ ok: true, value: { queued: true } });
+    expect(client.send({ kind: "HEARTBEAT", repositoryObservations: [] })).toMatchObject({
+      ok: true,
+      value: { queued: true },
+    });
     expect(
       client.send({
         kind: "OPERATION_ACKNOWLEDGEMENT",
@@ -327,7 +330,7 @@ describe("runner WSS client", () => {
         semanticDigest: "a".repeat(64),
       }),
     ).toMatchObject({ ok: true, value: { queued: true } });
-    expect(client.send({ kind: "HEARTBEAT" })).toMatchObject({
+    expect(client.send({ kind: "HEARTBEAT", repositoryObservations: [] })).toMatchObject({
       ok: false,
       error: { code: "RUNNER_OUTBOUND_BACKPRESSURE" },
     });
@@ -335,7 +338,11 @@ describe("runner WSS client", () => {
     expect(client.flushOutbound()).toBe(2);
     const envelopes = socket.sent.slice(1).map((entry) => JSON.parse(entry));
     expect(envelopes).toMatchObject([
-      { messageId: "runner_message_1", sequence: 1, body: { kind: "HEARTBEAT" } },
+      {
+        messageId: "runner_message_1",
+        sequence: 1,
+        body: { kind: "HEARTBEAT", repositoryObservations: [] },
+      },
       {
         messageId: "runner_message_2",
         sequence: 2,
@@ -411,7 +418,7 @@ describe("runner WSS client", () => {
         semanticDigest: "b".repeat(64),
       }),
     ).toMatchObject({ ok: false, error: { code: "RUNNER_EVENT_ID_CONFLICT" } });
-    expect(client.send({ kind: "HEARTBEAT" })).toMatchObject({
+    expect(client.send({ kind: "HEARTBEAT", repositoryObservations: [] })).toMatchObject({
       ok: true,
       value: { queued: true },
     });
@@ -428,7 +435,11 @@ describe("runner WSS client", () => {
         semanticContinuity: { localSequence: 1 },
         body: { eventId: "event_1" },
       },
-      { messageId: "runner_message_2", sequence: 2, body: { kind: "HEARTBEAT" } },
+      {
+        messageId: "runner_message_2",
+        sequence: 2,
+        body: { kind: "HEARTBEAT", repositoryObservations: [] },
+      },
     ]);
 
     sockets[0].dispatchEvent(new CloseEvent("close"));

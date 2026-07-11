@@ -23,7 +23,13 @@ export type ProductionRunnerPorts = Readonly<{
   messageId: () => string;
   secureTransport: (request: Request) => boolean;
   loadCommitted: (outboxIds: readonly string[]) => readonly CommittedRunnerOperation[];
-  heartbeat: (principal: VerifiedRunnerPrincipal) => Promise<Result<unknown>>;
+  heartbeat: (
+    principal: VerifiedRunnerPrincipal,
+    repositoryObservations: Extract<
+      RunnerEnvelope["body"],
+      Readonly<{ kind: "HEARTBEAT" }>
+    >["repositoryObservations"],
+  ) => Promise<Result<unknown>>;
   acknowledgeDelivery: (
     principal: VerifiedRunnerPrincipal,
     deliveryId: string,
@@ -119,7 +125,8 @@ export function createProductionRunnerServer(
       createRunnerInboundRouter({
         principal,
         currentFence,
-        heartbeat: ({ principal: actor }) => input.ports.heartbeat(actor),
+        heartbeat: ({ principal: actor, repositoryObservations }) =>
+          input.ports.heartbeat(actor, repositoryObservations),
         acknowledgeDelivery: (deliveryId, semanticDigest) => {
           const committed = input.ports.acknowledgeDelivery(principal, deliveryId, semanticDigest);
           if (!committed.accepted) return committed;

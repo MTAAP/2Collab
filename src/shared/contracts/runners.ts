@@ -332,6 +332,13 @@ export type RevokeTeamExposure = Readonly<{
 export type RunnerHeartbeat = Readonly<{
   idempotencyKey: string;
   principal: VerifiedRunnerPrincipal;
+  repositoryObservations?: readonly RepositoryBaseObservation[];
+}>;
+export type RepositoryBaseObservation = Readonly<{
+  projectId: ProjectId;
+  mappingRevision: number;
+  baseBranch: string;
+  baseCommit: CommitSha;
 }>;
 export type RevokeRunner = Readonly<{
   idempotencyKey: string;

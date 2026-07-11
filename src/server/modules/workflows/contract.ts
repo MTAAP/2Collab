@@ -24,7 +24,14 @@ export type WorkflowExecutionSnapshot = Readonly<{
   launches: Readonly<Record<string, StepLaunchConfiguration>>;
   inputs?: Readonly<Record<string, string | number | boolean>>;
   presetBindings?: Readonly<
-    Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+    Record<
+      string,
+      Readonly<{
+        personalRunPresetId: string;
+        expectedVersion: number;
+        repository: Readonly<{ repositoryId: string; intendedBranch?: string }>;
+      }>
+    >
   >;
 }>;
 

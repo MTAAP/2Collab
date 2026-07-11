@@ -14,7 +14,13 @@ type Dependencies = Readonly<{
   principal: VerifiedRunnerPrincipal;
   currentFence: () => boolean;
   heartbeat: (
-    command: Readonly<{ principal: VerifiedRunnerPrincipal }>,
+    command: Readonly<{
+      principal: VerifiedRunnerPrincipal;
+      repositoryObservations: Extract<
+        RunnerEnvelope["body"],
+        Readonly<{ kind: "HEARTBEAT" }>
+      >["repositoryObservations"];
+    }>,
   ) => Promise<Result<unknown>>;
   acknowledgeDelivery: (deliveryId: string, semanticDigest: string) => Routed;
   acceptSemantic: (
@@ -62,7 +68,12 @@ export function createRunnerInboundRouter(dependencies: Dependencies) {
       if (fenced) return fenced;
       const body = parsed.data.body;
       if (body.kind === "HEARTBEAT") {
-        return fromResult(await dependencies.heartbeat({ principal: dependencies.principal }));
+        return fromResult(
+          await dependencies.heartbeat({
+            principal: dependencies.principal,
+            repositoryObservations: body.repositoryObservations,
+          }),
+        );
       }
       if (body.kind === "OPERATION_ACKNOWLEDGEMENT") {
         return dependencies.acknowledgeDelivery(body.deliveryId, body.semanticDigest);

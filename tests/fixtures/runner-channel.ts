@@ -10,7 +10,7 @@ export function validRunnerHeartbeat(override: Partial<RunnerEnvelope> = {}): Ru
     sequence: 1,
     issuedAt: 1_000,
     expiresAt: 1_010,
-    body: { kind: "HEARTBEAT" },
+    body: { kind: "HEARTBEAT", repositoryObservations: [] },
     ...override,
   } as RunnerEnvelope;
 }

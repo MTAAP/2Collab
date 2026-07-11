@@ -540,7 +540,14 @@ export type ResolvePersonalRunPresetBindings = Readonly<{
   kind: "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS";
   actor: MemberActor;
   bindings: Readonly<
-    Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+    Record<
+      string,
+      Readonly<{
+        personalRunPresetId: string;
+        expectedVersion: number;
+        repository: Readonly<{ repositoryId: string; intendedBranch?: string }>;
+      }>
+    >
   >;
 }>;
 
@@ -626,6 +633,7 @@ export type QueryResult =
             interaction: "HEADLESS" | "INTERACTIVE";
             repositoryMode: "INSPECT_ONLY" | "MUTATING";
             repositoryAssurance: "ADVISORY" | "ENFORCED";
+            repository: Readonly<{ repositoryId: string; intendedBranch?: string }>;
           }>
         >
       >;

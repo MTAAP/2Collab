@@ -98,7 +98,7 @@ describe("foundation configuration corrections migration", () => {
           .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
       ).toEqual(
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((version) => ({ version })),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map((version) => ({ version })),
       );
       expect(
         database

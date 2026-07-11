@@ -7,6 +7,7 @@ import type { PersonalWorkflowPreset } from "../../../shared/contracts/templates
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import { stableJson } from "./run-templates.ts";
 import { resolveWorkflowBindings, type ResolvedWorkflowBindings } from "./bindings.ts";
+import { GitRefSchema } from "../../../shared/contracts/runners.ts";
 
 type Dependencies = Readonly<{
   database: Database;
@@ -32,6 +33,25 @@ function failure<T>(
   return { ok: false, error: { code, message, retry } };
 }
 
+function validWorkflowBinding(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Record<string, unknown>;
+  const repository = binding.repository;
+  if (!repository || typeof repository !== "object") return false;
+  const selection = repository as Record<string, unknown>;
+  return (
+    typeof binding.personalRunPresetId === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(binding.personalRunPresetId) &&
+    Number.isInteger(binding.expectedVersion) &&
+    (binding.expectedVersion as number) > 0 &&
+    typeof selection.repositoryId === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(selection.repositoryId) &&
+    (selection.intendedBranch === undefined ||
+      (typeof selection.intendedBranch === "string" &&
+        GitRefSchema.safeParse(selection.intendedBranch).success))
+  );
+}
+
 export function createWorkflowPresetRegistry(dependencies: Dependencies) {
   return {
     async bind(command: BindPersonalWorkflowPreset): Promise<Result<BoundPersonalWorkflowPreset>> {
@@ -48,7 +68,8 @@ export function createWorkflowPresetRegistry(dependencies: Dependencies) {
       if (
         command.preset.ownerMemberId !== command.actor.memberId ||
         command.preset.version < 1 ||
-        Object.keys(command.preset.bindings).length === 0
+        Object.keys(command.preset.bindings).length === 0 ||
+        Object.values(command.preset.bindings).some((binding) => !validWorkflowBinding(binding))
       )
         return failure("WORKFLOW_PRESET_INVALID", "The Personal Workflow Preset is invalid.");
       const resolved = await resolveWorkflowBindings(
