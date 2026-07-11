@@ -1,9 +1,15 @@
 import type { Database } from "bun:sqlite";
 import foundationMigration from "./migrations/0001_foundation.sql" with { type: "text" };
 import projectsMigration from "./migrations/0002_projects.sql" with { type: "text" };
+import runnersMigration from "./migrations/0003_runners.sql" with { type: "text" };
+import {
+  RUNNER_INDEXES,
+  RUNNER_TABLES,
+  RUNNER_TRIGGERS,
+} from "./migrations/0003_runners.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-const LATEST_SCHEMA_VERSION = 2;
+const LATEST_SCHEMA_VERSION = 3;
 const FOUNDATION_TABLES = [
   "audit_events",
   "auth_proxy_replays",
@@ -107,6 +113,21 @@ function validateClaimedSchema(database: Database, version: number): void {
       throw new Error("SCHEMA_INTEGRITY_INVALID");
     }
   }
+  if (version >= 3) {
+    const triggers = new Set(
+      database
+        .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+        .all()
+        .map((row) => row.name),
+    );
+    if (
+      RUNNER_TABLES.some((table) => !tables.has(table)) ||
+      RUNNER_INDEXES.some((index) => !indexes.has(index)) ||
+      RUNNER_TRIGGERS.some((trigger) => !triggers.has(trigger))
+    ) {
+      throw new Error("SCHEMA_INTEGRITY_INVALID");
+    }
+  }
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -151,6 +172,10 @@ export function migrate(database: Database): void {
         .get()?.count;
       if (unexpectedProjects !== 0) throw new Error("PROJECT_BASE_BRANCH_REQUIRED");
       database.exec(projectsMigration);
+      currentVersion = 2;
+    }
+    if (currentVersion === 2) {
+      database.exec(runnersMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);

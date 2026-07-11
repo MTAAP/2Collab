@@ -4,8 +4,13 @@ import type {
   ConnectedRepositoryId,
   CustomLaunchProfileVersionId,
   RegisteredRunnerId,
+  ExposureAcknowledgementId,
+  MemberId,
+  ProjectId,
+  SafeProfileId,
 } from "./ids.ts";
 import { CommitShaSchema, IdentifierSchema, RevisionSchema } from "./ids.ts";
+import type { MemberActor, VerifiedDevicePrincipal, VerifiedRunnerPrincipal } from "./actors.ts";
 
 const forbiddenGitRefCharacters = new Set(["~", "^", ":", "?", "*", "[", "\\"]);
 
@@ -127,3 +132,220 @@ export const EligibleTargetSchema = z
     assurance: z.enum(["ADVISORY", "ENFORCED"]),
   })
   .strict();
+
+export type RunnerDispatchAudience = "OWNER_ONLY" | "TEAM";
+export type RunnerAdapter = "CLAUDE" | "CODEX" | "PI" | "OPENCODE";
+export type RunnerLeaseState = "NEVER_CONNECTED" | "ONLINE" | "OFFLINE" | "REVOKED";
+
+export type RunnerView = Readonly<{
+  runnerId: RegisteredRunnerId;
+  ownerMemberId: MemberId;
+  runnerEpoch: number;
+  policyRevision: number;
+  audience: RunnerDispatchAudience;
+  maximumConcurrentAttempts: number;
+  securityPolicyVersion: number;
+  securityDigest: string;
+  revision: number;
+  createdAt: number;
+  revokedAt?: number;
+}>;
+
+export type RunnerPairingChallenge = Readonly<{
+  pairingId: string;
+  pairingSecret: string;
+  expiresAt: number;
+}>;
+export type ConfirmedRunnerPairing = Readonly<{ pairingId: string; confirmedAt: number }>;
+export type RunnerCredentialEnvelope = Readonly<{
+  runnerId: RegisteredRunnerId;
+  runnerEpoch: number;
+  ownerMemberId: MemberId;
+  runnerCredential: string;
+  keyThumbprint: string;
+}>;
+export type RunnerMapping = Readonly<{
+  runnerId: RegisteredRunnerId;
+  projectId: ProjectId;
+  revision: number;
+  localMappingId: string;
+  createdAt: number;
+  revokedAt?: number;
+}>;
+export type SafeProfileVersion = Readonly<{
+  runnerId: RegisteredRunnerId;
+  profileId: SafeProfileId;
+  displayName: string;
+  adapter: RunnerAdapter;
+  hosts: readonly ExecutionHost[];
+  interactions: readonly InteractionMode[];
+  riskSummary: string;
+  version: number;
+  fingerprint: string;
+  createdAt: number;
+}>;
+
+export type ExposureSubject = Readonly<{
+  runnerId: RegisteredRunnerId;
+  ownerMemberId: MemberId;
+  projectId: ProjectId;
+  mappingRevision: number;
+  profileId: SafeProfileId;
+  profileVersion: number;
+  profileFingerprint: string;
+  policyRevision: number;
+  securityPolicyVersion: number;
+  securityDigest: string;
+}>;
+export type ExposureAcknowledgementPreview = Readonly<{
+  subject: ExposureSubject;
+  text: string;
+  digest: string;
+}>;
+export type ExposureAcknowledgement = ExposureSubject &
+  Readonly<{
+    id: ExposureAcknowledgementId;
+    version: number;
+    text: string;
+    digest: string;
+    acceptedAt: number;
+    revokedAt?: number;
+  }>;
+export type TeamDispatchExposure = ExposureSubject &
+  Readonly<{
+    id: string;
+    acknowledgementId: ExposureAcknowledgementId;
+    revision: number;
+    createdAt: number;
+    revokedAt?: number;
+  }>;
+
+export type RunnerLeaseView = Readonly<{
+  runnerId: RegisteredRunnerId;
+  runnerEpoch: number;
+  state: RunnerLeaseState;
+  lastHeartbeatAt?: number;
+  observedAt: number;
+}>;
+export type RunnerRevocation = Readonly<{
+  runnerId: RegisteredRunnerId;
+  runnerEpoch: number;
+  disposition: "REVOKED";
+  revokedAt: number;
+}>;
+export type RunnerEligibilityFacts = Readonly<{
+  disposition: "CURRENT" | "STALE";
+  authorizationSource: "OWNER" | "TEAM_EXPOSURE";
+  runnerEpoch: number;
+  policyRevision: number;
+  mappingRevision: number;
+  profileId: SafeProfileId;
+  profileVersion: number;
+  profileFingerprint: string;
+  exposureRevision?: number;
+  acknowledgementVersion?: number;
+  lease: RunnerLeaseView;
+  staleReasons: readonly string[];
+}>;
+
+export type RunnerAccessIssue = Readonly<{
+  accessToken: string;
+  nonce: string;
+  runnerId: RegisteredRunnerId;
+  runnerEpoch: number;
+  keyThumbprint: string;
+  expiresAt: number;
+}>;
+
+export type BeginRunnerPairing = Readonly<{ principal: VerifiedDevicePrincipal }>;
+export type ConfirmRunnerPairing = Readonly<{ actor: MemberActor; pairingId: string }>;
+export type ConsumeRunnerPairing = Readonly<{
+  pairingSecret: string;
+  keyId: string;
+  keyProof: string;
+}>;
+export type RegisterRunnerMapping = Readonly<{
+  actor: MemberActor;
+  runnerId: RegisteredRunnerId;
+  projectId: ProjectId;
+  localMappingId: string;
+}>;
+export type ReplaceRunnerMapping = RegisterRunnerMapping & Readonly<{ expectedRevision: number }>;
+export type RevokeRunnerMapping = Readonly<{
+  actor: MemberActor;
+  runnerId: RegisteredRunnerId;
+  projectId: ProjectId;
+  expectedRevision: number;
+}>;
+export type AdvertiseSafeProfileVersion = Readonly<{
+  actor: MemberActor;
+  runnerId: RegisteredRunnerId;
+  profileId?: SafeProfileId;
+  expectedVersion?: number;
+  displayName: string;
+  adapter: RunnerAdapter;
+  hosts: readonly ExecutionHost[];
+  interactions: readonly InteractionMode[];
+  riskSummary: string;
+  fingerprint: string;
+}>;
+export type PreviewExposureAcknowledgement = Readonly<{
+  actor: MemberActor;
+  runnerId: RegisteredRunnerId;
+  projectId: ProjectId;
+  mappingRevision: number;
+  profileId: SafeProfileId;
+  profileVersion: number;
+}>;
+export type AcknowledgeTeamExposure = ExposureSubject &
+  Readonly<{ actor: MemberActor; expectedDigest: string }>;
+export type RevokeExposureAcknowledgement = Readonly<{
+  actor: MemberActor;
+  acknowledgementId: ExposureAcknowledgementId;
+}>;
+export type CreateTeamExposure = Readonly<{
+  actor: MemberActor;
+  acknowledgementId: ExposureAcknowledgementId;
+}>;
+export type RevokeTeamExposure = Readonly<{
+  actor: MemberActor;
+  exposureId: string;
+  expectedRevision: number;
+}>;
+export type RunnerHeartbeat = Readonly<{ principal: VerifiedRunnerPrincipal }>;
+export type RevokeRunner = Readonly<{
+  actor: MemberActor;
+  runnerId: RegisteredRunnerId;
+  expectedRunnerEpoch: number;
+}>;
+export type InspectRunnerEligibility = Readonly<{
+  actor: MemberActor;
+  runnerId: RegisteredRunnerId;
+  projectId: ProjectId;
+  mappingRevision: number;
+  profileId: SafeProfileId;
+  profileVersion: number;
+  exposureId?: string;
+}>;
+
+export type CommittedRunnerPolicyReplacement = Readonly<{
+  runnerId: RegisteredRunnerId;
+  expectedPolicyRevision: number;
+  audience: RunnerDispatchAudience;
+  maximumConcurrentAttempts: number;
+}>;
+export type RunnerPolicyFacts = Readonly<{
+  runnerId: RegisteredRunnerId;
+  audience: RunnerDispatchAudience;
+  maximumConcurrentAttempts: number;
+  policyRevision: number;
+}>;
+
+export type ExchangeRunnerCredential = Readonly<{ runnerCredential: string; keyProof: string }>;
+export type AuthenticateRunnerAccess = Readonly<{
+  accessToken: string;
+  proof: string;
+  nonce: string;
+  method: "GET";
+  uri: string;
+}>;

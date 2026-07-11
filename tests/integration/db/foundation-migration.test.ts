@@ -159,7 +159,7 @@ describe("migrate", () => {
     }
   });
 
-  test("creates the complete version 2 foundation schema idempotently", () => {
+  test("creates the complete version 3 foundation schema idempotently", () => {
     const db = memoryDatabase();
     try {
       migrate(db);
@@ -204,10 +204,11 @@ describe("migrate", () => {
       ).toEqual([
         { version: 1, applied_at: expect.any(Number) },
         { version: 2, applied_at: expect.any(Number) },
+        { version: 3, applied_at: expect.any(Number) },
       ]);
       expect(
         db.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get(),
-      ).toEqual({ count: 2 });
+      ).toEqual({ count: 3 });
     } finally {
       db.close();
     }
@@ -640,7 +641,7 @@ describe("migrate", () => {
   });
 
   test("refuses a database with an unknown newer schema version", () => {
-    const db = databaseWithHistory([1, 2, 3]);
+    const db = databaseWithHistory([1, 2, 3, 4]);
     try {
       expect(() => migrate(db)).toThrow("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
     } finally {

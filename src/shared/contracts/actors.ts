@@ -2,6 +2,9 @@ import { z } from "zod";
 import type { MemberId, RegisteredRunnerId, SessionId, WorkflowExecutionId } from "./ids.ts";
 import { IdentifierSchema } from "./ids.ts";
 
+declare const verifiedDevice: unique symbol;
+declare const verifiedRunner: unique symbol;
+
 export type MemberActor = Readonly<{
   kind: "MEMBER";
   memberId: MemberId;
@@ -19,6 +22,26 @@ export type RunnerActor = Readonly<{
   kind: "RUNNER";
   runnerId: RegisteredRunnerId;
   runnerEpoch: number;
+}>;
+
+export type VerifiedDevicePrincipal = Readonly<{
+  kind: "VERIFIED_DEVICE";
+  memberId: MemberId;
+  memberAuthorityEpoch: number;
+  deviceFamilyId: string;
+  deviceId: string;
+  senderKeyThumbprint: string;
+  readonly [verifiedDevice]: true;
+}>;
+
+export type VerifiedRunnerPrincipal = Readonly<{
+  kind: "VERIFIED_RUNNER";
+  runnerId: RegisteredRunnerId;
+  runnerEpoch: number;
+  ownerMemberId: MemberId;
+  keyThumbprint: string;
+  accessExpiresAt: number;
+  readonly [verifiedRunner]: true;
 }>;
 
 export type AuthenticatedActor = MemberActor | SchedulerActor | RunnerActor;

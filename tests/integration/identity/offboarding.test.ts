@@ -25,6 +25,27 @@ function fixture() {
       'family_1', 'member_1', 'device_1', 'thumbprint_1', X'${"33".repeat(32)}',
       1, 0, 10000, 10000
     );
+    INSERT INTO projects(id, team_id, name, base_branch, revision, created_at)
+      VALUES ('project_1', 'team_1', 'Project', 'main', 1, 0);
+    INSERT INTO runners(
+      id, owner_member_id, runner_epoch, policy_revision, dispatch_audience,
+      maximum_concurrent_attempts, security_policy_version, security_digest,
+      revision, created_at
+    ) VALUES ('runner_1', 'member_1', 1, 1, 'OWNER_ONLY', 1, 1, '${"0".repeat(64)}', 1, 0);
+    INSERT INTO runner_credentials(
+      id, runner_id, credential_hash, key_thumbprint, runner_epoch,
+      member_authority_epoch, revision, created_at
+    ) VALUES ('runner_credential_1', 'runner_1', X'${"44".repeat(32)}', 'runner_thumb_1', 1, 1, 1, 0);
+    INSERT INTO runner_mapping_versions(
+      runner_id, project_id, revision, local_mapping_id, created_at
+    ) VALUES ('runner_1', 'project_1', 1, 'opaque_mapping_1', 0);
+    INSERT INTO runner_pairings(
+      id, pairing_secret_hash, device_member_id, device_member_authority_epoch,
+      device_family_id, device_id, device_key_thumbprint, state, revision, created_at, expires_at
+    ) VALUES (
+      'runner_pairing_1', X'${"55".repeat(32)}', 'member_1', 1,
+      'family_1', 'device_1', 'thumbprint_1', 'PENDING', 1, 500, 1100
+    );
   `);
   const dispatched: string[] = [];
   const authority = createMemberRevocationAuthority({
@@ -81,6 +102,34 @@ describe("member offboarding", () => {
           )
           .get()?.revoked_at,
       ).toBe(1_000);
+      expect(
+        f.database
+          .query<{ runner_epoch: number; revoked_at: number | null }, []>(
+            "SELECT runner_epoch, revoked_at FROM runners WHERE id = 'runner_1'",
+          )
+          .get(),
+      ).toEqual({ runner_epoch: 2, revoked_at: 1_000 });
+      expect(
+        f.database
+          .query<{ revoked_at: number | null }, []>(
+            "SELECT revoked_at FROM runner_credentials WHERE id = 'runner_credential_1'",
+          )
+          .get()?.revoked_at,
+      ).toBe(1_000);
+      expect(
+        f.database
+          .query<{ state: string }, []>(
+            "SELECT state FROM runner_pairings WHERE id = 'runner_pairing_1'",
+          )
+          .get()?.state,
+      ).toBe("REVOKED");
+      expect(
+        f.database
+          .query<{ cause: string; runner_epoch: number; status: string }, []>(
+            "SELECT cause, runner_epoch, status FROM runner_authority_change_outbox WHERE runner_id = 'runner_1'",
+          )
+          .get(),
+      ).toEqual({ cause: "MEMBER_OFFBOARDING", runner_epoch: 2, status: "PENDING" });
     } finally {
       f.database.close();
     }

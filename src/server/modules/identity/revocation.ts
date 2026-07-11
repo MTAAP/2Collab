@@ -130,6 +130,41 @@ export function removeMemberTransaction(
         "UPDATE encrypted_credentials SET revoked_at = ?, revision = revision + 1, updated_at = ? WHERE owner_kind = 'MEMBER' AND owner_id = ? AND revoked_at IS NULL",
       )
       .run(now, now, command.memberId);
+    const ownedRunners = database
+      .query<{ id: string; runner_epoch: number }, [string]>(
+        "SELECT id, runner_epoch FROM runners WHERE owner_member_id = ? AND revoked_at IS NULL",
+      )
+      .all(command.memberId);
+    for (const runner of ownedRunners) {
+      const runnerEpoch = runner.runner_epoch + 1;
+      database
+        .query(
+          `UPDATE runners SET runner_epoch = ?, revision = revision + 1, revoked_at = ?
+           WHERE id = ? AND runner_epoch = ? AND revoked_at IS NULL`,
+        )
+        .run(runnerEpoch, now, runner.id, runner.runner_epoch);
+      for (const statement of [
+        "UPDATE runner_credentials SET revoked_at = ?, revision = revision + 1 WHERE runner_id = ? AND revoked_at IS NULL",
+        "UPDATE runner_mapping_versions SET revoked_at = ? WHERE runner_id = ? AND revoked_at IS NULL",
+        "UPDATE runner_exposure_acknowledgements SET revoked_at = ? WHERE runner_id = ? AND revoked_at IS NULL",
+        "UPDATE runner_exposures SET revoked_at = ?, revision = revision + 1 WHERE runner_id = ? AND revoked_at IS NULL",
+      ]) {
+        database.query(statement).run(now, runner.id);
+      }
+      database
+        .query(
+          `INSERT INTO runner_authority_change_outbox(
+             id, runner_id, cause, runner_epoch, status, created_at
+           ) VALUES (?, ?, 'MEMBER_OFFBOARDING', ?, 'PENDING', ?)`,
+        )
+        .run(dependencies.id("runner_authority"), runner.id, runnerEpoch, now);
+    }
+    database
+      .query(
+        `UPDATE runner_pairings SET state = 'REVOKED', revoked_at = ?, revision = revision + 1
+         WHERE device_member_id = ? AND state IN ('PENDING', 'CONFIRMED')`,
+      )
+      .run(now, command.memberId);
     database
       .query(
         `INSERT INTO authority_revocation_outbox(

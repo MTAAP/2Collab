@@ -38,11 +38,15 @@ type Dependencies = Readonly<{
 }>;
 
 export type DeviceAccess = Readonly<{
+  kind: "VERIFIED_DEVICE";
   memberId: string;
+  memberAuthorityEpoch: number;
+  deviceFamilyId: string;
   deviceId: string;
   senderKeyThumbprint: string;
   expiresAt: number;
-}>;
+}> &
+  import("../../../shared/contracts/actors.ts").VerifiedDevicePrincipal;
 
 type CodeRow = Readonly<{
   id: string;
@@ -504,13 +508,16 @@ export function createDeviceAuthority(dependencies: Dependencies) {
         .query<
           Readonly<{
             member_id: string;
+            member_authority_epoch: number;
+            family_id: string;
             device_id: string;
             sender_key_thumbprint: string;
             expires_at: number;
           }>,
           [Uint8Array, string, number]
         >(
-          `SELECT families.member_id, families.device_id, tokens.sender_key_thumbprint, tokens.expires_at
+          `SELECT families.member_id, families.member_authority_epoch, families.id AS family_id,
+                  families.device_id, tokens.sender_key_thumbprint, tokens.expires_at
            FROM device_access_tokens AS tokens
            JOIN device_credential_families AS families ON families.id = tokens.family_id
            JOIN members ON members.id = families.member_id
@@ -524,11 +531,14 @@ export function createDeviceAuthority(dependencies: Dependencies) {
         ? {
             ok: true,
             value: {
+              kind: "VERIFIED_DEVICE",
               memberId: row.member_id,
+              memberAuthorityEpoch: row.member_authority_epoch,
+              deviceFamilyId: row.family_id,
               deviceId: row.device_id,
               senderKeyThumbprint: row.sender_key_thumbprint,
               expiresAt: row.expires_at,
-            },
+            } as DeviceAccess,
           }
         : error("DEVICE_ACCESS_INVALID", "Device access credential is invalid.");
     },
