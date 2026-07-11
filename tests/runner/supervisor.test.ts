@@ -69,6 +69,9 @@ describe("runner supervisor", () => {
           order.push("enforcement");
           return { ok: true, value: { sessionId: "enforcement_1" } };
         },
+        async inspect() {
+          return { ok: true, value: { state: "ACTIVE" as const, assurance: "ADVISORY" as const } };
+        },
         async revoke() {
           return { ok: true, value: undefined };
         },
@@ -137,6 +140,10 @@ describe("runner supervisor", () => {
       enforcement: {
         assurance: "ADVISORY",
         activate: async () => ({ ok: true, value: { sessionId: "enforcement_1" } }),
+        inspect: async () => ({
+          ok: true,
+          value: { state: "ACTIVE" as const, assurance: "ADVISORY" as const },
+        }),
         revoke: async () => ({ ok: true, value: undefined }),
       },
       permits: {

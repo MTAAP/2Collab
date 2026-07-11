@@ -4,6 +4,7 @@ import type {
   ExecutionAdapter,
   ExecutionHost,
   HostProcess,
+  RepositoryEnforcementAdapter,
   RuntimeAdapter,
 } from "./execution-contract.ts";
 
@@ -41,13 +42,7 @@ type Dependencies = Readonly<{
   environment: Readonly<{
     build(profile: CustomLaunchProfile): Result<Readonly<Record<string, string>>>;
   }>;
-  enforcement: Readonly<{
-    assurance: "ADVISORY" | "ENFORCED";
-    activate(
-      input: Readonly<{ worktree: WorktreeHandle; assurance: "ADVISORY" | "ENFORCED" }>,
-    ): Promise<Result<Readonly<{ sessionId: string }>>>;
-    revoke(sessionId: string): Promise<Result<void>>;
-  }>;
+  enforcement: RepositoryEnforcementAdapter;
   permits: Readonly<{
     consume(
       input: Readonly<{ permit: string; attemptId: string; assignmentDigest: string }>,

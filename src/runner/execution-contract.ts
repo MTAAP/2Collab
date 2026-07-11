@@ -98,3 +98,17 @@ export interface TrustedHostPort {
   inspect(opaqueProcessId: string): Promise<"RUNNING" | "EXITED" | "UNKNOWN">;
   attach(opaqueProcessId: string): Promise<Readonly<{ localAttachmentId: string }>>;
 }
+
+export interface RepositoryEnforcementAdapter {
+  readonly assurance: "ADVISORY" | "ENFORCED";
+  activate(
+    input: Readonly<{
+      worktree: Readonly<{ id: string }>;
+      assurance: "ADVISORY" | "ENFORCED";
+    }>,
+  ): Promise<Result<Readonly<{ sessionId: string }>>>;
+  inspect(
+    sessionId: string,
+  ): Promise<Result<Readonly<{ state: "ACTIVE" | "REVOKED"; assurance: "ADVISORY" | "ENFORCED" }>>>;
+  revoke(sessionId: string): Promise<Result<void>>;
+}
