@@ -1,4 +1,6 @@
 import type { LocalProjectRegistry } from "../runner/repository/global-registry.ts";
+import type { TemplateBindingOperations } from "../server/modules/templates/bindings.ts";
+import type { WorkflowAuthoringOperations } from "../server/modules/workflows/authoring.ts";
 import { APP_METADATA } from "../shared/app-metadata.ts";
 import { readServerEnvironment } from "../shared/environment.ts";
 import type { PublicRunClient } from "./api-client.ts";
@@ -7,11 +9,10 @@ import { listCurrentProject } from "./commands/list.ts";
 import { listKnownProjects } from "./commands/projects.ts";
 import { startRun } from "./commands/start.ts";
 import { projectStatus } from "./commands/status.ts";
-import type { ProjectsApi } from "./ports/projects-api.ts";
-import type { WorkflowAuthoringOperations } from "../server/modules/workflows/authoring.ts";
-import type { TemplateBindingOperations } from "../server/modules/templates/bindings.ts";
-import { workflowCommand } from "./commands/workflows.ts";
 import { templateCommand } from "./commands/templates.ts";
+import { workflowCommand } from "./commands/workflows.ts";
+import type { DeviceEnrollment } from "./credentials.ts";
+import type { ProjectsApi } from "./ports/projects-api.ts";
 
 export type CliIo = {
   error: (line: string) => void;
@@ -28,6 +29,7 @@ export type CliDependencies = {
   mcpBridge?: () => Promise<void>;
   workflowOperations?: WorkflowAuthoringOperations;
   templateOperations?: TemplateBindingOperations;
+  deviceEnrollment?: DeviceEnrollment;
 };
 
 const defaultIo: CliIo = {
@@ -42,6 +44,7 @@ const HELP = [
   "",
   "Commands:",
   "  doctor     Validate the local bootstrap runtime and server configuration",
+  "  auth       Begin or complete OS-keychain-backed device enrollment",
   "  init       Link the current checkout to an existing Project",
   "  list       Show the current Project coordination view",
   "  projects   Show all locally known Projects",
@@ -85,6 +88,28 @@ export async function runCli(
     io.log(`Configuration: ${environment.mode} ${environment.hostname}:${environment.port}`);
     io.log("Status: READY (bootstrap diagnostics only)");
     return 0;
+  }
+
+  if (command === "auth") {
+    if (!dependencies.deviceEnrollment) {
+      io.error("OS_CREDENTIAL_STORE_UNAVAILABLE");
+      return 3;
+    }
+    try {
+      if (commandArgs.length === 1 && commandArgs[0] === "begin") {
+        io.log(JSON.stringify(await dependencies.deviceEnrollment.begin()));
+        return 0;
+      }
+      if (commandArgs.length === 1 && commandArgs[0] === "complete") {
+        io.log(JSON.stringify(await dependencies.deviceEnrollment.complete()));
+        return 0;
+      }
+      io.error("AUTH_ARGUMENTS_INVALID");
+      return 2;
+    } catch (error) {
+      io.error(error instanceof Error ? error.message : "DEVICE_ENROLLMENT_FAILED");
+      return 1;
+    }
   }
 
   if (command === "start" || command === "run") {

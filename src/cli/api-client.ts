@@ -1,10 +1,12 @@
 import { z } from "zod";
+import type { TemplateBindingOperations } from "../server/modules/templates/bindings.ts";
+import type { WorkflowAuthoringOperations } from "../server/modules/workflows/authoring.ts";
+import { type ProjectView, ProjectViewSchema } from "../shared/contracts/projects.ts";
 import {
   type PublicRunClient,
   PublicRunOperationResultSchema,
   type PublicRunResult,
 } from "../shared/contracts/public-api.ts";
-import { ProjectViewSchema, type ProjectView } from "../shared/contracts/projects.ts";
 import { DomainErrorSchema, type Result } from "../shared/contracts/result.ts";
 import {
   type ProjectIdentityRequest,
@@ -154,5 +156,44 @@ export function createProjectsApiClient(dependencies: ProjectsApiDependencies): 
         ProjectListResultSchema,
       ) as Promise<Result<readonly ProjectView[]>>;
     },
+  };
+}
+
+const AutomationResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), value: z.unknown() }).strict(),
+  z.object({ ok: z.literal(false), error: DomainErrorSchema }).strict(),
+]);
+
+export function createAutomationApiClient(dependencies: Dependencies): Readonly<{
+  workflows: WorkflowAuthoringOperations;
+  templates: TemplateBindingOperations;
+}> {
+  const post = async (path: string, body: unknown) => {
+    const url = new URL(path, dependencies.baseUrl).toString();
+    try {
+      const credentialHeaders = await dependencies.credentials.headers({ method: "POST", url });
+      const response = await (dependencies.fetch ?? fetch)(url, {
+        method: "POST",
+        headers: {
+          ...Object.fromEntries(new Headers(credentialHeaders)),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        redirect: "error",
+      });
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) return unavailable();
+      const parsed = AutomationResultSchema.safeParse(JSON.parse(text));
+      return parsed.success ? parsed.data : unavailable();
+    } catch {
+      return unavailable();
+    }
+  };
+  return {
+    workflows: {
+      save: (command) =>
+        post(`/api/v1/workflow-drafts/${encodeURIComponent(command.draftId)}`, command) as never,
+    },
+    templates: { bind: (command) => post("/api/v1/workflow-presets/bind", command) },
   };
 }

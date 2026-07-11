@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Hono } from "hono";
+import type { VerifiedRunnerPrincipal } from "../../../shared/contracts/actors.ts";
 import type { RunnerEnvelope } from "../../../shared/contracts/protocol.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import type { ServerEnvironment } from "../../../shared/environment.ts";
@@ -30,7 +31,7 @@ export type ProductionRunnerInfrastructure = Readonly<{
   runConfiguration: RunConfigurationResolutionPort;
   permitCodec: PermitCodec;
   defaultSecurityDigest: string;
-  acceptGateEvent: (body: GateBody) => Promise<Result<unknown>>;
+  acceptGateEvent: (body: GateBody, principal: VerifiedRunnerPrincipal) => Promise<Result<unknown>>;
   id?: (prefix: string) => string;
 }>;
 
@@ -154,7 +155,7 @@ export async function createProductionServer(
           body.redactionVersion,
           body.truncated,
         ),
-      acceptGateEvent: (body) => infrastructure.acceptGateEvent(body),
+      acceptGateEvent: (body, principal) => infrastructure.acceptGateEvent(body, principal),
     },
   });
   dispatch.bind(server.runnerControl);

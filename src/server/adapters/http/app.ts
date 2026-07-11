@@ -1,16 +1,17 @@
 import { Hono } from "hono";
 import type { PublicAuthenticationPort } from "./middleware/authentication.ts";
-import type { PublicRateLimitPort } from "./middleware/request-limits.ts";
 import type {
   OutlineHttpSecurity,
   OutlineProjectAuthorization,
 } from "./middleware/outline-security.ts";
+import type { PublicRateLimitPort } from "./middleware/request-limits.ts";
 import type { PublicRunOperations } from "./public-schemas.ts";
 import { createBrowserAuthRoutes } from "./routes/auth.ts";
-import { createRunRoutes } from "./routes/runs.ts";
 import { createOutlineConnectorRoutes } from "./routes/connectors-outline.ts";
+import { createDeviceAuthRoutes } from "./routes/device-auth.ts";
 import { createOutlineDocumentRoutes } from "./routes/outline-documents.ts";
 import { createOutlineSearchRoutes } from "./routes/outline-search.ts";
+import { createRunRoutes } from "./routes/runs.ts";
 import { foundationSecurityHeaders } from "./security-headers.ts";
 
 export type FoundationHttpDependencies = Readonly<{
@@ -19,6 +20,7 @@ export type FoundationHttpDependencies = Readonly<{
   rateLimits: PublicRateLimitPort;
   runs: PublicRunOperations;
   browserIdentity?: Parameters<typeof createBrowserAuthRoutes>[0]["identity"];
+  deviceIdentity?: Parameters<typeof createDeviceAuthRoutes>[0]["authority"];
   mcp?: (request: Request) => Promise<Response>;
   readiness?: Readonly<{ ready: () => boolean }>;
   outline?: Readonly<{
@@ -45,6 +47,15 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
     context.header("cache-control", "no-store");
     await next();
   });
+  if (dependencies.deviceIdentity) {
+    app.route(
+      "/api/v1/device",
+      createDeviceAuthRoutes({
+        authority: dependencies.deviceIdentity,
+        authentication: dependencies.authentication,
+      }),
+    );
+  }
   if (dependencies.browserIdentity) {
     app.route(
       "/api/v1",
