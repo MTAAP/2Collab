@@ -13,3 +13,36 @@ export const UsageMetricSchema = z
     modelLabel: z.string().min(1).max(120).optional(),
   })
   .strict();
+
+export type AttemptUsageEligibility = Readonly<{
+  attemptId: string;
+  runtime: string;
+  provider: string;
+  profileId?: string;
+  profileVersion?: number;
+  declaredModel?: string;
+  startedAt?: number;
+  endedAt?: number;
+}>;
+
+export type UsageObservation = Readonly<{
+  observationId: string;
+  attemptId: string;
+  runtime: string;
+  provider: string;
+  modelIdentifier: string;
+  category: UsageMetric["category"];
+  units: number | "UNKNOWN";
+  observedAt: number;
+}>;
+
+export type UsageCoverageGroup = Readonly<{
+  runtime: string;
+  provider: string;
+  modelIdentifier: string;
+  category: UsageMetric["category"];
+  knownUnits: number;
+  knownAttempts: number;
+  totalAttempts: number;
+  coverage: "NONE" | "PARTIAL" | "COMPLETE";
+}>;

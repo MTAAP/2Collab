@@ -92,3 +92,38 @@ export const BootstrapEnvelopeSchema = z
   .strict();
 
 export type BootstrapEnvelope = Readonly<z.infer<typeof BootstrapEnvelopeSchema>>;
+
+export type ContextCategory =
+  | "COORDINATION"
+  | "SOURCE"
+  | "REPOSITORY"
+  | "PUBLISHED_GIT_REFERENCE"
+  | "INSTRUCTION"
+  | "CHECKPOINT"
+  | "EVIDENCE"
+  | "GATE";
+
+export type ContextReferenceStatus = "FRESH" | "STALE";
+export type ContextOmissionReason =
+  | "FORBIDDEN"
+  | "UNAVAILABLE"
+  | "DUPLICATE"
+  | "CATEGORY_LIMIT"
+  | "TOTAL_LIMIT";
+
+export type ReferenceFirstBootstrapEnvelope = Readonly<{
+  schemaVersion: 1;
+  contextRecipe: Readonly<{ id: string; version: number; digest: string }>;
+  references: readonly Readonly<{
+    category: ContextCategory;
+    referenceId: string;
+    observedRevision: string;
+    status: ContextReferenceStatus;
+    authoredPreview?: string;
+  }>[];
+  omissions: readonly Readonly<{
+    category: ContextCategory;
+    referenceId: string;
+    reason: ContextOmissionReason;
+  }>[];
+}>;
