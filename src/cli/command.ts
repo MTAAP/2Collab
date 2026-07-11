@@ -14,7 +14,7 @@ export type CliIo = {
   log: (line: string) => void;
 };
 
-type CliDependencies = {
+export type CliDependencies = {
   environment: Readonly<Record<string, string | undefined>>;
   runtimeVersion: string;
   cwd?: string;

@@ -1,14 +1,10 @@
 #!/usr/bin/env bun
 
 import { runCli } from "./command.ts";
-import { startStdioMcpBridge } from "./commands/mcp.ts";
-import { createTestRunClientFromEnvironment } from "./credentials.ts";
+import { createCliDependencies } from "./dependencies.ts";
 
-const runsApi = createTestRunClientFromEnvironment(Bun.env);
-process.exitCode = await runCli(Bun.argv.slice(2), undefined, {
-  environment: Bun.env,
-  runtimeVersion: Bun.version,
+const dependencies = createCliDependencies(Bun.env, {
   cwd: process.cwd(),
-  runsApi,
-  mcpBridge: runsApi ? () => startStdioMcpBridge(runsApi) : undefined,
+  runtimeVersion: Bun.version,
 });
+process.exitCode = await runCli(Bun.argv.slice(2), undefined, dependencies);

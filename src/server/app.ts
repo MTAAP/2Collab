@@ -35,6 +35,19 @@ export function createApp(
     }),
   );
 
+  app.get("/readyz", (context) => {
+    const readiness = dependencies?.readiness;
+    const ready = readiness ? readiness.ready() : true;
+    return ready
+      ? context.json({
+          apiVersion: APP_METADATA.apiVersion,
+          service: APP_METADATA.packageName,
+          status: "OK",
+          version: APP_METADATA.version,
+        })
+      : context.json({ status: "NOT_READY" }, 503);
+  });
+
   app.get("/api/v1", (context) =>
     context.json({
       apiVersion: APP_METADATA.apiVersion,

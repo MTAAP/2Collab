@@ -1,0 +1,10 @@
+{
+  "name": "2collab",
+  "displayName": "2Collab",
+  "version": "0.1.0",
+  "apiVersion": "v1",
+  "license": "MIT",
+  "description": "A self-hosted coordination surface for small developer teams and their local agent runtimes.",
+  "repository": "https://github.com/2collab/2collab",
+  "homepage": "https://github.com/2collab/2collab"
+}

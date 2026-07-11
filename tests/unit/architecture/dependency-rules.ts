@@ -29,6 +29,7 @@ function sourceLayer(path: string): Layer {
     path.startsWith("src/cli/") ||
     path.startsWith("src/web/") ||
     path === "src/server/app.ts" ||
+    path === "src/server/dependencies.ts" ||
     path === "src/server/index.ts"
   ) {
     return "ENTRYPOINT";
@@ -39,7 +40,13 @@ function sourceLayer(path: string): Layer {
 function entrypointFamily(path: string): "CLI" | "WEB" | "SERVER" | undefined {
   if (path.startsWith("src/cli/")) return "CLI";
   if (path.startsWith("src/web/")) return "WEB";
-  if (path === "src/server/app.ts" || path === "src/server/index.ts") return "SERVER";
+  if (
+    path === "src/server/app.ts" ||
+    path === "src/server/dependencies.ts" ||
+    path === "src/server/index.ts"
+  ) {
+    return "SERVER";
+  }
   return undefined;
 }
 

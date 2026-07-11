@@ -1,9 +1,17 @@
+import { z } from "zod";
 import {
   type PublicRunClient,
   PublicRunOperationResultSchema,
   type PublicRunResult,
 } from "../shared/contracts/public-api.ts";
-import type { Result } from "../shared/contracts/result.ts";
+import { ProjectViewSchema, type ProjectView } from "../shared/contracts/projects.ts";
+import { DomainErrorSchema, type Result } from "../shared/contracts/result.ts";
+import {
+  type ProjectIdentityRequest,
+  ProjectIdentityRequestSchema,
+  ProjectListRequestSchema,
+  type ProjectsApi,
+} from "./ports/projects-api.ts";
 
 type ResultOf<K extends PublicRunResult["kind"]> = Result<Extract<PublicRunResult, { kind: K }>>;
 
@@ -67,6 +75,84 @@ export function createPublicApiClient(dependencies: Dependencies): PublicRunClie
       const query = new URLSearchParams({ limit: String(input.limit) });
       if (input.after) query.set("after", input.after);
       return request("GET", `/api/v1/runs/${input.runId}/evidence?${query}`, "INSPECT_EVIDENCE");
+    },
+  };
+}
+
+type ProjectsApiDependencies = Readonly<{
+  credentials: DeviceCredentialProvider;
+  fetch?: typeof fetch;
+}>;
+
+const ProjectResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({ ok: z.literal(true), value: ProjectViewSchema, auditId: z.string().optional() })
+    .strict(),
+  z
+    .object({ ok: z.literal(false), error: DomainErrorSchema, auditId: z.string().optional() })
+    .strict(),
+]);
+
+const ProjectListResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      value: z.array(ProjectViewSchema),
+      auditId: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({ ok: z.literal(false), error: DomainErrorSchema, auditId: z.string().optional() })
+    .strict(),
+]);
+
+export function createProjectsApiClient(dependencies: ProjectsApiDependencies): ProjectsApi {
+  const request = async (
+    method: "GET",
+    serverOrigin: string,
+    path: string,
+    resultSchema: typeof ProjectResultSchema | typeof ProjectListResultSchema,
+  ): Promise<Result<ProjectView> | Result<readonly ProjectView[]>> => {
+    const url = new URL(path, serverOrigin).toString();
+    try {
+      const credentialHeaders = await dependencies.credentials.headers({ method, url });
+      const response = await (dependencies.fetch ?? fetch)(url, {
+        method,
+        headers: { ...Object.fromEntries(new Headers(credentialHeaders)) },
+        redirect: "error",
+      });
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) return unavailable();
+      const parsed = resultSchema.safeParse(JSON.parse(text));
+      if (!parsed.success) return unavailable();
+      if (!parsed.data.ok)
+        return parsed.data as Result<ProjectView> | Result<readonly ProjectView[]>;
+      return parsed.data as Result<ProjectView> | Result<readonly ProjectView[]>;
+    } catch {
+      return unavailable();
+    }
+  };
+
+  return {
+    inspect: async (input: ProjectIdentityRequest) => {
+      const parsed = ProjectIdentityRequestSchema.safeParse(input);
+      if (!parsed.success) return unavailable();
+      return request(
+        "GET",
+        parsed.data.serverOrigin,
+        `/api/v1/projects/${encodeURIComponent(parsed.data.projectId)}`,
+        ProjectResultSchema,
+      ) as Promise<Result<ProjectView>>;
+    },
+    list: async (input) => {
+      const parsed = ProjectListRequestSchema.safeParse(input);
+      if (!parsed.success) return unavailable();
+      return request(
+        "GET",
+        parsed.data.serverOrigin,
+        "/api/v1/projects",
+        ProjectListResultSchema,
+      ) as Promise<Result<readonly ProjectView[]>>;
     },
   };
 }

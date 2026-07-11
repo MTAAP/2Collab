@@ -5,11 +5,15 @@ describe("readServerEnvironment", () => {
   test("uses loopback-safe development defaults", () => {
     expect(readServerEnvironment({})).toEqual({
       backupDir: "./backups",
+      bootstrapSecretFile: undefined,
       dataDir: "./data",
       deploymentMasterKeyFile: undefined,
       hostname: "127.0.0.1",
       mode: "development",
       port: 3210,
+      publicBaseUrl: "http://localhost:3210",
+      rpId: "localhost",
+      rpName: "2Collab",
       runnerCompositionModule: undefined,
       sessionSecret: undefined,
     });

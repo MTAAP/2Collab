@@ -13,6 +13,7 @@ export type FoundationHttpDependencies = Readonly<{
   runs: PublicRunOperations;
   browserIdentity?: Parameters<typeof createBrowserAuthRoutes>[0]["identity"];
   mcp?: (request: Request) => Promise<Response>;
+  readiness?: Readonly<{ ready: () => boolean }>;
 }>;
 
 export function createFoundationHttpApp(dependencies: FoundationHttpDependencies): Hono {
