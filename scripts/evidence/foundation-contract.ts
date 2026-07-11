@@ -107,7 +107,7 @@ export const RestoreEvidenceSchema = z
 
 export const DogfoodDaySchema = z
   .object({
-    evidenceId: OpaqueId.optional(),
+    evidenceId: OpaqueId,
     localDate: z.string().date(),
     buildId: OpaqueId,
     completed: z.boolean(),
@@ -122,7 +122,12 @@ export const DogfoodDaySchema = z
     reviewer: Reviewer.optional(),
     correctionOf: OpaqueId.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((row, context) => {
+    if (row.reviewed !== Boolean(row.reviewer)) {
+      context.addIssue({ code: "custom", message: "reviewed state requires reviewer provenance" });
+    }
+  });
 
 export const FoundationEvidenceSchema = z
   .object({
@@ -139,6 +144,59 @@ export const FoundationEvidenceSchema = z
 
 export type FoundationEvidence = z.infer<typeof FoundationEvidenceSchema>;
 export type DogfoodDay = z.infer<typeof DogfoodDaySchema>;
+
+type CorrectableEvidence = Readonly<{
+  evidenceId: string;
+  correctionOf?: string;
+}>;
+
+function resolveCorrections<T extends CorrectableEvidence>(rows: readonly T[]): readonly T[] {
+  const byId = new Map<string, T>();
+  const superseded = new Set<string>();
+  for (const row of rows) {
+    if (byId.has(row.evidenceId)) throw new Error("EVIDENCE_ID_DUPLICATE");
+    if (row.correctionOf) {
+      if (!byId.has(row.correctionOf)) throw new Error("EVIDENCE_CORRECTION_TARGET_INVALID");
+      if (superseded.has(row.correctionOf)) throw new Error("EVIDENCE_CORRECTION_BRANCH_INVALID");
+      superseded.add(row.correctionOf);
+    }
+    byId.set(row.evidenceId, row);
+  }
+  return rows.filter((row) => !superseded.has(row.evidenceId));
+}
+
+export function resolveEffectiveDogfoodDays(days: readonly DogfoodDay[]): readonly DogfoodDay[] {
+  const effective = resolveCorrections(days);
+  const activeDates = new Set<string>();
+  for (const row of days) {
+    if (row.correctionOf) {
+      const original = days.find((candidate) => candidate.evidenceId === row.correctionOf);
+      if (!original || original.localDate !== row.localDate)
+        throw new Error("DOGFOOD_CORRECTION_DATE_INVALID");
+    }
+  }
+  for (const row of effective) {
+    if (activeDates.has(row.localDate)) throw new Error("DOGFOOD_DATE_DUPLICATE");
+    activeDates.add(row.localDate);
+  }
+  return [...effective].sort((left, right) => left.localDate.localeCompare(right.localDate));
+}
+
+function isAcceptedRestore(row: FoundationEvidence["restores"][number], buildId: string): boolean {
+  return (
+    row.result === "PASS" &&
+    row.reviewer !== undefined &&
+    row.buildId === buildId &&
+    row.freshAuthorityIncarnation &&
+    row.oldSessionsInvalid &&
+    row.oldCapabilitiesInvalid &&
+    row.oldPermitsInvalid &&
+    row.runnerEpochAdvanced &&
+    row.connectorEpochAdvanced &&
+    row.connectorReviewRequired &&
+    row.listenerDisabledUntilComplete
+  );
+}
 
 export function assertIanaTimezone(timezone: string): void {
   try {
@@ -215,13 +273,32 @@ export function deriveConsecutiveDayStreak(
 export function validateEvidence(input: FoundationEvidence): { status: "IN_PROGRESS_EXTERNAL" } {
   const evidence = FoundationEvidenceSchema.parse(input);
   assertIanaTimezone(evidence.timezone);
-  const dates = evidence.days.map((day) => day.localDate);
-  if (new Set(dates).size !== dates.length) throw new Error("DOGFOOD_DATE_DUPLICATE");
-  for (let index = 1; index < dates.length; index += 1) {
-    const current = dates[index];
-    const previous = dates[index - 1];
-    if (current === undefined || previous === undefined || current <= previous)
-      throw new Error("DOGFOOD_DATE_OUT_OF_ORDER");
+  const days = resolveEffectiveDogfoodDays(evidence.days);
+  const effectiveRestores = resolveCorrections(evidence.restores);
+  for (let index = 1; index < evidence.days.length; index += 1) {
+    const current = evidence.days[index]?.recordedAt;
+    const previous = evidence.days[index - 1]?.recordedAt;
+    if (!current || !previous || current <= previous)
+      throw new Error("DOGFOOD_RECORD_OUT_OF_ORDER");
+  }
+  for (const day of days) {
+    const accepted =
+      day.completed &&
+      day.reviewed &&
+      Boolean(day.reviewer) &&
+      day.directDatabaseRepair === "NO" &&
+      day.backupResult === "PASS";
+    if (!accepted) continue;
+    const restore = effectiveRestores.find(
+      (candidate) => candidate.evidenceId === day.restoreEvidenceId,
+    );
+    if (
+      !restore ||
+      day.buildId !== evidence.frozenBuild.buildId ||
+      !isAcceptedRestore(restore, day.buildId)
+    ) {
+      throw new Error("DOGFOOD_RESTORE_EVIDENCE_INVALID");
+    }
   }
   if (evidence.machines.length > 2) throw new Error("MACHINE_MATRIX_EXCESS_ENROLLMENT");
   return { status: "IN_PROGRESS_EXTERNAL" };
@@ -234,7 +311,7 @@ function activeMachines(evidence: FoundationEvidence): FoundationEvidence["machi
     if (!current || machine.generation > current.generation)
       byMachine.set(machine.machineId, machine);
   }
-  return [...byMachine.values()];
+  return [...byMachine.values()].filter((machine) => machine.reviewer !== undefined);
 }
 
 export function checkFoundationExit(
@@ -279,22 +356,11 @@ export function checkFoundationExit(
     if (!surfaces.has("WEB") || !surfaces.has("CLI"))
       missing.push(`${machine.ownerId}:WEB_AND_CLI`);
   }
-  const restore = evidence.restores.find(
-    (row) =>
-      row.result === "PASS" &&
-      row.reviewer &&
-      row.buildId === evidence.frozenBuild.buildId &&
-      row.freshAuthorityIncarnation &&
-      row.oldSessionsInvalid &&
-      row.oldCapabilitiesInvalid &&
-      row.oldPermitsInvalid &&
-      row.runnerEpochAdvanced &&
-      row.connectorEpochAdvanced &&
-      row.connectorReviewRequired &&
-      row.listenerDisabledUntilComplete,
+  const restore = resolveCorrections(evidence.restores).find((row) =>
+    isAcceptedRestore(row, evidence.frozenBuild.buildId),
   );
   if (!restore) missing.push("COPIED_ISOLATED_RESTORE");
-  if (deriveConsecutiveDayStreak(evidence.days) < 7)
+  if (deriveConsecutiveDayStreak(resolveEffectiveDogfoodDays(evidence.days)) < 7)
     missing.push("SEVEN_CONSECUTIVE_REVIEWED_DAYS");
   return missing.length === 0
     ? { ok: true, code: "FOUNDATION_EXIT_MET" }

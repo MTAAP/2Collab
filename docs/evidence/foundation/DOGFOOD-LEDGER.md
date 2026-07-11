@@ -13,7 +13,7 @@
 - Foundation status: IN_PROGRESS_EXTERNAL
 - Canonical exit: NOT_MET
 
-The timezone is locked before day one. Days are consecutive local calendar dates; DST does not alter calendar-date consecutiveness. Entries cannot be backfilled. A missing date, build change, direct database repair, incomplete or failed result, or missing authenticated review resets the derived streak. Corrections append a new record that refers to the original.
+The timezone is locked before day one. Days are consecutive local calendar dates; DST does not alter calendar-date consecutiveness. Entries cannot be backfilled. A missing date, build change, direct database repair, incomplete or failed result, missing authenticated review, or missing/unaccepted reviewed restore resets the derived streak. Corrections append a new uniquely identified record that supersedes exactly one active row for the same calendar date; unknown, cross-date, duplicate, or branching corrections are invalid.
 
 Direct SQLite repair means any manual statement or file edit that changes authoritative database contents outside shipped migrations, restore, or supported commands. Zero here means only that none has been observed yet; it is not period-wide proof.
 
