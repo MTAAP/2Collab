@@ -1,19 +1,19 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import {
   PublicCancelRunRequestSchema,
   PublicCreateRunRequestSchema,
   PublicInspectEvidenceRequestSchema,
   PublicInspectRunRequestSchema,
   PublicResumeRunRequestSchema,
+  type PublicRunClient,
   PublicRunOperationResultSchema,
   PublicRunResultSchema,
 } from "../../../shared/contracts/public-api.ts";
 import { DomainErrorSchema } from "../../../shared/contracts/result.ts";
-import type { PublicRunOperations } from "../http/public-schemas.ts";
+import type { PublicRunOperations } from "../../modules/public-surface/contract.ts";
 
-type Dependencies = Readonly<{ actor: MemberActor; runs: PublicRunOperations }>;
+type Dependencies = Readonly<{ runs: PublicRunClient }>;
 
 // SDK 1.29.0's output validation normalizes an object schema before parsing.
 // Keep the published tool output schema object-shaped while the callback below
@@ -44,7 +44,7 @@ export function registerPublicRunTools(server: McpServer, dependencies: Dependen
       inputSchema: PublicCreateRunRequestSchema,
       outputSchema: PublicRunToolOutputSchema,
     },
-    async (request) => toolResult(await dependencies.runs.create(dependencies.actor, request)),
+    async (request) => toolResult(await dependencies.runs.create(request)),
   );
   server.registerTool(
     "collab_run_inspect",
@@ -54,7 +54,7 @@ export function registerPublicRunTools(server: McpServer, dependencies: Dependen
       inputSchema: PublicInspectRunRequestSchema,
       outputSchema: PublicRunToolOutputSchema,
     },
-    async (request) => toolResult(await dependencies.runs.inspect(dependencies.actor, request)),
+    async (request) => toolResult(await dependencies.runs.inspect(request)),
   );
   server.registerTool(
     "collab_run_cancel",
@@ -64,7 +64,7 @@ export function registerPublicRunTools(server: McpServer, dependencies: Dependen
       inputSchema: PublicCancelRunRequestSchema,
       outputSchema: PublicRunToolOutputSchema,
     },
-    async (request) => toolResult(await dependencies.runs.cancel(dependencies.actor, request)),
+    async (request) => toolResult(await dependencies.runs.cancel(request)),
   );
   server.registerTool(
     "collab_run_resume",
@@ -74,7 +74,7 @@ export function registerPublicRunTools(server: McpServer, dependencies: Dependen
       inputSchema: PublicResumeRunRequestSchema,
       outputSchema: PublicRunToolOutputSchema,
     },
-    async (request) => toolResult(await dependencies.runs.resume(dependencies.actor, request)),
+    async (request) => toolResult(await dependencies.runs.resume(request)),
   );
   server.registerTool(
     "collab_run_evidence",
@@ -84,6 +84,19 @@ export function registerPublicRunTools(server: McpServer, dependencies: Dependen
       inputSchema: PublicInspectEvidenceRequestSchema,
       outputSchema: PublicRunToolOutputSchema,
     },
-    async (request) => toolResult(await dependencies.runs.evidence(dependencies.actor, request)),
+    async (request) => toolResult(await dependencies.runs.evidence(request)),
   );
+}
+
+export function bindPublicRunOperations(
+  actor: import("../../../shared/contracts/actors.ts").MemberActor,
+  operations: PublicRunOperations,
+): PublicRunClient {
+  return {
+    create: (request) => operations.create(actor, request),
+    inspect: (request) => operations.inspect(actor, request),
+    cancel: (request) => operations.cancel(actor, request),
+    resume: (request) => operations.resume(actor, request),
+    evidence: (request) => operations.evidence(actor, request),
+  };
 }

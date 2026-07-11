@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { createMcpHttpHandler } from "../mcp/http.ts";
 import type { PublicAuthenticationPort } from "./middleware/authentication.ts";
 import type { PublicRateLimitPort } from "./middleware/request-limits.ts";
 import type { PublicRunOperations } from "./public-schemas.ts";
@@ -11,6 +10,7 @@ export type FoundationHttpDependencies = Readonly<{
   authentication: PublicAuthenticationPort;
   rateLimits: PublicRateLimitPort;
   runs: PublicRunOperations;
+  mcp?: (request: Request) => Promise<Response>;
 }>;
 
 export function createFoundationHttpApp(dependencies: FoundationHttpDependencies): Hono {
@@ -21,8 +21,10 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
     await next();
   });
   app.route("/api/v1/runs", createRunRoutes(dependencies));
-  const mcp = createMcpHttpHandler(dependencies);
-  app.all("/mcp", (context) => mcp(context.req.raw));
+  if (dependencies.mcp) {
+    const mcp = dependencies.mcp;
+    app.all("/mcp", (context) => mcp(context.req.raw));
+  }
   app.notFound((context) =>
     context.json(
       { error: { code: "NOT_FOUND", message: "The requested API resource does not exist." } },

@@ -1,9 +1,11 @@
+import type { LocalProjectRegistry } from "../runner/repository/global-registry.ts";
 import { APP_METADATA } from "../shared/app-metadata.ts";
 import { readServerEnvironment } from "../shared/environment.ts";
-import type { LocalProjectRegistry } from "../runner/repository/global-registry.ts";
+import type { PublicRunClient } from "./api-client.ts";
 import { initProject } from "./commands/init.ts";
 import { listCurrentProject } from "./commands/list.ts";
 import { listKnownProjects } from "./commands/projects.ts";
+import { startRun } from "./commands/start.ts";
 import { projectStatus } from "./commands/status.ts";
 import type { ProjectsApi } from "./ports/projects-api.ts";
 
@@ -18,6 +20,8 @@ type CliDependencies = {
   cwd?: string;
   projectsApi?: ProjectsApi;
   registry?: LocalProjectRegistry;
+  runsApi?: PublicRunClient;
+  mcpBridge?: () => Promise<void>;
 };
 
 const defaultIo: CliIo = {
@@ -36,6 +40,9 @@ const HELP = [
   "  list       Show the current Project coordination view",
   "  projects   Show all locally known Projects",
   "  status     Show current Project status; use --all for all known Projects",
+  "  start      Create an Agent Run from a Personal Run Preset",
+  "  run        Exact alias for start",
+  "  mcp        Serve the public tools over stdio",
   "  --version  Print the CLI version",
   "  --help     Show this help",
 ];
@@ -69,6 +76,37 @@ export async function runCli(
     io.log(`Runtime: Bun ${dependencies.runtimeVersion}`);
     io.log(`Configuration: ${environment.mode} ${environment.hostname}:${environment.port}`);
     io.log("Status: READY (bootstrap diagnostics only)");
+    return 0;
+  }
+
+  if (command === "start" || command === "run") {
+    if (!dependencies.runsApi) {
+      io.error("DEVICE_AUTHENTICATION_REQUIRED");
+      return 3;
+    }
+    try {
+      const output = await startRun(commandArgs, dependencies.runsApi);
+      if (output.json) io.log(JSON.stringify(output.result));
+      else if (output.result.ok)
+        io.log(`Run ${output.result.value.run.id} is ${output.result.value.run.state}.`);
+      else io.error(output.result.error.code);
+      return output.result.ok ? 0 : 1;
+    } catch (error) {
+      io.error(error instanceof Error ? error.message : "RUN_ARGUMENTS_INVALID");
+      return 2;
+    }
+  }
+
+  if (command === "mcp") {
+    if (commandArgs.length > 0) {
+      io.error("MCP_ARGUMENTS_INVALID");
+      return 2;
+    }
+    if (!dependencies.mcpBridge) {
+      io.error("DEVICE_AUTHENTICATION_REQUIRED");
+      return 3;
+    }
+    await dependencies.mcpBridge();
     return 0;
   }
 

@@ -1,10 +1,13 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { PublicAuthenticationPort } from "../http/middleware/authentication.ts";
-import type { PublicRunOperations } from "../http/public-schemas.ts";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
+import type { Result } from "../../../shared/contracts/result.ts";
+import type { PublicRunOperations } from "../../modules/public-surface/contract.ts";
 import { createPublicMcpServer } from "./server.ts";
 
 type Dependencies = Readonly<{
-  authentication: PublicAuthenticationPort;
+  authentication: Readonly<{
+    authenticateDevice(request: Request): Promise<Result<MemberActor>>;
+  }>;
   runs: PublicRunOperations;
 }>;
 

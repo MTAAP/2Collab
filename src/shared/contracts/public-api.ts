@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CoordinationSelectionSchema } from "./context.ts";
 import { IdentifierSchema, InstantSchema, RevisionSchema } from "./ids.ts";
+import type { Result } from "./result.ts";
 import { DomainErrorSchema } from "./result.ts";
 import { GitRefSchema } from "./runners.ts";
 import { CoordinationRecordViewSchema, RunViewSchema } from "./runs.ts";
@@ -167,3 +168,15 @@ export type PublicInspectEvidenceRequest = Readonly<
 >;
 export type PublicRunResult = Readonly<z.infer<typeof PublicRunResultSchema>>;
 export type PublicRunOperationResult = Readonly<z.infer<typeof PublicRunOperationResultSchema>>;
+
+type PublicResultOf<K extends PublicRunResult["kind"]> = Result<
+  Extract<PublicRunResult, { kind: K }>
+>;
+
+export interface PublicRunClient {
+  create(request: PublicCreateRunRequest): Promise<PublicResultOf<"CREATE_RUN">>;
+  inspect(request: PublicInspectRunRequest): Promise<PublicResultOf<"INSPECT_RUN">>;
+  cancel(request: PublicCancelRunRequest): Promise<PublicResultOf<"CANCEL_RUN">>;
+  resume(request: PublicResumeRunRequest): Promise<PublicResultOf<"RESUME_RUN">>;
+  evidence(request: PublicInspectEvidenceRequest): Promise<PublicResultOf<"INSPECT_EVIDENCE">>;
+}

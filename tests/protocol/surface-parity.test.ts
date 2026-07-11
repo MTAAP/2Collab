@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createFoundationHttpApp } from "../../src/server/adapters/http/app.ts";
+import {
+  createFoundationHttpApp,
+  type FoundationHttpDependencies,
+} from "../../src/server/adapters/http/app.ts";
 import { domainHttpStatus } from "../../src/server/adapters/http/domain-results.ts";
+import { createMcpHttpHandler } from "../../src/server/adapters/mcp/http.ts";
 import type { PublicCreateRunRequest } from "../../src/shared/contracts/public-api.ts";
 import {
   PublicCreateRunRequestSchema,
@@ -336,7 +340,7 @@ describe("Foundation public run surface", () => {
   });
 
   test("installed SDK Streamable HTTP calls the same canonical run tool over actual Hono", async () => {
-    const app = createFoundationHttpApp({
+    const dependencies: Omit<FoundationHttpDependencies, "mcp"> = {
       configuredOrigin: "https://collab.example",
       authentication: {
         async authenticateBrowser() {
@@ -347,13 +351,13 @@ describe("Foundation public run surface", () => {
             "DPoP access_token_12345678901234567890" &&
             request.headers.get("dpop") === "signed-proof" &&
             request.headers.get("dpop-nonce") === "nonce_1"
-            ? { ok: true, value: ACTOR }
+            ? { ok: true as const, value: ACTOR }
             : {
-                ok: false,
+                ok: false as const,
                 error: {
                   code: "DEVICE_AUTHENTICATION_REQUIRED",
                   message: "Device authentication is required.",
-                  retry: "REFRESH",
+                  retry: "REFRESH" as const,
                 },
               };
         },
@@ -381,6 +385,10 @@ describe("Foundation public run surface", () => {
           throw new Error("not exercised");
         },
       },
+    };
+    const app = createFoundationHttpApp({
+      ...dependencies,
+      mcp: createMcpHttpHandler(dependencies),
     });
     const transport = new StreamableHTTPClientTransport(new URL("https://collab.example/mcp"), {
       requestInit: {
