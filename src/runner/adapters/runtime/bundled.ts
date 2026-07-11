@@ -24,12 +24,11 @@ function failure<T>(code: string, message: string): Result<T> {
 }
 
 function boundedText(value: string, maximum: number): boolean {
-  return (
-    value.length > 0 &&
-    Buffer.byteLength(value, "utf8") <= maximum &&
-    !value.includes("\0") &&
-    !/[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
-  );
+  const hasForbiddenControl = [...value].some((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code === 0 || (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127;
+  });
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= maximum && !hasForbiddenControl;
 }
 
 function validArguments(arguments_: readonly string[]): boolean {
@@ -154,7 +153,8 @@ export function createBundledExecutionAdapter(
           value: { kind: "PROCESS_EXIT", exitCode: event.exitCode, signal: event.signal },
         };
       }
-      return normalizeStructured(event.value);
+      if (event.kind === "STRUCTURED") return normalizeStructured(event.value);
+      return failure("RUNTIME_OUTPUT_INVALID", "Runtime output is invalid.");
     },
   };
 }
