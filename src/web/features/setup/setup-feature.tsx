@@ -29,7 +29,7 @@ export function SetupFeature() {
           method: "POST",
           body: JSON.stringify({
             idempotencyKey: crypto.randomUUID(),
-            principal: { kind: "BOOTSTRAP", secret: bootstrapSecret },
+            bootstrapSecret,
             displayName,
           }),
         },

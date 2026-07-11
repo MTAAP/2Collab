@@ -20,7 +20,8 @@ test("empty deployment bootstrap registers the owner passkey without exposing se
 
   await page.route("**/api/v1/auth/passkeys/registration/begin", async (route) => {
     const body = route.request().postDataJSON() as Record<string, unknown>;
-    expect(body).toMatchObject({ displayName: "Tim", principal: { kind: "BOOTSTRAP" } });
+    expect(body).toMatchObject({ displayName: "Tim", bootstrapSecret: "b".repeat(32) });
+    expect(body).not.toHaveProperty("principal");
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({

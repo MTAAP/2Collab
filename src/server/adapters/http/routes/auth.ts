@@ -1,8 +1,7 @@
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
-import type { BeginPasskeyRegistration } from "../../../../shared/contracts/identity.ts";
+import { z } from "zod";
 import {
-  BeginPasskeyRegistrationSchema,
   BootstrapDeploymentSchema,
   ExchangeInvitationSecretSchema,
 } from "../../../../shared/contracts/identity.ts";
@@ -18,6 +17,18 @@ type BrowserIdentityPort = Pick<
   IdentityAuthority,
   "beginPasskeyRegistration" | "bootstrap" | "exchangeInvitation"
 >;
+
+const PublicBeginBootstrapPasskeySchema = z
+  .object({
+    idempotencyKey: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/),
+    bootstrapSecret: z.string().min(32).max(512),
+    displayName: z.string().trim().min(1).max(120),
+  })
+  .strict();
 
 export function createBrowserAuthRoutes(
   dependencies: Readonly<{
@@ -42,11 +53,13 @@ export function createBrowserAuthRoutes(
   });
 
   app.post("/auth/passkeys/registration/begin", async (context) => {
-    const input = await parseBoundedJson(context, BeginPasskeyRegistrationSchema);
+    const input = await parseBoundedJson(context, PublicBeginBootstrapPasskeySchema);
     if (input instanceof Response) return input;
-    const result = await dependencies.identity.beginPasskeyRegistration(
-      input as BeginPasskeyRegistration,
-    );
+    const result = await dependencies.identity.beginPasskeyRegistration({
+      idempotencyKey: input.idempotencyKey,
+      principal: { kind: "BOOTSTRAP", secret: input.bootstrapSecret },
+      displayName: input.displayName,
+    });
     return result.ok
       ? context.json(result)
       : context.json(result, domainHttpStatus(result.error.code));
