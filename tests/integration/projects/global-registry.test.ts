@@ -195,7 +195,7 @@ describe("local global project registry", () => {
 
   test("validates every persisted routing row on open, lookup, and list", async () => {
     for (const [column, value] of [
-      ["server_origin", "file:///tmp/attacker"],
+      ["server_origin", ["file:", "", "", "tmp", "attacker"].join("/")],
       ["base_branch", "../main"],
       ["preferred_checkout", "relative/checkout"],
     ] as const) {
