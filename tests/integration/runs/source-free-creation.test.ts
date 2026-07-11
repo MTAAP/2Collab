@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { migrate } from "../../../src/server/db/migrate.ts";
+import { createDurableRunnerDispatch } from "../../../src/server/adapters/wss/durable-dispatch.ts";
+import { LiveOutputHub } from "../../../src/server/adapters/wss/live-output.ts";
 import { computeContextRecipeDigest } from "../../../src/server/modules/context/context-recipes.ts";
 import { canonicalSourceReferenceKey } from "../../../src/server/modules/coordination-records/canonical-key.ts";
 import {
@@ -54,12 +56,21 @@ const RESOLVED_CONFIGURATION = resolveEffectiveRunConfiguration(
     executionPolicy: "ONCE",
     maximumAttempts: 3,
     deadlineSeconds: 900,
+    derivedTemplate: { id: "template_1", version: 1 },
     contextRecipeId: "recipe_1",
     contextRecipeVersion: 1,
     requiredGates: [],
+    personalAddendum: "Personal addendum.",
   },
   {
     runGoal: "Implement the bounded Foundation slice.",
+    authoredRunInput: "This run input.",
+    teamTemplate: {
+      id: "template_1",
+      version: 1,
+      coreInstructions: "Team core instructions.",
+      typedVariables: { reviewDepth: "DEEP", stopOnConflict: true },
+    },
     authorityFacts: {
       projectRevision: 1,
       runnerPolicyRevision: 1,
@@ -82,6 +93,7 @@ const RESOLVED_CONFIGURATION = resolveEffectiveRunConfiguration(
 if (!RESOLVED_CONFIGURATION.ok) throw new Error(RESOLVED_CONFIGURATION.error.code);
 const PREPARED_CONFIGURATION = prepareRunConfigurationSnapshot({
   configuration: RESOLVED_CONFIGURATION.value,
+  authoredRunInput: "This run input.",
   envelope: {
     schemaVersion: 1,
     contextRecipe: { id: "recipe_1", version: 1, digest: RECIPE_DIGEST },
@@ -135,10 +147,10 @@ function seedAuthorityFacts(database: Database): void {
       context_recipe_version, reusable_goal_template, reusable_instruction_template,
       personal_addendum, configuration_digest, created_at
     ) VALUES (
-      'configuration_1', 1, NULL, NULL, 'runner_1', 1, 1, 'profile_1', 1,
+      'configuration_1', 1, 'template_1', 1, 'runner_1', 1, 1, 'profile_1', 1,
       '${PROFILE_FINGERPRINT}', 'NATIVE', 'HEADLESS', 'INSPECT_ONLY', 'ADVISORY',
       'ONCE', 3, 900, NULL, NULL, NULL, NULL, NULL, NULL, 'recipe_1', 1,
-      NULL, NULL, NULL, '${"e".repeat(64)}', 0
+      NULL, NULL, 'Personal addendum.', '${"e".repeat(64)}', 0
     );
     INSERT INTO context_recipes(
       id, project_id, display_name, current_version, state, revision, created_at, updated_at
@@ -469,6 +481,42 @@ describe("source-free launch persistence", () => {
       ]) {
         expect(persisted).not.toContain(canary);
       }
+    } finally {
+      f.database.close();
+    }
+  });
+
+  test("durable launch delivery carries the exact immutable instruction layers and assembly digests", async () => {
+    const f = fixture();
+    try {
+      const launched = await f.persistence.create(launchInput());
+      if (!launched.ok) throw new Error(launched.error.code);
+      const dispatch = createDurableRunnerDispatch({
+        database: f.database,
+        output: new LiveOutputHub(),
+        permitCodec: {
+          sign: async () => "p".repeat(64),
+          verify: async () => ({
+            ok: false as const,
+            error: { code: "PERMIT_INVALID", message: "Invalid.", retry: "NEVER" as const },
+          }),
+        },
+      });
+      await dispatch.prime();
+      const operation = dispatch.loadCommitted(launched.value.outboxIds)[0];
+      expect(operation?.body).toMatchObject({
+        kind: "LAUNCH_ATTEMPT",
+        instructions: {
+          schemaVersion: 1,
+          configurationDigest: CONFIG_DIGEST,
+          assemblyDigest: PREPARED_CONFIGURATION_VALUE.assemblyDigest,
+          contextEnvelopeDigest: PREPARED_CONFIGURATION_VALUE.envelopeDigest,
+          layers: RESOLVED_CONFIGURATION.value.layers,
+        },
+      });
+      expect(JSON.stringify(operation?.body)).not.toMatch(
+        /executable|environment|credential|sourceBody|absolutePath/i,
+      );
     } finally {
       f.database.close();
     }

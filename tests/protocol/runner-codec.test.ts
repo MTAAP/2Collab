@@ -115,6 +115,13 @@ describe("runner wire codec", () => {
         attemptId: "attempt_1",
         dispatchPermit: "p".repeat(32),
         goal: "Inspect the repository",
+        instructions: {
+          schemaVersion: 1,
+          configurationDigest: "e".repeat(64),
+          assemblyDigest: "f".repeat(64),
+          contextEnvelopeDigest: "b".repeat(64),
+          layers: { typedVariables: {}, runGoal: "Inspect the repository" },
+        },
         bootstrap: {
           schemaVersion: 1,
           contextRecipe: { id: "recipe_1", version: 1, digest: "b".repeat(64) },

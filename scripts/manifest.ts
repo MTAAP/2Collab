@@ -6,6 +6,7 @@ const root = resolve(import.meta.dir, "..");
 const manifestPath = join(root, "MANIFEST.sha256");
 const excludedDirectories = new Set([
   ".git",
+  ".superpowers",
   "coverage",
   "credentials",
   "data",
@@ -16,7 +17,7 @@ const excludedDirectories = new Set([
   "test-results",
   "transcripts",
 ]);
-const excludedFiles = new Set([".DS_Store", "MANIFEST.sha256"]);
+const excludedFiles = new Set([".DS_Store", ".git", "MANIFEST.sha256"]);
 const portablePath = /^[A-Za-z0-9._/-]+$/;
 
 function toPosixPath(path: string): string {

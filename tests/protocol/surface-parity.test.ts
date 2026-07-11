@@ -70,7 +70,7 @@ describe("Foundation public run surface", () => {
       { sessionId: "session_1" },
       { runnerId: "runner_1" },
       { permit: "clear-permit" },
-      { localPath: "/Users/alice/work" },
+      { localPath: "/local/work" },
     ]) {
       expect(
         PublicCreateRunRequestSchema.safeParse({ ...REQUEST, ...forbidden }).success,

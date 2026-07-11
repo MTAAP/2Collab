@@ -12,6 +12,7 @@ import {
 } from "./commands.ts";
 import { ReferenceFirstBootstrapEnvelopeSchema } from "./context.ts";
 import { CommitShaSchema, IdentifierSchema, InstantSchema, Sha256Schema } from "./ids.ts";
+import { EffectiveInstructionEnvelopeSchema } from "./presets.ts";
 import { RetryDispositionSchema } from "./result.ts";
 import { AuthoritySessionViewSchema } from "./runs.ts";
 
@@ -213,6 +214,7 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
       attemptId: IdentifierSchema,
       dispatchPermit: z.string().min(32).max(8_192),
       goal: z.string().min(1).max(16_384),
+      instructions: EffectiveInstructionEnvelopeSchema,
       bootstrap: ReferenceFirstBootstrapEnvelopeSchema,
       projectMappingRevision: z.number().int().positive(),
       repositoryMode: z.enum(["INSPECT_ONLY", "MUTATING"]),

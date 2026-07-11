@@ -72,7 +72,7 @@ describe("authenticated projection SSE", () => {
     for (const forbidden of [
       { runnerId: "runner_1" },
       { permit: "clear-permit" },
-      { localPath: "/Users/alice/work" },
+      { localPath: "/local/work" },
       { interactiveBytes: "raw-terminal" },
     ]) {
       expect(

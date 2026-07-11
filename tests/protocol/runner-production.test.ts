@@ -154,8 +154,12 @@ test("production runner data plane dispatches server work and routes redacted ho
       const events = new Map<string, DurableRunnerEvent>();
       return {
         load: () => [...events.values()],
-        put: (event: DurableRunnerEvent) => events.set(event.eventId, event),
-        remove: (eventId: string) => events.delete(eventId),
+        put: (event: DurableRunnerEvent) => {
+          events.set(event.eventId, event);
+        },
+        remove: (eventId: string) => {
+          events.delete(eventId);
+        },
       };
     })(),
     onEnvelope: async (envelope) => {

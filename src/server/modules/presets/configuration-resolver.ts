@@ -6,6 +6,7 @@ import type {
   PersonalRunPresetVersion,
   RepositoryMode,
 } from "../../../shared/contracts/presets.ts";
+import { EffectiveInstructionLayersSchema } from "../../../shared/contracts/presets.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 
@@ -292,6 +293,9 @@ export function resolveEffectiveRunConfiguration(
     runGoal: overrides.runGoal,
     ...(overrides.authoredRunInput ? { authoredRunInput: overrides.authoredRunInput } : {}),
   };
+  if (!EffectiveInstructionLayersSchema.safeParse(layers).success) {
+    return error("CONFIGURATION_INVALID", "The requested run configuration is invalid.");
+  }
   const provenance: EffectiveRunConfiguration["provenance"] = {
     preset: { id: preset.presetId, version: preset.presetVersion },
     ...(teamTemplate
@@ -414,6 +418,15 @@ export function prepareRunConfigurationSnapshot(
   }
   const configurationJson = canonical(input.configuration);
   if (Buffer.byteLength(configurationJson, "utf8") > 65_536) {
+    return error("RUN_CONFIGURATION_INVALID", "Run configuration is invalid.");
+  }
+  if (
+    Buffer.byteLength(
+      canonical({ layers: input.configuration.layers, envelope: input.envelope }),
+      "utf8",
+    ) >
+    48 * 1_024
+  ) {
     return error("RUN_CONFIGURATION_INVALID", "Run configuration is invalid.");
   }
   const referenceRows: PreparedReferenceRow[] = [

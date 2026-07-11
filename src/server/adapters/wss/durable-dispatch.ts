@@ -6,6 +6,7 @@ import type {
   DispatchPermitClaims,
   PermitCodec,
 } from "../../modules/execution-authority/execution-authority.ts";
+import { createConfigurationPersistence } from "../../modules/presets/configuration-resolver.ts";
 import type { LiveOutputHub } from "./live-output.ts";
 import type { CommittedRunnerOperation, createRunnerChannel } from "./runner-channel.ts";
 
@@ -32,6 +33,9 @@ type DispatchRow = Readonly<{
   recipe_id: string;
   recipe_version: number;
   recipe_digest: string;
+  envelope_digest: string;
+  effective_configuration_digest: string;
+  assembly_digest: string;
 }>;
 
 type ReferenceRow = Readonly<{
@@ -70,18 +74,26 @@ export function createDurableRunnerDispatch(
                   r.repository_assurance, r.base_commit, a.mapping_revision,
                   a.profile_version_id, a.profile_fingerprint, a.host, a.interaction,
                   policy.deadline_at, envelope.id AS envelope_id, envelope.recipe_id,
-                  envelope.recipe_version, recipe.recipe_digest
+                  envelope.recipe_version, recipe.recipe_digest, envelope.envelope_digest,
+                  configuration.effective_configuration_digest, configuration.assembly_digest
            FROM runner_dispatch_outbox o
            JOIN execution_attempts a ON a.id = o.attempt_id
            JOIN agent_runs r ON r.id = a.run_id
            JOIN run_execution_policies policy ON policy.run_id = r.id
            JOIN context_bootstrap_envelopes envelope ON envelope.run_id = r.id
+           JOIN run_configuration_snapshots configuration ON configuration.run_id = r.id
            JOIN context_recipe_versions recipe
              ON recipe.recipe_id = envelope.recipe_id AND recipe.version = envelope.recipe_version
            WHERE o.id = ? AND o.status IN ('PENDING', 'DISPATCHED')`,
         )
         .get(outboxId);
       if (!row) continue;
+      const configuration = createConfigurationPersistence({
+        database: input.database,
+        clock: () => 0,
+        id: () => "unused",
+      }).inspectRunSnapshot(row.run_id);
+      if (!configuration.ok) continue;
       const rows = input.database
         .query<ReferenceRow, [string]>(
           `SELECT category, reference_id, observed_revision, freshness,
@@ -113,6 +125,13 @@ export function createDurableRunnerDispatch(
         attemptId: row.attempt_id,
         dispatchPermit: permit,
         goal: row.goal,
+        instructions: {
+          schemaVersion: 1 as const,
+          configurationDigest: row.effective_configuration_digest,
+          assemblyDigest: row.assembly_digest,
+          contextEnvelopeDigest: row.envelope_digest,
+          layers: configuration.value.configuration.layers,
+        },
         bootstrap: {
           schemaVersion: 1 as const,
           contextRecipe: {
