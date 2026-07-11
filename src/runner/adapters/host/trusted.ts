@@ -19,7 +19,8 @@ export function createTrustedExecutionHost(
         execution.invocation.argv.length < 1 ||
         execution.invocation.argv.length > 65 ||
         execution.invocation.argv.some((argument) => argument.includes("\0")) ||
-        !Number.isSafeInteger(execution.deadlineAt)
+        !Number.isSafeInteger(execution.deadlineAt) ||
+        (execution.interaction === "HEADLESS") !== (typeof execution.headlessOutput === "function")
       ) {
         return failure("HOST_LAUNCH_INVALID", "Prepared execution is invalid.");
       }

@@ -1,12 +1,18 @@
 import type { Database } from "bun:sqlite";
 import foundationMigration from "./migrations/0001_profiles_processes.sql" with { type: "text" };
 import failedStartsMigration from "./migrations/0002_failed_starts.sql" with { type: "text" };
+import startFenceMigration from "./migrations/0003_start_fence.sql" with { type: "text" };
 
 function verify(database: Database): void {
   const history = database
     .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
     .all();
-  if (history.length !== 2 || history[0]?.version !== 1 || history[1]?.version !== 2) {
+  if (
+    history.length !== 3 ||
+    history[0]?.version !== 1 ||
+    history[1]?.version !== 2 ||
+    history[2]?.version !== 3
+  ) {
     throw new Error("RUNNER_STATE_CORRUPT");
   }
   const tables = new Map(
@@ -52,7 +58,7 @@ function verify(database: Database): void {
     .get()?.sql;
   if (
     !processSql?.includes(
-      "state IN ('RESERVED', 'STARTED', 'FAILED_TO_START', 'EXITED', 'UNKNOWN')",
+      "state IN ('RESERVED', 'STARTING', 'STARTED', 'FAILED_TO_START', 'EXITED', 'UNKNOWN')",
     ) ||
     !processSql.includes("assignment_digest") ||
     !profileSql?.includes("json_valid(definition_json)") ||
@@ -76,6 +82,7 @@ export function migrateRunnerDatabase(database: Database, fresh: boolean): void 
     try {
       database.exec(foundationMigration);
       database.exec(failedStartsMigration);
+      database.exec(startFenceMigration);
       verify(database);
       database.exec("COMMIT");
     } catch (error) {
@@ -93,10 +100,14 @@ export function migrateRunnerDatabase(database: Database, fresh: boolean): void 
   const history = database
     .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
     .all();
-  if (history.length === 1 && history[0]?.version === 1) {
+  if (
+    (history.length === 1 && history[0]?.version === 1) ||
+    (history.length === 2 && history[0]?.version === 1 && history[1]?.version === 2)
+  ) {
     database.exec("BEGIN IMMEDIATE");
     try {
-      database.exec(failedStartsMigration);
+      if (history.length === 1) database.exec(failedStartsMigration);
+      database.exec(startFenceMigration);
       verify(database);
       database.exec("COMMIT");
     } catch (error) {

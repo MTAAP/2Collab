@@ -73,6 +73,7 @@ export type SupervisorLaunch = Readonly<{
   interaction: InteractionMode;
   assurance: "ADVISORY" | "ENFORCED";
   deadlineAt: number;
+  headlessOutput?: (event: RuntimeOutputEvent) => Promise<void>;
 }>;
 
 export type HostProcess = Readonly<{

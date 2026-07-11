@@ -18,6 +18,7 @@ function launch(
     interaction,
     assurance,
     deadlineAt: 2_000,
+    ...(interaction === "HEADLESS" ? { headlessOutput: async () => undefined } : {}),
   };
 }
 

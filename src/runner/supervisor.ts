@@ -8,6 +8,7 @@ import type {
   RuntimeAdapter,
 } from "./execution-contract.ts";
 import type { ProcessReservation } from "./process-state.ts";
+import { createHeadlessOutputProducer, type HeadlessOutputTransport } from "./headless-output.ts";
 
 type WorktreeHandle = Readonly<{ id: string }>;
 export type SupervisorLaunchRequest = Readonly<{
@@ -35,6 +36,7 @@ type Dependencies = Readonly<{
     reserve(attemptId: string, assignmentDigest: string): Result<ProcessReservation>;
     release(reservation: ProcessReservation): Result<void>;
     recordFailed(reservation: ProcessReservation, disposition: string): Result<void>;
+    markStarting(reservation: ProcessReservation): Result<void>;
     recordStarted(reservation: ProcessReservation, identity: HostProcess): Result<void>;
   }>;
   worktrees: Readonly<{
@@ -53,6 +55,7 @@ type Dependencies = Readonly<{
   adapters: Partial<Record<RuntimeAdapter, ExecutionAdapter>>;
   hosts: Partial<Record<"NATIVE" | "ORCA", ExecutionHost>>;
   clock: () => number;
+  output: HeadlessOutputTransport;
 }>;
 
 function failure<T>(
@@ -156,6 +159,19 @@ export function createRunnerSupervisor(dependencies: Dependencies) {
           ? failure("EXECUTION_DEADLINE_EXPIRED", "Execution deadline expired.")
           : failure("PROCESS_STATE_FAILED", "Local process state could not be recorded.");
       }
+      const starting = dependencies.processes.markStarting(reservation.value);
+      if (!starting.ok) {
+        await dependencies.enforcement.revoke(enforcement.value.sessionId);
+        return failure("PROCESS_STATE_FAILED", "Local process start fence could not be recorded.");
+      }
+      const output =
+        request.interaction === "HEADLESS"
+          ? createHeadlessOutputProducer({
+              ...dependencies.output,
+              adapter,
+              target: { kind: "ATTEMPT", attemptId: request.attemptId },
+            })
+          : undefined;
       const started = await host.start({
         attemptId: request.attemptId,
         worktree: worktree.value,
@@ -167,6 +183,15 @@ export function createRunnerSupervisor(dependencies: Dependencies) {
         interaction: request.interaction,
         assurance: request.assurance,
         deadlineAt: request.deadlineAt,
+        ...(output
+          ? {
+              headlessOutput: async (event) => {
+                const queued = output.push(event);
+                if (!queued.ok) throw new Error(queued.error.code);
+                if (event.kind === "EXIT") await output.finish();
+              },
+            }
+          : {}),
       });
       if (!started.ok) {
         const recorded = dependencies.processes.recordFailed(reservation.value, started.error.code);

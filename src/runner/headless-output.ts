@@ -11,9 +11,7 @@ type OutputBody = Extract<RunnerEnvelope["body"], Readonly<{ kind: "HEADLESS_OUT
 type Target = OutputBody["target"];
 type Output = Extract<NormalizedRuntimeEvent, Readonly<{ kind: "OUTPUT" }>>;
 
-type Dependencies = Readonly<{
-  adapter: ExecutionAdapter;
-  target: Target;
+export type HeadlessOutputTransport = Readonly<{
   protocolVersion: string;
   now: () => number;
   messageId: () => string;
@@ -22,6 +20,12 @@ type Dependencies = Readonly<{
   maximumPendingBytes?: number;
   redactionHoldbackBytes?: number;
 }>;
+
+type Dependencies = HeadlessOutputTransport &
+  Readonly<{
+    adapter: ExecutionAdapter;
+    target: Target;
+  }>;
 
 type Queued = Readonly<{ output: Output; bytes: number }>;
 

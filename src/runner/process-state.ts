@@ -76,9 +76,25 @@ export function createLocalProcessRegistry(
         const changed = database
           .query(
             `UPDATE local_processes SET state = 'FAILED_TO_START', last_disposition = ?, updated_at = ?
-             WHERE reservation_id = ? AND state = 'RESERVED'`,
+             WHERE reservation_id = ? AND state IN ('RESERVED', 'STARTING')`,
           )
           .run(disposition, clock(), reservation.reservationId);
+        return changed.changes === 1
+          ? { ok: true, value: undefined }
+          : failure("PROCESS_STATE_CONFLICT", "Local process state changed.");
+      } catch {
+        return failure("PROCESS_STATE_FAILED", "Local process state failed.");
+      }
+    },
+
+    markStarting(reservation: ProcessReservation): Result<void> {
+      try {
+        const changed = database
+          .query(
+            `UPDATE local_processes SET state = 'STARTING', updated_at = ?
+             WHERE reservation_id = ? AND state = 'RESERVED'`,
+          )
+          .run(clock(), reservation.reservationId);
         return changed.changes === 1
           ? { ok: true, value: undefined }
           : failure("PROCESS_STATE_CONFLICT", "Local process state changed.");
@@ -93,7 +109,7 @@ export function createLocalProcessRegistry(
           .query(
             `UPDATE local_processes SET state = 'STARTED', host = ?, opaque_process_id = ?,
                interaction = ?, assurance = ?, updated_at = ?
-             WHERE reservation_id = ? AND state = 'RESERVED'`,
+             WHERE reservation_id = ? AND state = 'STARTING'`,
           )
           .run(
             identity.host,
@@ -113,7 +129,7 @@ export function createLocalProcessRegistry(
 
     inspect(attemptId: string): Result<
       Readonly<{
-        state: "RESERVED" | "STARTED" | "FAILED_TO_START" | "EXITED" | "UNKNOWN";
+        state: "RESERVED" | "STARTING" | "STARTED" | "FAILED_TO_START" | "EXITED" | "UNKNOWN";
         assignmentDigest: string;
         opaqueProcessId: string | null;
       }>
@@ -121,7 +137,7 @@ export function createLocalProcessRegistry(
       const row = database
         .query<
           {
-            state: "RESERVED" | "STARTED" | "FAILED_TO_START" | "EXITED" | "UNKNOWN";
+            state: "RESERVED" | "STARTING" | "STARTED" | "FAILED_TO_START" | "EXITED" | "UNKNOWN";
             assignment_digest: string;
             opaque_process_id: string | null;
           },

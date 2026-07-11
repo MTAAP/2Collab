@@ -136,6 +136,18 @@ describe("runner-local state", () => {
       ok: true,
       value: { reservationId: "reservation_3", disposition: "NEW" },
     });
+    expect(processes.markStarting({ reservationId: "reservation_3", disposition: "NEW" })).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(processes.inspect("attempt_2")).toMatchObject({
+      ok: true,
+      value: { state: "STARTING", opaqueProcessId: null },
+    });
+    expect(processes.reserve("attempt_2", "c".repeat(64))).toMatchObject({
+      ok: true,
+      value: { reservationId: "reservation_3", disposition: "RECONCILE" },
+    });
     expect(
       processes.recordStarted(
         { reservationId: "reservation_3", disposition: "NEW" },

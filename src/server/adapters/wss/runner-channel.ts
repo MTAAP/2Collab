@@ -33,9 +33,11 @@ type Dependencies = Readonly<{
   scheduleTimeout?: (callback: () => void, milliseconds: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   onAcknowledgementTimeout?: (deliveryId: string, reason: "TIMEOUT" | "QUIESCED") => void;
+  waitForDrain?: (deadline: number) => Promise<void>;
 }>;
 
 type QueuedEnvelope = Readonly<{ envelope: ServerEnvelope; operation: CommittedRunnerOperation }>;
+type SendDisposition = "SENT" | "ENQUEUED" | "DROPPED" | "RETRY";
 
 type AttachedConnection = Readonly<{
   connectionId: string;
@@ -43,6 +45,7 @@ type AttachedConnection = Readonly<{
   send: (envelope: ServerEnvelope) => unknown;
   sequence: { value: number };
   queue: BoundedSendQueue<QueuedEnvelope>;
+  transportPending: Map<string, CommittedRunnerOperation>;
 }>;
 
 type Pending = {
@@ -67,6 +70,7 @@ export function createRunnerChannel(dependencies: Dependencies) {
   const pending = new Map<string, Pending>();
   const protocolVersion = dependencies.protocolVersion ?? "1.0";
   let quiesced = false;
+  const drainWaiters = new Set<() => void>();
 
   const scheduleTimeout =
     dependencies.scheduleTimeout ??
@@ -78,6 +82,24 @@ export function createRunnerChannel(dependencies: Dependencies) {
   const clearScheduled =
     dependencies.clearTimeout ??
     ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const waitForDrain =
+    dependencies.waitForDrain ??
+    ((deadline: number) =>
+      new Promise<void>((resolve) => {
+        const milliseconds = Math.max(0, deadline - dependencies.now()) * 1_000;
+        if (milliseconds === 0) {
+          resolve();
+          return;
+        }
+        let timer: ReturnType<typeof setTimeout>;
+        const done = () => {
+          clearTimeout(timer);
+          drainWaiters.delete(done);
+          resolve();
+        };
+        timer = setTimeout(done, milliseconds);
+        drainWaiters.add(done);
+      }));
 
   const reportTimeout = (deliveryId: string, entry: Pending, reason: "TIMEOUT" | "QUIESCED") => {
     if (entry.timeoutReported === true) return false;
@@ -110,15 +132,33 @@ export function createRunnerChannel(dependencies: Dependencies) {
     pending.set(operation.deliveryId, entry);
   };
 
+  const sendDisposition = (value: unknown): SendDisposition => {
+    if (value === false) return "RETRY";
+    if (value === -1 || value === "ENQUEUED") return "ENQUEUED";
+    if (value === 0 || value === "DROPPED") return "DROPPED";
+    if (value === "RETRY") return "RETRY";
+    return "SENT";
+  };
+
   const sendOrQueue = (
     operation: CommittedRunnerOperation,
     envelope: ServerEnvelope,
     connection: AttachedConnection,
   ): boolean => {
     try {
-      if (connection.send(envelope) !== false) {
+      const disposition = sendDisposition(connection.send(envelope));
+      if (disposition === "SENT") {
         markSent(operation);
         return true;
+      }
+      if (disposition === "ENQUEUED") {
+        connection.transportPending.set(operation.deliveryId, operation);
+        pending.set(operation.deliveryId, { operation });
+        return false;
+      }
+      if (disposition === "DROPPED") {
+        pending.set(operation.deliveryId, { operation });
+        return false;
       }
     } catch {
       // A failed socket write remains a durable pending operation.
@@ -178,6 +218,31 @@ export function createRunnerChannel(dependencies: Dependencies) {
     }
   };
 
+  const flushConnection = (runnerId: string): number => {
+    const connection = connections.get(runnerId);
+    if (!connection) return 0;
+    let sent = 0;
+    while (connection.queue.size > 0) {
+      const entry = connection.queue.peek();
+      if (!entry) break;
+      try {
+        const disposition = sendDisposition(connection.send(entry.envelope));
+        if (disposition === "RETRY") break;
+        connection.queue.dequeue();
+        if (disposition === "ENQUEUED") {
+          connection.transportPending.set(entry.operation.deliveryId, entry.operation);
+          continue;
+        }
+        if (disposition === "DROPPED") continue;
+      } catch {
+        break;
+      }
+      markSent(entry.operation);
+      sent += 1;
+    }
+    return sent;
+  };
+
   return {
     attach(
       runnerId: string,
@@ -200,6 +265,7 @@ export function createRunnerChannel(dependencies: Dependencies) {
           maximumItems: dependencies.maximumSendQueueItems ?? 1_024,
           maximumBytes: dependencies.maximumSendQueueBytes ?? 1024 * 1024,
         }),
+        transportPending: new Map(),
       };
       connections.set(runnerId, connection);
       return registered;
@@ -282,23 +348,25 @@ export function createRunnerChannel(dependencies: Dependencies) {
       return connections.get(runnerId)?.queue.size ?? 0;
     },
 
-    flush(runnerId: string): number {
+    transportPendingCount(runnerId: string): number {
+      return connections.get(runnerId)?.transportPending.size ?? 0;
+    },
+
+    transportDrained(runnerId: string): number {
       const connection = connections.get(runnerId);
       if (!connection) return 0;
-      let sent = 0;
-      while (connection.queue.size > 0) {
-        const entry = connection.queue.peek();
-        if (!entry) break;
-        try {
-          if (connection.send(entry.envelope) === false) break;
-        } catch {
-          break;
-        }
-        connection.queue.dequeue();
-        markSent(entry.operation);
-        sent += 1;
-      }
-      return sent;
+      const operations = [...connection.transportPending.values()];
+      connection.transportPending.clear();
+      for (const operation of operations) markSent(operation);
+      return operations.length;
+    },
+
+    notifyDrain(): void {
+      for (const resolve of [...drainWaiters]) resolve();
+    },
+
+    flush(runnerId: string): number {
+      return flushConnection(runnerId);
     },
 
     sweepAcknowledgementTimeouts(): readonly string[] {
@@ -323,16 +391,28 @@ export function createRunnerChannel(dependencies: Dependencies) {
       return result;
     },
 
-    async quiesce(_deadline: number) {
+    async quiesce(deadline: number) {
+      if (!Number.isFinite(deadline) || deadline < 0) {
+        throw new Error("RUNNER_QUIESCE_DEADLINE_INVALID");
+      }
       quiesced = true;
-      const result = await registry.quiesce();
+      const buffered = () =>
+        [...connections.values()].some(
+          (connection) => connection.queue.size > 0 || connection.transportPending.size > 0,
+        );
+      while (buffered() && dependencies.now() < deadline) {
+        for (const runnerId of connections.keys()) flushConnection(runnerId);
+        if (!buffered() || dependencies.now() >= deadline) break;
+        await waitForDrain(deadline);
+      }
       for (const connection of connections.values()) connection.queue.clear();
-      connections.clear();
       for (const [deliveryId, entry] of pending) {
         if (entry.timer !== undefined) clearScheduled(entry.timer);
         reportTimeout(deliveryId, entry, "QUIESCED");
       }
       dependencies.liveOutput?.clearAll();
+      const result = await registry.quiesce();
+      connections.clear();
       return { closed: result.closed, pending: pending.size };
     },
   } satisfies RunnerControlPort & Record<string, unknown>;

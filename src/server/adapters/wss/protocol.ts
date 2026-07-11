@@ -43,6 +43,8 @@ type ChannelOptions = Readonly<{
   now?: () => number;
   connectionId?: () => string;
   fence?: number;
+  maximumReplayEntries?: number;
+  maximumRunBuckets?: number;
 }>;
 
 function reject(code: string): RunnerReceiveResult {
@@ -95,6 +97,8 @@ export class InMemoryRunnerProtocolChannel {
   readonly #runnerBucket: TokenBucket;
   readonly #runBuckets = new Map<string, TokenBucket>();
   readonly #openedAt: number;
+  readonly #maximumReplayEntries: number;
+  readonly #maximumRunBuckets: number;
   #active: boolean;
   #selectedVersion: string | null;
   #lastSequence = 0;
@@ -105,6 +109,18 @@ export class InMemoryRunnerProtocolChannel {
     this.#now = options.now ?? (() => 1_000);
     this.#connectionId = options.connectionId ?? defaultConnectionId;
     this.#fence = options.fence ?? 1;
+    this.#maximumReplayEntries = options.maximumReplayEntries ?? 4_096;
+    this.#maximumRunBuckets = options.maximumRunBuckets ?? 1_024;
+    if (
+      !Number.isSafeInteger(this.#maximumReplayEntries) ||
+      this.#maximumReplayEntries < 1 ||
+      this.#maximumReplayEntries > 65_536 ||
+      !Number.isSafeInteger(this.#maximumRunBuckets) ||
+      this.#maximumRunBuckets < 1 ||
+      this.#maximumRunBuckets > 16_384
+    ) {
+      throw new Error("RUNNER_PROTOCOL_STATE_LIMIT_INVALID");
+    }
     this.#runnerBucket = new TokenBucket({ ratePerSecond: 100, burst: 200, now: this.#now });
     this.#openedAt = this.#now();
     this.#lastHeartbeatAt = this.#openedAt;
@@ -144,6 +160,10 @@ export class InMemoryRunnerProtocolChannel {
       return reject("RUNNER_HEARTBEAT_TIMEOUT");
     }
     return null;
+  }
+
+  inspectRetainedState(): Readonly<{ replayEntries: number; runBuckets: number }> {
+    return { replayEntries: this.#seen.size, runBuckets: this.#runBuckets.size };
   }
 
   #receiveDecoded(text: string, bytes: Uint8Array): RunnerReceiveResult {
@@ -237,7 +257,14 @@ export class InMemoryRunnerProtocolChannel {
     if (runScope) {
       let bucket = this.#runBuckets.get(runScope);
       if (!bucket) {
+        if (this.#runBuckets.size >= this.#maximumRunBuckets) {
+          const oldest = this.#runBuckets.keys().next().value;
+          if (oldest !== undefined) this.#runBuckets.delete(oldest);
+        }
         bucket = new TokenBucket({ ratePerSecond: 50, burst: 100, now: this.#now });
+        this.#runBuckets.set(runScope, bucket);
+      } else {
+        this.#runBuckets.delete(runScope);
         this.#runBuckets.set(runScope, bucket);
       }
       if (!bucket.consume()) return reject("RUN_RATE_LIMITED");
@@ -256,6 +283,10 @@ export class InMemoryRunnerProtocolChannel {
       sequence: parsed.data.sequence,
       digest: frameDigest,
     });
+    if (this.#seen.size > this.#maximumReplayEntries) {
+      const oldest = this.#seen.keys().next().value;
+      if (oldest !== undefined) this.#seen.delete(oldest);
+    }
     if (parsed.data.body.kind === "HEARTBEAT") this.#lastHeartbeatAt = now;
     return { accepted: true };
   }

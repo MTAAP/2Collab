@@ -163,4 +163,46 @@ describe("durable runner delivery", () => {
     expect(cancelled).toEqual(["timer_1"]);
     expect(output.inspect("ATTEMPT", "attempt_1")).toEqual([]);
   });
+
+  test("drains queued sends only until the supplied quiesce deadline", async () => {
+    let now = 1_000;
+    let writable = false;
+    let waits = 0;
+    let sends = 0;
+    const channel = createRunnerChannel({
+      now: () => now,
+      messageId: () => "message_1",
+      loadCommitted: () => [operation],
+      async waitForDrain(deadline) {
+        waits += 1;
+        expect(deadline).toBe(1_005);
+        now = 1_003;
+        writable = true;
+      },
+    });
+    channel.attach("runner_1", () => {
+      sends += 1;
+      return writable;
+    });
+    expect(await channel.dispatchCommitted(["outbox_1"])).toMatchObject([{ state: "UNREACHABLE" }]);
+    expect(channel.queuedEnvelopeCount("runner_1")).toBe(1);
+    expect(await channel.quiesce(1_005)).toEqual({ closed: 1, pending: 1 });
+    expect({ waits, sends }).toEqual({ waits: 1, sends: 3 });
+    expect(channel.queuedEnvelopeCount("runner_1")).toBe(0);
+
+    now = 2_000;
+    let deadlineWaits = 0;
+    const expired = createRunnerChannel({
+      now: () => now,
+      messageId: () => "message_2",
+      loadCommitted: () => [operation],
+      waitForDrain: async () => {
+        deadlineWaits += 1;
+      },
+    });
+    expired.attach("runner_1", () => false);
+    await expired.dispatchCommitted(["outbox_1"]);
+    await expired.quiesce(2_000);
+    expect(deadlineWaits).toBe(0);
+  });
 });

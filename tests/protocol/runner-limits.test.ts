@@ -74,4 +74,36 @@ describe("runner transport limits", () => {
       ),
     ).toEqual({ accepted: false, code: "RUN_RATE_LIMITED", close: true });
   });
+
+  test("bounds replay and per-run rate metadata for long-lived connections", () => {
+    let now = 1_000;
+    const channel = createInMemoryRunnerChannel({
+      active: true,
+      now: () => now,
+      maximumReplayEntries: 3,
+      maximumRunBuckets: 2,
+    });
+    for (let sequence = 1; sequence <= 8; sequence += 1) {
+      now += 1;
+      expect(
+        channel.receiveText(
+          JSON.stringify({
+            ...validRunnerHeartbeat({
+              messageId: `bounded_message_${sequence}`,
+              sequence,
+              issuedAt: now,
+              expiresAt: now + 10,
+            }),
+            body: {
+              kind: "ATTEMPT_EVENT",
+              attemptId: `attempt_${sequence}`,
+              event: "PROCESS_STARTED",
+              observedAt: now,
+            },
+          }),
+        ),
+      ).toEqual({ accepted: true });
+    }
+    expect(channel.inspectRetainedState()).toEqual({ replayEntries: 3, runBuckets: 2 });
+  });
 });

@@ -3,6 +3,7 @@ import { createRunnerSupervisor } from "../../src/runner/supervisor.ts";
 import { createCodexExecutionAdapter } from "../../src/runner/adapters/runtime/codex.ts";
 import { createNativeExecutionHost } from "../../src/runner/adapters/host/native.ts";
 import { createRunnerEnvironmentBuilder } from "../../src/runner/environment.ts";
+import type { RunnerEnvelope } from "../../src/shared/contracts/protocol.ts";
 
 const profile = {
   adapter: "CODEX",
@@ -13,9 +14,22 @@ const profile = {
   fingerprint: "a".repeat(64),
 } as const;
 
+function outputTransport(sent: RunnerEnvelope[] = []) {
+  let message = 0;
+  return {
+    protocolVersion: "1.0",
+    now: () => 1_000,
+    messageId: () => `output_message_${++message}`,
+    send: async (envelope: RunnerEnvelope) => {
+      sent.push(envelope);
+    },
+  };
+}
+
 describe("runner supervisor", () => {
   test("consumes a permit immediately before one reserved process start", async () => {
     const order: string[] = [];
+    const output: RunnerEnvelope[] = [];
     let starts = 0;
     const host = createNativeExecutionHost({
       async start(input) {
@@ -23,6 +37,12 @@ describe("runner supervisor", () => {
         starts += 1;
         expect(input.worktree.id).toBe("worktree_1");
         expect(input.environment).toEqual({ HOME: "/safe/home", PATH: "/usr/bin:/bin" });
+        await input.headlessOutput?.({ kind: "STDOUT", text: "token ghp_aaaaaaaaaa" });
+        await input.headlessOutput?.({
+          kind: "STDOUT",
+          text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        });
+        await input.headlessOutput?.({ kind: "EXIT", exitCode: 0, signal: null });
         return { opaqueProcessId: "process_1" };
       },
       async cancel() {
@@ -49,6 +69,10 @@ describe("runner supervisor", () => {
         },
         release: () => ({ ok: true, value: undefined }),
         recordFailed: () => ({ ok: true, value: undefined }),
+        markStarting() {
+          order.push("starting");
+          return { ok: true, value: undefined };
+        },
         recordStarted() {
           order.push("record");
           return { ok: true, value: undefined };
@@ -89,6 +113,7 @@ describe("runner supervisor", () => {
       adapters: { CODEX: createCodexExecutionAdapter() },
       hosts: { NATIVE: host },
       clock: () => 1_000,
+      output: outputTransport(output),
     });
 
     const result = await supervisor.launch({
@@ -118,10 +143,13 @@ describe("runner supervisor", () => {
       "enforcement",
       "reserve",
       "permit",
+      "starting",
       "start",
       "record",
     ]);
     expect(starts).toBe(1);
+    expect(JSON.stringify(output)).toContain("[REDACTED_GITHUB_TOKEN]");
+    expect(JSON.stringify(output)).not.toContain("ghp_");
   });
 
   test("never consumes or starts for enforced assurance or changed assignment reuse", async () => {
@@ -140,6 +168,7 @@ describe("runner supervisor", () => {
         }),
         release: () => ({ ok: true, value: undefined }),
         recordFailed: () => ({ ok: true, value: undefined }),
+        markStarting: () => ({ ok: true, value: undefined }),
         recordStarted: () => ({ ok: true, value: undefined }),
       },
       worktrees: { resolveRunWorktree: async () => ({ ok: true, value: { id: "worktree_1" } }) },
@@ -178,6 +207,7 @@ describe("runner supervisor", () => {
           },
         }),
       },
+      output: outputTransport(),
     });
     const base = {
       runId: "run_1",
@@ -218,6 +248,7 @@ describe("runner supervisor", () => {
         }),
         release: () => ({ ok: true, value: undefined }),
         recordFailed: () => ({ ok: true, value: undefined }),
+        markStarting: () => ({ ok: true, value: undefined }),
         recordStarted: () => ({ ok: true, value: undefined }),
       },
       worktrees: { resolveRunWorktree: async () => ({ ok: true, value: { id: "worktree_1" } }) },
@@ -247,6 +278,7 @@ describe("runner supervisor", () => {
         }),
       },
       clock: () => 1_000,
+      output: outputTransport(),
     });
     const result = await supervisor.launch({
       runId: "run_1",
@@ -296,6 +328,7 @@ describe("runner supervisor", () => {
         failures.push(code);
         return { ok: true as const, value: undefined };
       },
+      markStarting: () => ({ ok: true as const, value: undefined }),
       recordStarted: () => ({ ok: true as const, value: undefined }),
     };
     const supervisor = createRunnerSupervisor({
@@ -335,6 +368,7 @@ describe("runner supervisor", () => {
         }),
       },
       clock: () => now,
+      output: outputTransport(),
     });
     const request = {
       runId: "run_1",
@@ -398,6 +432,7 @@ describe("runner supervisor", () => {
         }),
         release: () => ({ ok: true, value: undefined }),
         recordFailed: () => ({ ok: true, value: undefined }),
+        markStarting: () => ({ ok: true, value: undefined }),
         recordStarted: () => ({ ok: true, value: undefined }),
       },
       worktrees: { resolveRunWorktree: async () => ({ ok: true, value: { id: "worktree_1" } }) },
@@ -423,6 +458,7 @@ describe("runner supervisor", () => {
         }),
       },
       clock: () => 1_000,
+      output: outputTransport(),
     });
     expect(
       await supervisor.launch({

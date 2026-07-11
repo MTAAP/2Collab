@@ -98,9 +98,9 @@ function createCore(dependencies: CoreDependencies) {
     }, seconds * 1_000);
   };
 
-  const sendEnvelope = (socket: RunnerControlSocket, value: unknown): boolean => {
+  const sendEnvelope = (socket: RunnerControlSocket, value: unknown): number | false => {
     if ((socket.getBufferedAmount?.() ?? 0) >= 1024 * 1024) return false;
-    return socket.send(JSON.stringify(value), false) >= 0;
+    return socket.send(JSON.stringify(value), false);
   };
 
   const open = (socket: RunnerControlSocket, principal: VerifiedRunnerPrincipal): Session => {
@@ -207,7 +207,13 @@ function createCore(dependencies: CoreDependencies) {
     closed,
     drain(socket: RunnerControlSocket): void {
       const session = bySocket.get(socket as object);
-      if (session) dependencies.channel.flush(session.principal.runnerId);
+      if (session) {
+        if ((socket.getBufferedAmount?.() ?? 0) === 0) {
+          dependencies.channel.transportDrained(session.principal.runnerId);
+        }
+        dependencies.channel.flush(session.principal.runnerId);
+        dependencies.channel.notifyDrain();
+      }
     },
     async quiesce(deadline: number) {
       quiesced = true;
