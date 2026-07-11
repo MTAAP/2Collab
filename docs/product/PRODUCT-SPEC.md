@@ -1099,6 +1099,8 @@ Commands for the global view:
 - `collab status --all` — show all active Agent Runs across all projects.
 - `collab flush` — retry queued idempotent runner events after a network interruption.
 
+`collab start` is the canonical Agent Run creation command. `collab run` is a documented compatibility alias that uses the identical parser, request schema, idempotency key, and result; it is not a second launch behavior.
+
 Inside a repository, `collab list` is the project-local coordination view and `collab status` is its current execution summary. Before run persistence is available, these surfaces report project identity plus an explicit `RUN_STATE_UNAVAILABLE` field rather than inventing an idle or empty run state. Full web/CLI parity for Project discovery is complete only when the later surface-composition slice exposes the same canonical Project ID.
 
 ### Runner Registration and Web Launch

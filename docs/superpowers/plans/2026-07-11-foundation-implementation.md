@@ -995,10 +995,15 @@ git commit -m "feat: preserve agent run worktrees"
 
 **Files:**
 - Create: `src/server/adapters/http/routes/{bootstrap,auth,members,projects,runs,runners,presets}.ts`
+- Create: `src/server/adapters/http/{public-schemas,domain-results,security-headers}.ts`
+- Create: `src/server/adapters/http/middleware/{authentication,request-limits}.ts`
 - Create: `src/server/adapters/http/sse.ts`
 - Create: `src/server/adapters/mcp/{server,tools}.ts`
-- Create: `src/cli/commands/{start,cancel,resume,runner,preset,mcp}.ts`
+- Create: `src/cli/{api-client,credentials}.ts`
+- Create: `src/cli/commands/{start,run,cancel,resume,runner,preset,mcp}.ts`
+- Create: `src/web/{api-client,projection-client}.ts`
 - Create: `src/web/features/{setup,members,runs,runners,presets}/`
+- Create: `src/shared/contracts/{public-api,projections}.ts`
 - Test: `tests/protocol/surface-parity.test.ts`
 - Test: `tests/e2e/{setup-and-members,foundation-run}.spec.ts`
 
@@ -1012,11 +1017,12 @@ git commit -m "feat: preserve agent run worktrees"
 for (const surface of [httpSurface(), cliSurface(), mcpSurface()]) {
   test(`${surface.name} returns canonical create inspect cancel resume evidence results`, async () => {
     const created = await surface.create(sourceFreeRunInput());
-    expect(created.value.runId).toBe("run_fixture");
-    expect((await surface.inspect(created.value.runId)).value.state).toBe("QUEUED");
-    expect((await surface.evidence(created.value.runId)).value.items).toEqual([]);
-    expect((await surface.cancel(created.value.runId)).value.state).toBe("CANCELLED");
-    expect((await surface.resume(created.value.runId)).error?.code).toBe("RUN_TERMINAL");
+    if (!created.ok) throw new Error(created.error.code);
+    const runId = created.value.run.id;
+    expect((await surface.inspect({ runId })).value.run.state).toBe("QUEUED");
+    expect((await surface.evidence({ runId })).value.evidence).toEqual([]);
+    expect((await surface.cancel({ runId, expectedRunRevision: 1 })).ok).toBe(true);
+    expect((await surface.resume(explicitResumeRequest(runId))).error?.code).toBe("RUN_TERMINAL");
   });
 }
 ```
@@ -1042,13 +1048,19 @@ export function createRunRoutes(authority: ExecutionAuthority): Hono {
 
 ```ts
 export const mcpRunTools = [
-  tool("collab_run_create", LaunchRunSchema, (input) => authority.execute(input)),
-  tool("collab_run_inspect", InspectRunSchema, (input) => authority.query(input)),
-  tool("collab_run_cancel", CancelRunSchema, (input) => authority.execute(input)),
-  tool("collab_run_resume", AuthorizeAttemptSchema, (input) => authority.execute(input)),
-  tool("collab_run_evidence", InspectEvidenceSchema, (input) => authority.query(input)),
+  publicTool("collab_run_create", PublicCreateRunRequestSchema, PublicCreateRunResultSchema, handlers.createRun),
+  publicTool("collab_run_inspect", PublicInspectRunRequestSchema, PublicInspectRunResultSchema, handlers.inspectRun),
+  publicTool("collab_run_cancel", PublicCancelRunRequestSchema, PublicCancelRunResultSchema, handlers.cancelRun),
+  publicTool("collab_run_resume", PublicResumeRunRequestSchema, PublicResumeRunResultSchema, handlers.resumeRun),
+  publicTool("collab_run_evidence", PublicInspectEvidenceRequestSchema, PublicInspectEvidenceResultSchema, handlers.inspectEvidence),
 ] as const;
 ```
+
+Public DTOs never accept actors, session IDs, scheduler/runner identities, permit/session commands, internal revocations, local paths, or connector-policy operations. HTTP, CLI, remote MCP, and the stdio bridge derive the Member/device actor from authentication and construct the same canonical commands with operation-specific input/output schemas. Hono app creation is import-safe and injected. Browser mutations require current session, exact origin, separate CSRF proof, JSON content type, and bounded request/rate limits; CLI/MCP use DPoP device credentials, never cookies. The invitation page consumes `location.hash`, immediately clears it, posts it once, and receives only a path-scoped HTTP-only invitation cookie—never the exchange secret in JSON.
+
+Remote MCP uses the installed SDK's Streamable HTTP transport; `collab mcp` uses stdio and only proxies the same public tool definitions through the authenticated API client. It imports no authority implementation, SQLite, WSS, or React and writes only MCP frames to stdout. Authenticated SSE subscribes to a projection port, emits committed bounded schema-valid events with monotonic cursors, filters current authorization, supports typed reset on stale cursors, and bounds replay/queues/slow consumers. It never carries runner controls, permits, attachment handles, or interactive bytes.
+
+`collab start` is canonical and `collab run` is an exact alias. CLI has deterministic exit classes and `--json`; web uses one schema-validating API/SSE client. Parity tests exercise actual Hono, compiled CLI, SDK Streamable HTTP/stdio, and isolated state. Browser E2E uses virtual WebAuthn, a real fragment exchange, cookie/CSRF assertions, two-member onboarding, preset/run flows, and committed SSE. Stateful Playwright servers use isolated temporary data or serial suites.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -1059,7 +1071,7 @@ Expected: PASS; all surfaces return identical values/error codes, SSE emits only
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/adapters/http src/server/adapters/mcp src/cli/commands src/web/features tests/protocol/surface-parity.test.ts tests/e2e/setup-and-members.spec.ts tests/e2e/foundation-run.spec.ts
+git add src/shared/contracts/public-api.ts src/shared/contracts/projections.ts src/server/adapters/http src/server/adapters/mcp src/cli src/web tests/protocol/surface-parity.test.ts tests/e2e/setup-and-members.spec.ts tests/e2e/foundation-run.spec.ts
 git commit -m "feat: expose equivalent foundation surfaces"
 ```
 
