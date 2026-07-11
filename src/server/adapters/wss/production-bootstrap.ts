@@ -69,7 +69,7 @@ export async function createProductionServer(environment: ServerEnvironment, app
   const now = () => Math.floor(Date.now() / 1_000);
   const directory = resolve(environment.dataDir);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const database = openDatabase(join(directory, "collab.db"));
+  const database = openDatabase(join(directory, "collab.sqlite"));
   migrate(database);
   const runners = createRunnerServices({
     database,

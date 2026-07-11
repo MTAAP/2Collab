@@ -141,6 +141,8 @@ test("default entry boots composed Task6 auth and exchanges authenticated runner
       "HEARTBEAT_ACK",
     ]);
     expect(socket.closes).toEqual([]);
+    expect(await Bun.file(join(directory, "collab.sqlite")).exists()).toBeTrue();
+    expect(await Bun.file(join(directory, "collab.db")).exists()).toBeFalse();
     server.database.close();
   } finally {
     for (const [key, value] of Object.entries(prior)) {
