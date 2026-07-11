@@ -1,8 +1,8 @@
-import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
+import { serveStatic } from "hono/bun";
 import { APP_METADATA } from "../shared/app-metadata.ts";
-import { createFoundationHttpApp } from "./adapters/http/app.ts";
 import type { FoundationHttpDependencies } from "./adapters/http/app.ts";
+import { createFoundationHttpApp } from "./adapters/http/app.ts";
 import {
   createGitHubConnectorRoutes,
   type GitHubWebhookRouteDependencies,
@@ -13,9 +13,10 @@ import {
 } from "./adapters/http/routes/github-issues.ts";
 import { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
 import { createInboxRoutes } from "./adapters/http/routes/inbox.ts";
-import { foundationSecurityHeaders } from "./adapters/http/security-headers.ts";
-import { createWorkflowRoutes } from "./adapters/http/routes/workflows.ts";
 import { createTemplateRoutes } from "./adapters/http/routes/templates.ts";
+import { createWorkflowRuntimeRoutes } from "./adapters/http/routes/workflow-runtime.ts";
+import { createWorkflowRoutes } from "./adapters/http/routes/workflows.ts";
+import { foundationSecurityHeaders } from "./adapters/http/security-headers.ts";
 
 type AppOptions = {
   docsRoot?: string;
@@ -29,6 +30,7 @@ type AppOptions = {
     rateLimits: FoundationHttpDependencies["rateLimits"];
     workflows: Parameters<typeof createWorkflowRoutes>[0]["operations"];
     templates: Parameters<typeof createTemplateRoutes>[0]["operations"];
+    runtime?: Parameters<typeof createWorkflowRuntimeRoutes>[0]["operations"];
   }>;
 };
 
@@ -107,6 +109,16 @@ export function createApp(
         operations: options.automation.workflows,
       }),
     );
+    if (options.automation.runtime) {
+      app.route(
+        "/",
+        createWorkflowRuntimeRoutes({
+          authentication: options.automation.authentication,
+          rateLimits: options.automation.rateLimits,
+          operations: options.automation.runtime,
+        }),
+      );
+    }
     app.route(
       "/",
       createTemplateRoutes({

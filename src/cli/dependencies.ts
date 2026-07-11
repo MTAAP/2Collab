@@ -1,17 +1,18 @@
 import { join } from "node:path";
+import {
+  type GlobalRegistryFilesystem,
+  openLocalProjectRegistry,
+} from "../runner/repository/global-registry.ts";
 import { CanonicalServerOriginSchema } from "../shared/contracts/projects.ts";
 import {
+  createAutomationApiClient,
   createProjectsApiClient,
   createPublicApiClient,
   type DeviceCredentialProvider,
 } from "./api-client.ts";
-import { createDeviceCredentialProvider } from "./credentials.ts";
 import type { CliDependencies } from "./command.ts";
 import { startStdioMcpBridge } from "./commands/mcp.ts";
-import {
-  openLocalProjectRegistry,
-  type GlobalRegistryFilesystem,
-} from "../runner/repository/global-registry.ts";
+import { createDeviceCredentialProvider, createDeviceEnrollment } from "./credentials.ts";
 
 export type CliResources = Readonly<{
   cwd?: string;
@@ -39,6 +40,10 @@ export function createCliDependencies(
     baseUrl.success && credentials
       ? createPublicApiClient({ baseUrl: baseUrl.data, credentials, fetch: resources.fetch })
       : undefined;
+  const automationApi =
+    baseUrl.success && credentials
+      ? createAutomationApiClient({ baseUrl: baseUrl.data, credentials, fetch: resources.fetch })
+      : undefined;
 
   const registry = home
     ? openLocalProjectRegistry(join(home, ".collab", "global.db"), {
@@ -55,5 +60,10 @@ export function createCliDependencies(
     registry,
     runsApi,
     mcpBridge: runsApi ? () => startStdioMcpBridge(runsApi) : undefined,
+    workflowOperations: automationApi?.workflows,
+    templateOperations: automationApi?.templates,
+    deviceEnrollment: baseUrl.success
+      ? createDeviceEnrollment(baseUrl.data, resources.fetch)
+      : undefined,
   };
 }

@@ -1,12 +1,13 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { MemberActor } from "../../../shared/contracts/actors.ts";
-import type { Result } from "../../../shared/contracts/result.ts";
-import type { PublicRunOperations } from "../../modules/public-surface/contract.ts";
-import { createPublicMcpServer } from "./server.ts";
 import type { GitHubMutation, GitHubProjection } from "../../../shared/contracts/github.ts";
+import type { Result } from "../../../shared/contracts/result.ts";
 import type { ExactRevisionMutation, Observed } from "../../modules/connectors/contract.ts";
-import type { WorkflowAuthoringOperations } from "../../modules/workflows/authoring.ts";
+import type { PublicRunOperations } from "../../modules/public-surface/contract.ts";
 import type { TemplateBindingOperations } from "../../modules/templates/bindings.ts";
+import type { WorkflowAuthoringOperations } from "../../modules/workflows/authoring.ts";
+import type { WorkflowRuntimeOperations } from "../../modules/workflows/runtime-operations.ts";
+import { createPublicMcpServer } from "./server.ts";
 
 type McpRateLimitPort = Readonly<{
   allow(input: Readonly<{ actorId: string; method: string; path: string }>): boolean;
@@ -18,6 +19,7 @@ type Dependencies = Readonly<{
   }>;
   workflows?: WorkflowAuthoringOperations;
   templates?: TemplateBindingOperations;
+  workflowRuntime?: WorkflowRuntimeOperations;
   rateLimits?: McpRateLimitPort;
   runs: PublicRunOperations;
   outlineMcp?: Readonly<{
@@ -80,6 +82,7 @@ export function createMcpHttpHandler(dependencies: Dependencies) {
       github: dependencies.github,
       workflows: dependencies.workflows,
       templates: dependencies.templates,
+      workflowRuntime: dependencies.workflowRuntime,
     });
     await server.connect(transport);
     return transport.handleRequest(request);
