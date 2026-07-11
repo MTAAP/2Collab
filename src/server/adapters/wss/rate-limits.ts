@@ -57,6 +57,7 @@ export class BoundedSendQueue<T> {
       ) {
         const index = this.#entries.findIndex((entry) => entry.priority === "NORMAL");
         const [removed] = this.#entries.splice(index, 1);
+        if (!removed) break;
         this.#bytes -= removed.bytes;
       }
     }

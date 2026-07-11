@@ -29,7 +29,11 @@ function defaultSocketFactory(
   url: string,
   options: Readonly<{ headers: Readonly<Record<string, string>> }>,
 ): RunnerClientSocket {
-  return new WebSocket(url, options) as RunnerClientSocket;
+  const BunWebSocket = WebSocket as unknown as new (
+    endpoint: string,
+    clientOptions: Readonly<{ headers: Readonly<Record<string, string>> }>,
+  ) => RunnerClientSocket;
+  return new BunWebSocket(url, options);
 }
 
 function validateEndpoint(value: string): string {
@@ -116,9 +120,11 @@ export function createRunnerWssClient(dependencies: Dependencies) {
           if (
             !welcome.success ||
             !dependencies.supportedRanges.some((range) => {
-              const [major, minor] = welcome.success
+              const parts = welcome.success
                 ? welcome.data.selectedVersion.split(".").map(Number)
                 : [0, 0];
+              const major = parts[0] ?? 0;
+              const minor = parts[1] ?? 0;
               return (
                 range.major === major && minor >= range.minimumMinor && minor <= range.maximumMinor
               );

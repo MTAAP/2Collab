@@ -59,12 +59,13 @@ export function createRunnerUpgradeAuthenticator(dependencies: Dependencies) {
     const proof = request.headers.get("dpop");
     const nonce = request.headers.get("dpop-nonce");
     const authorizationMatch = /^DPoP ([A-Za-z0-9_-]{32,512})$/.exec(authorization ?? "");
-    if (!authorizationMatch || !bounded(proof, 1, 8_192) || !bounded(nonce, 1, 512)) {
+    const accessToken = authorizationMatch?.[1];
+    if (!accessToken || !bounded(proof, 1, 8_192) || !bounded(nonce, 1, 512)) {
       return unauthorized();
     }
     try {
       const result = await dependencies.authority.authenticateUpgrade({
-        accessToken: authorizationMatch[1],
+        accessToken,
         proof,
         nonce,
         method: "GET",

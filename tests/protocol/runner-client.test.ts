@@ -44,7 +44,7 @@ describe("runner WSS client", () => {
       },
     ]);
     socket.dispatchEvent(new Event("open"));
-    expect(JSON.parse(socket.sent[0])).toEqual({
+    expect(JSON.parse(socket.sent[0] ?? "null")).toEqual({
       kind: "CLIENT_HELLO",
       ranges: [{ major: 1, minimumMinor: 0, maximumMinor: 1 }],
     });

@@ -1,7 +1,5 @@
-import {
-  createInMemoryRunnerProtocolChannel,
-  type RunnerEnvelope,
-} from "../../src/server/adapters/wss/protocol.ts";
+import { createInMemoryRunnerProtocolChannel } from "../../src/server/adapters/wss/protocol.ts";
+import type { RunnerEnvelope } from "../../src/shared/contracts/protocol.ts";
 
 export const createInMemoryRunnerChannel = createInMemoryRunnerProtocolChannel;
 
