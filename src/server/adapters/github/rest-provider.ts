@@ -32,6 +32,7 @@ export type GitHubRestProviderInput = Readonly<{
   fetcher?: Fetcher;
   token(scope: ConnectorScope): Promise<Result<string>>;
   repository(repositoryId: string): Result<Repository>;
+  workItemNodeId(reference: GitHubWorkItemReference): Result<string>;
   selectedRepositoryIds(scope: ConnectorScope): readonly string[];
   selectedProjectIds(scope: ConnectorScope): readonly string[];
   clock: () => number;
@@ -308,8 +309,11 @@ export function createGitHubRestProvider(input: GitHubRestProviderInput): GitHub
           "mutation($project:ID!,$item:ID!,$after:ID){updateProjectV2ItemPosition(input:{projectId:$project,itemId:$item,afterId:$after}){items{nodes{id}}}}",
       };
       const variables: Record<string, unknown> = { project: project.projectNodeId };
-      if (mutation.kind === "ADD_PROJECT_ITEM")
-        variables.content = `${mutation.item.kind}:${mutation.item.repositoryId}:${mutation.item.number}`;
+      if (mutation.kind === "ADD_PROJECT_ITEM") {
+        const nodeId = input.workItemNodeId(mutation.item);
+        if (!nodeId.ok) return nodeId;
+        variables.content = nodeId.value;
+      }
       if (
         mutation.kind === "REMOVE_PROJECT_ITEM" ||
         mutation.kind === "SET_PROJECT_FIELD" ||
@@ -318,7 +322,18 @@ export function createGitHubRestProvider(input: GitHubRestProviderInput): GitHub
         variables.item = mutation.itemId;
       if (mutation.kind === "SET_PROJECT_FIELD") {
         variables.field = mutation.fieldId;
-        variables.value = mutation.value;
+        variables.value =
+          mutation.value.kind === "TEXT"
+            ? { text: mutation.value.value }
+            : mutation.value.kind === "NUMBER"
+              ? { number: mutation.value.value }
+              : mutation.value.kind === "DATE"
+                ? { date: mutation.value.value }
+                : mutation.value.kind === "SINGLE_SELECT"
+                  ? { singleSelectOptionId: mutation.value.optionId }
+                  : mutation.value.kind === "ITERATION"
+                    ? { iterationId: mutation.value.iterationId }
+                    : {};
       }
       if (mutation.kind === "MOVE_PROJECT_ITEM") variables.after = mutation.afterItemId;
       const written = await request(scope, "/graphql", {

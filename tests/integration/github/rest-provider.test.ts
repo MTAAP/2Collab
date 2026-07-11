@@ -33,6 +33,7 @@ test("production REST provider uses fixed endpoints and returns bounded normaliz
       ok: true,
       value: { repositoryId: "101", owner: "owner", name: "repo", nodeId: "R_101" },
     }),
+    workItemNodeId: () => ({ ok: true, value: "I_42" }),
     fetcher: async (url, init) => {
       calls.push({
         url: String(url),
