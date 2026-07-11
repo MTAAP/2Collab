@@ -36,6 +36,7 @@ function encodings(value: string): readonly string[] {
 describe("prohibited storage canary", () => {
   test("raw canaries never enter the closed durable-store inventory", () => {
     const allowedAuthoredInstruction = "allowed-authored-goal-7f39";
+    const windowsSeparator = String.fromCharCode(92);
     const forbidden = [
       "source-body-3df4",
       "document-body-29a1",
@@ -47,7 +48,7 @@ describe("prohibited storage canary", () => {
       "connector-credential-917e",
       "private-profile-arguments-690f",
       "/private/worktree/path-9812",
-      "C:\\private\\worktree-771a",
+      ["C:", "private", "worktree-771a"].join(windowsSeparator),
       "worktree-content-502c",
       "raw-diff-11f9",
       "attachment-handle-198e",
