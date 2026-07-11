@@ -4,12 +4,7 @@ import type {
   OutlineMutation,
 } from "../../../shared/contracts/outline.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
-import type {
-  ConnectorOperationAuthorization,
-  ConnectorScope,
-  ExactRevisionMutation,
-  Observed,
-} from "../connectors/contract.ts";
+import type { ConnectorScope, ExactRevisionMutation, Observed } from "../connectors/contract.ts";
 import type { OutlineContentPort } from "../connectors/outline-content-port.ts";
 import { assertOutlineScope } from "../connectors/outline-scope.ts";
 import {
@@ -20,18 +15,15 @@ import {
 
 export interface OutlineMemberMutationAuthorityPort {
   currentScope(projectId: string, connectorId: string): Promise<Result<ConnectorScope>>;
-  authorize(
+  mutate(
+    outline: OutlineContentPort,
     input: Readonly<{
       memberId: string;
       reference: string;
       operation: "CREATE_DOCUMENT" | "EDIT_CONTENT";
       command: ExactRevisionMutation<OutlineMutation>;
     }>,
-  ): Promise<Result<ConnectorOperationAuthorization>>;
-  confirm(
-    observed: Observed<OutlineDocumentProjection>,
   ): Promise<Result<Observed<OutlineDocumentProjection>>>;
-  fail(error: Readonly<{ code: string; message: string }>): Promise<void>;
 }
 
 type BaseCommand = Readonly<{
@@ -70,19 +62,12 @@ export function createHumanDocumentEditing(
       const allowed = assertOutlineScope(scope.value, command.collectionId);
       if (!allowed.ok) return allowed;
       const mutation = memberCreateMutation(command);
-      const authorized = await dependencies.authority.authorize({
+      return dependencies.authority.mutate(dependencies.outline, {
         memberId: command.memberId,
         reference: `OUTLINE_COLLECTION:${command.collectionId}`,
         operation: "CREATE_DOCUMENT",
         command: mutation,
       });
-      if (!authorized.ok) return authorized;
-      const result = await dependencies.outline.mutate(authorized.value, mutation);
-      if (!result.ok) {
-        await dependencies.authority.fail(result.error);
-        return result;
-      }
-      return dependencies.authority.confirm(result.value);
     },
 
     async editDocumentAsMember(
@@ -121,19 +106,12 @@ export function createHumanDocumentEditing(
         sourceRevision: command.expectedRevision,
         comparableDigest: command.expectedDigest,
       });
-      const authorized = await dependencies.authority.authorize({
+      return dependencies.authority.mutate(dependencies.outline, {
         memberId: command.memberId,
         reference: command.documentId,
         operation: "EDIT_CONTENT",
         command: mutation,
       });
-      if (!authorized.ok) return authorized;
-      const result = await dependencies.outline.mutate(authorized.value, mutation);
-      if (!result.ok) {
-        await dependencies.authority.fail(result.error);
-        return result;
-      }
-      return dependencies.authority.confirm(result.value);
     },
   };
 }

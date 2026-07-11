@@ -18,10 +18,18 @@ import {
 import { createStubRunOperations } from "./modules/public-surface/run-operations.ts";
 import type { ServerEnvironment } from "../shared/environment.ts";
 import type { Result } from "../shared/contracts/result.ts";
+import { createMcpHttpHandler } from "./adapters/mcp/http.ts";
 
 type ServerResources = Readonly<{
   docsRoot?: string;
   webRoot?: string;
+  outline?: NonNullable<FoundationHttpDependencies["outline"]> &
+    Readonly<{
+      mcp: Readonly<{
+        search(input: unknown): Promise<unknown>;
+        read(input: unknown): Promise<unknown>;
+      }>;
+    }>;
 }>;
 
 function defaultSecurityDigest(): string {
@@ -136,11 +144,19 @@ export async function createServerDependencies(
   });
 
   const configuredOrigin = environment.publicBaseUrl;
+  const authentication = notImplementedAuthentication();
+  const runs = createStubRunOperations();
   const dependencies: FoundationHttpDependencies = {
     configuredOrigin,
-    authentication: notImplementedAuthentication(),
+    authentication,
     rateLimits: allowAllRateLimits(),
-    runs: createStubRunOperations(),
+    runs,
+    mcp: createMcpHttpHandler({
+      authentication,
+      runs,
+      ...(resources.outline ? { outlineMcp: resources.outline.mcp } : {}),
+    }),
+    ...(resources.outline ? { outline: resources.outline } : {}),
   };
   const app = createApp(dependencies, {
     docsRoot: resources.docsRoot,

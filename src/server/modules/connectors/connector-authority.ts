@@ -853,6 +853,12 @@ export function createConnectorAuthority(dependencies: Dependencies) {
   };
 
   return {
+    async currentScope(projectId: string, connectorId: string): Promise<Result<ConnectorScope>> {
+      const row = scopeSnapshot(projectId, connectorId);
+      if (row?.review_state !== "READY" || row.epoch !== row.connector_epoch)
+        return error("CONNECTOR_AUTHORITY_DENIED", "Connector authority is denied.");
+      return { ok: true, value: scopeFrom(row) };
+    },
     async changeEpoch(
       input: Readonly<{
         actor: MemberActor;

@@ -4,6 +4,9 @@ import type { PublicRateLimitPort } from "./middleware/request-limits.ts";
 import type { PublicRunOperations } from "./public-schemas.ts";
 import { createBrowserAuthRoutes } from "./routes/auth.ts";
 import { createRunRoutes } from "./routes/runs.ts";
+import { createOutlineConnectorRoutes } from "./routes/connectors-outline.ts";
+import { createOutlineDocumentRoutes } from "./routes/outline-documents.ts";
+import { createOutlineSearchRoutes } from "./routes/outline-search.ts";
 import { foundationSecurityHeaders } from "./security-headers.ts";
 
 export type FoundationHttpDependencies = Readonly<{
@@ -14,6 +17,11 @@ export type FoundationHttpDependencies = Readonly<{
   browserIdentity?: Parameters<typeof createBrowserAuthRoutes>[0]["identity"];
   mcp?: (request: Request) => Promise<Response>;
   readiness?: Readonly<{ ready: () => boolean }>;
+  outline?: Readonly<{
+    connector: Parameters<typeof createOutlineConnectorRoutes>[0];
+    search: Parameters<typeof createOutlineSearchRoutes>[0];
+    documents: Parameters<typeof createOutlineDocumentRoutes>[0];
+  }>;
 }>;
 
 export function createFoundationHttpApp(dependencies: FoundationHttpDependencies): Hono {
@@ -34,6 +42,17 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
     );
   }
   app.route("/api/v1/runs", createRunRoutes(dependencies));
+  if (dependencies.outline) {
+    app.route(
+      "/api/v1/connectors/outline",
+      createOutlineConnectorRoutes(dependencies.outline.connector),
+    );
+    app.route("/api/v1/outline/search", createOutlineSearchRoutes(dependencies.outline.search));
+    app.route(
+      "/api/v1/outline/documents",
+      createOutlineDocumentRoutes(dependencies.outline.documents),
+    );
+  }
   if (dependencies.mcp) {
     const mcp = dependencies.mcp;
     app.all("/mcp", (context) => mcp(context.req.raw));

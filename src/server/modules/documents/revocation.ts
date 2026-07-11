@@ -50,10 +50,48 @@ export function commitReservedOutlineOperation(
     };
   return { ok: true, value: { committed: true } };
 }
+export const EXPECTED_OUTLINE_STORE_IDS = [
+  "browser-cache",
+  "browser-network-capture",
+  "browser-storage",
+  "cli-capture",
+  "container-volumes",
+  "evidence",
+  "manifests",
+  "playwright-artifacts",
+  "runner-context-cache",
+  "runner-logs",
+  "runner-outbox",
+  "runner-sqlite",
+  "runner-wal-shm",
+  "server-audit-projection-outbox",
+  "server-backup-ciphertext",
+  "server-idempotency",
+  "server-logs",
+  "server-restored-logical",
+  "server-sqlite",
+  "server-staging",
+  "server-temp",
+  "server-wal-shm",
+] as const;
 export function scanForbiddenCanaries(
-  stores: readonly Readonly<{ id: string; bytes: string }>[],
+  stores: readonly Readonly<{ id: string; bytes: string; readable: boolean }>[],
   canaries: readonly string[],
 ): Result<Readonly<{ scanned: number }>> {
+  const ids = stores.map((store) => store.id).sort();
+  if (
+    stores.some((store) => !store.readable) ||
+    new Set(ids).size !== ids.length ||
+    JSON.stringify(ids) !== JSON.stringify([...EXPECTED_OUTLINE_STORE_IDS].sort())
+  )
+    return {
+      ok: false,
+      error: {
+        code: "OUTLINE_STORE_INVENTORY_INVALID",
+        message: "Outline store inventory is incomplete.",
+        retry: "NEVER",
+      },
+    };
   for (const store of stores)
     for (const canary of canaries) {
       const variants = [

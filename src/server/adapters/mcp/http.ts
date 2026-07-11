@@ -9,6 +9,10 @@ type Dependencies = Readonly<{
     authenticateDevice(request: Request): Promise<Result<MemberActor>>;
   }>;
   runs: PublicRunOperations;
+  outlineMcp?: Readonly<{
+    search(input: unknown): Promise<unknown>;
+    read(input: unknown): Promise<unknown>;
+  }>;
 }>;
 
 export function createMcpHttpHandler(dependencies: Dependencies) {
@@ -33,6 +37,7 @@ export function createMcpHttpHandler(dependencies: Dependencies) {
     const server = createPublicMcpServer({
       actor: authenticated.value,
       runs: dependencies.runs,
+      ...(dependencies.outlineMcp ? { outline: dependencies.outlineMcp } : {}),
     });
     await server.connect(transport);
     return transport.handleRequest(request);

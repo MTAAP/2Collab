@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../../../src/server/db/connection.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
 import { createMemberRevocationAuthority } from "../../../src/server/modules/identity/revocation.ts";
+import outlineMigration from "../../../src/server/db/migrations/0010_outline.sql" with {
+  type: "text",
+};
 
-function fixture(dispatchSucceeds = true) {
+function fixture(dispatchSucceeds = true, providerRevocations?: string[]) {
   const database = openDatabase(":memory:");
   migrate(database);
   database.exec(`
@@ -74,6 +77,16 @@ function fixture(dispatchSucceeds = true) {
             };
       },
     },
+    ...(providerRevocations
+      ? {
+          outlineProviderRevocation: {
+            async revokeCredential(credentialId: string) {
+              providerRevocations.push(credentialId);
+              return { ok: true as const, value: { revoked: true as const } };
+            },
+          },
+        }
+      : {}),
   });
   return { database, authority, dispatched };
 }
@@ -210,6 +223,65 @@ describe("member offboarding", () => {
           )
           .get(),
       ).toEqual({ status: "PENDING" });
+    } finally {
+      f.database.close();
+    }
+  });
+
+  test("offboarding atomically invalidates delegated Outline identity and advances shared connector authority before provider revoke", async () => {
+    const providerRevocations: string[] = [];
+    const f = fixture(true, providerRevocations);
+    try {
+      f.database.exec("INSERT INTO schema_migrations(version,applied_at)VALUES(7,0),(8,0),(9,0)");
+      f.database.exec(outlineMigration);
+      f.database.exec(`
+        INSERT INTO connector_epochs(connector_id,epoch,review_state,revision) VALUES('outline_1',1,'READY',1);
+        INSERT INTO connector_scopes(id,project_id,connector_id,connector_epoch,revision,created_at)
+          VALUES('scope_outline','project_1','outline_1',1,1,0);
+        INSERT INTO connector_scope_references(scope_id,reference) VALUES('scope_outline','OUTLINE_COLLECTION:c');
+        INSERT INTO connector_scope_operations(scope_id,operation) VALUES('scope_outline','EDIT_CONTENT');
+        INSERT INTO encrypted_credentials(id,credential_class,owner_kind,owner_id,connector_id,credential_owner_id,key_id,key_version,algorithm,nonce,ciphertext,auth_tag,revision,created_at,updated_at)
+          VALUES('outline_bot','PROVIDER','CONNECTOR','outline_1','outline_1','bot','k',1,'AES_256_GCM',zeroblob(12),X'01',zeroblob(16),1,0,0),
+                ('outline_member','MEMBER_OAUTH','MEMBER','member_1','outline_1','member_1','k',1,'AES_256_GCM',zeroblob(12),X'02',zeroblob(16),1,0,0);
+        INSERT INTO outline_connections(connector_id,origin,workspace_id,bot_provider_user_id,bot_credential_id,oauth_client_id,oauth_metadata_digest,revision,created_at,updated_at)
+          VALUES('outline_1','https://outline.test','workspace','bot-user','outline_bot','client','${"a".repeat(64)}',1,0,0);
+        INSERT INTO outline_member_oauth_grants(id,connector_id,member_id,outline_user_id,credential_id,granted_scope_digest,access_expires_at,refresh_status,credential_revision,revision,created_at,updated_at)
+          VALUES('outline_grant','outline_1','member_1','member-user','outline_member','${"b".repeat(64)}',10000,'READY',1,1,0,0);
+      `);
+      const result = await f.authority.remove({
+        idempotencyKey: "remove_outline",
+        actor: {
+          kind: "MEMBER",
+          memberId: "owner_1" as never,
+          sessionId: "owner_session" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        memberId: "member_1" as never,
+        expectedRevision: 1,
+      });
+      expect(result.ok).toBe(true);
+      expect(providerRevocations).toEqual(["outline_member"]);
+      expect(
+        f.database
+          .query<{ refresh_status: string; revoked_at: number | null }, []>(
+            "SELECT refresh_status,revoked_at FROM outline_member_oauth_grants WHERE id='outline_grant'",
+          )
+          .get(),
+      ).toEqual({ refresh_status: "REVOKED", revoked_at: 1000 });
+      expect(
+        f.database
+          .query<{ epoch: number }, []>(
+            "SELECT epoch FROM connector_epochs WHERE connector_id='outline_1'",
+          )
+          .get()?.epoch,
+      ).toBe(2);
+      expect(
+        f.database
+          .query<{ connector_epoch: number }, []>(
+            "SELECT connector_epoch FROM connector_scopes WHERE id='scope_outline'",
+          )
+          .get()?.connector_epoch,
+      ).toBe(2);
     } finally {
       f.database.close();
     }

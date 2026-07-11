@@ -20,6 +20,8 @@ CREATE TABLE additional_document_requests (
   document_id TEXT NOT NULL CHECK(length(document_id) BETWEEN 1 AND 128), requested_by_run_id TEXT NOT NULL REFERENCES agent_runs(id),
   status TEXT NOT NULL CHECK(status IN ('PENDING','APPROVED','REJECTED')), request_revision INTEGER NOT NULL CHECK(request_revision > 0),
   created_at INTEGER NOT NULL CHECK(created_at >= 0), decided_by_member_id TEXT REFERENCES members(id), decided_at INTEGER CHECK(decided_at >= created_at),
+  revoked_at INTEGER CHECK(revoked_at IS NULL OR revoked_at >= created_at),
+  revocation_cause TEXT CHECK(revocation_cause IS NULL OR revocation_cause IN ('MEMBER','RUN','CONNECTOR','SCOPE','RESTORE','EXPLICIT')),
   CHECK((status='PENDING' AND decided_by_member_id IS NULL AND decided_at IS NULL) OR (status IN ('APPROVED','REJECTED') AND decided_by_member_id IS NOT NULL AND decided_at IS NOT NULL))
 ) STRICT;
 INSERT INTO schema_migrations(version, applied_at) VALUES (11, CAST(strftime('%s','now') AS INTEGER)*1000);

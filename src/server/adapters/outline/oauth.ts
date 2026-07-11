@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Result } from "../../../shared/contracts/result.ts";
 import type { OutlineOAuthProviderPort } from "./oauth-provider-contract.ts";
 
-type Transaction = Readonly<{
+export type OutlineOAuthTransaction = Readonly<{
   id: string;
   connectorId: string;
   memberId: string;
@@ -17,8 +17,8 @@ type Transaction = Readonly<{
 }>;
 
 export interface OutlineOAuthTransactionStore {
-  save(transaction: Transaction): Promise<Result<Readonly<{ saved: true }>>>;
-  consume(id: string, stateHash: string, now: number): Promise<Result<Transaction>>;
+  save(transaction: OutlineOAuthTransaction): Promise<Result<Readonly<{ saved: true }>>>;
+  consume(id: string, stateHash: string, now: number): Promise<Result<OutlineOAuthTransaction>>;
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -57,7 +57,7 @@ export function createOutlineOAuth(
           },
         };
       }
-      const transaction: Transaction = {
+      const transaction: OutlineOAuthTransaction = {
         id: dependencies.id(),
         connectorId: input.connectorId,
         connectorEpoch: input.connectorEpoch,

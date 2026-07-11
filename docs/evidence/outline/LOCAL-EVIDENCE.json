@@ -1,0 +1,102 @@
+[
+  {
+    "requirement": "OUT-001",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-002",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-003",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-004",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-005",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-006",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-007",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-008",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-009",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  },
+  {
+    "requirement": "OUT-010",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "collabIds": [],
+    "journey": "NOT_RUN",
+    "localPassed": false,
+    "livePassed": false,
+    "blocker": "LIVE_PROVIDER_NOT_RUN"
+  }
+]

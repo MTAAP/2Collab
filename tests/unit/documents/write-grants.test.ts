@@ -52,3 +52,19 @@ test("allows repeated exact edits only after advancing the cursor", () => {
     }).ok,
   ).toBe(true);
 });
+test("denies a grant whose persisted operation set does not include the requested edit", () => {
+  const result = authorizeDocumentGrant(
+    { ...grant, operations: [] },
+    {
+      runId: "run_a",
+      documentId: "doc_a",
+      connectorEpoch: 1,
+      grantRevision: 1,
+      sourceRevision: "7",
+      comparableDigest: "a".repeat(64),
+      now: 50,
+    },
+  );
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.code).toBe("DOCUMENT_GRANT_OPERATION_DENIED");
+});
