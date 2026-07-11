@@ -88,7 +88,7 @@ export interface SourceConnector<TReference, TProjection, TMutation> {
   scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<TProjection>>>;
 }
 export interface ContextConnector<TReference, TLiveRead, TProjection, TMutation> {
-  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
+  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<EphemeralSearchPage<TReference>>>;
   read(scope: ConnectorScope, reference: TReference): Promise<Result<EphemeralObserved<TLiveRead>>>;
   mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
 }

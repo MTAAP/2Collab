@@ -59,6 +59,7 @@ source-reference, and `ExecutionAuthority` primitives.
 - Create: `src/server/db/migrations/0009_outline.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
+- Modify: `src/server/operations/{backup,restore}.ts`
 - Test: `tests/unit/outline/contracts.test.ts`
 - Test: `tests/integration/outline/migration-0009.test.ts`
 - Test: `tests/integration/outline/{oauth-transaction,projection-storage-safety}.test.ts`
@@ -73,6 +74,10 @@ source-reference, and `ExecutionAuthority` primitives.
 ```ts
 export interface OutlineContentPort
   extends ContextConnector<OutlineReference, OutlineReadResult, OutlineDocumentProjection, OutlineMutation> {}
+export interface OutlineReconciliationPort {
+  inspectSafe(scope: ConnectorScope, reference: OutlineReference): Promise<Result<Observed<OutlineDocumentProjection>>>;
+  scanSafe(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<OutlineDocumentProjection>>>;
+}
 export interface OutlineOAuthProviderPort {
   discover(origin: CanonicalOutlineOrigin): Promise<Result<VerifiedOutlineOAuthMetadata>>;
   exchange(transaction: VerifiedOutlineOAuthTransaction, authorizationCode: string): Promise<Result<ProviderTokenSet>>;
@@ -98,6 +103,11 @@ idempotently replays only that projection, and cannot accept a live-read value. 
 is derived from the authenticated Member's current `(connector, member)` OAuth grant; callers cannot
 select a delegated identity. Bot provenance binds run, attempt, grant ID/revision, grantor Member,
 connector epoch and edited source revision.
+
+The separate reconciliation port reads provider metadata through a body-discarding adapter and emits
+only codec-validated safe projections/events. Periodic refresh and mutation confirmation apply through
+Foundation `ConnectorAuthority.reconcileSource`; a `ContextConnector` itself has no scan and no live
+body can enter reconciliation.
 
 - [ ] **Step 1: Write schema and identity-separation tests**
 
@@ -377,9 +387,11 @@ git commit -m "feat(outline): separate member and bot authority"
 
 **Interfaces:**
 - Consumes: `OutlineContentPort.search/read`, Foundation Context Recipe budgets, connector epoch/scope,
-  source-reference provenance, and bounded preview schema.
-- Produces: `FederatedSearch.search(query): Promise<Result<FederatedSearchResult>>` and
-  `OutlineReferenceProvider.get(reference): Promise<Result<EphemeralObserved<OutlineReadResult>>>`.
+  server-derived Member or Run/Attempt/Capability actor, source-reference provenance, and bounded
+  ephemeral preview schema.
+- Produces: `FederatedSearch.search(command: AuthorizedScopedSearch):
+  Promise<Result<EphemeralSearchPage<OutlineReference>>>` and `OutlineReferenceProvider.get(command:
+  AuthorizedReferenceRead): Promise<Result<EphemeralObserved<OutlineReadResult>>>`.
 
 - [ ] **Step 1: Write reference-first and canary tests**
 
@@ -404,20 +416,34 @@ Expected: FAIL with missing search/reference modules.
 
 ```ts
 return success({
-  references: providerResults.map(({ id, collectionId, title, updatedAt, revision, snippet }) => ({
-    kind: "OUTLINE_DOCUMENT", documentId: id, collectionId, title, updatedAt, observedRevision: revision,
-    preview: budget.take(snippet),
+  ephemeralResults: providerResults.map(({ id, title, revision, snippet }) => ({
+    reference: { kind: "OUTLINE_DOCUMENT", workspaceId, documentId: id },
+    safeProjection: { documentId: id, title, sourceRevision: revision },
+    preview: budget.takeEphemeral(snippet),
   })),
   partialFailures,
 });
 ```
 
+Search/read commands bind authenticated actor, project, current session or Run Capability, Context
+Recipe budget, scope revision and connector epoch. `ScopedSearch` bounds query bytes, provider count,
+result count, aggregate snippet bytes and deadline. HTTP uses `Cache-Control: no-store` and browser
+code never writes snippets/bodies to local/session storage, IndexedDB, Cache Storage or telemetry;
+MCP/CLI captures and Playwright traces/screenshots are scrubbed/disabled for live content. Safe
+reference projections exclude snippets and bodies.
+
 - [ ] **Step 4: Record provenance, then discard fetched bodies after response encoding**
 
 ```ts
-await authority.execute({ kind: "RECORD_SOURCE_ACCESS", reference, observedRevision, observedAt, result: "ALLOWED" });
+await accessProvenance.record({ actor: safeActorRef, projectId, connectorId, connectorEpoch, reference: safeReferenceOrCorrelationDigest, observedRevision, observedAt, result: "ALLOWED" });
 return success({ reference, body: providerDocument.body }); // body is response-only and absent from persistence commands.
 ```
+
+The bounded provenance repository is an actual Task 1 module/table API, not a fabricated
+`ExecutionAuthority` command. Record `ALLOWED|STALE|UNAVAILABLE|FORBIDDEN|REDACTED` without raw query,
+snippet/body, provider error, or guessed denied identifier. Refresh current native collection after
+retrieval and before response. Guessed/out-of-scope/moved identifiers return the same
+`CONTEXT_REFERENCE_UNAVAILABLE` public error and a correlation digest only.
 
 - [ ] **Step 5: Run GREEN and HTTP/MCP parity**
 
@@ -500,7 +526,9 @@ uses the Foundation operation intent and exact provider object/action marker, ne
 
 Run: `bun test tests/integration/outline/{human-editing,revision-conflict}.test.ts && bun run test:e2e:run outline-coediting.spec.ts`
 
-Expected: PASS; member attribution is native and stale saves never overwrite.
+Expected: PASS; member attribution is native and stale saves never overwrite. Task 4 preserves the
+bounded authored patch/digest in its typed stale result; `OUT-004` remains `IN_PROGRESS` until Task 6
+persists the corresponding immutable proposal/conflict record.
 
 - [ ] **Step 6: Commit**
 
@@ -522,9 +550,12 @@ git commit -m "feat(outline): add exact member coediting"
 - Create: `src/server/adapters/mcp/document-tools.ts`
 - Test: `tests/unit/documents/write-grants.test.ts`
 - Test: `tests/integration/outline/agent-grants.test.ts`
+- Test: `tests/drills/backup-restore.test.ts`
 
 **Interfaces:**
-- Consumes: current Member/run/connector authority, `ExecutionAuthority` operation authorization, exact document revision, and bot identity.
+- Consumes: current Member/run/attempt/connector authority, one-time private `ExecutionAuthority`
+  operation proof, exact document revision/digest, current native collection, grantor identity and bot
+  identity.
 - Produces: `createDocumentWriteGrant`, `requestAdditionalDocument`, `decideAdditionalDocumentRequest`, and `editDocumentAsAgent`.
 
 - [ ] **Step 1: Write property tests across every grant dimension**
@@ -553,27 +584,51 @@ Expected: FAIL with missing grant contracts/migration.
 
 ```sql
 CREATE TABLE document_write_grants (
-  grant_id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  connector_id TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  document_ids_json TEXT NOT NULL,
-  operations_json TEXT NOT NULL,
-  connector_epoch INTEGER NOT NULL,
-  grant_revision INTEGER NOT NULL CHECK (grant_revision > 0),
-  expires_at TEXT NOT NULL,
-  revoked_at TEXT
-);
-CREATE TABLE additional_document_requests (
-  request_id TEXT PRIMARY KEY,
+  grant_id TEXT PRIMARY KEY CHECK(length(grant_id) BETWEEN 1 AND 128),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
+  run_id TEXT NOT NULL REFERENCES agent_runs(id),
+  grantor_member_id TEXT NOT NULL REFERENCES members(id),
+  connector_epoch INTEGER NOT NULL CHECK(connector_epoch > 0),
+  grant_revision INTEGER NOT NULL CHECK(grant_revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+  revoked_at INTEGER CHECK(revoked_at >= created_at),
+  revocation_cause TEXT CHECK(revocation_cause IS NULL OR revocation_cause IN ('MEMBER','RUN','CONNECTOR','SCOPE','RESTORE','EXPLICIT'))
+) STRICT;
+CREATE TABLE document_write_grant_documents (
   grant_id TEXT NOT NULL REFERENCES document_write_grants(grant_id),
-  document_id TEXT NOT NULL,
-  requested_by_run_id TEXT NOT NULL,
+  document_id TEXT NOT NULL CHECK(length(document_id) BETWEEN 1 AND 128),
+  source_revision TEXT NOT NULL CHECK(length(source_revision) BETWEEN 1 AND 256),
+  comparable_digest TEXT NOT NULL CHECK(length(comparable_digest) = 64 AND comparable_digest NOT GLOB '*[^a-f0-9]*'),
+  document_revision INTEGER NOT NULL CHECK(document_revision > 0),
+  PRIMARY KEY(grant_id, document_id)
+) STRICT;
+CREATE TABLE document_write_grant_operations (
+  grant_id TEXT NOT NULL REFERENCES document_write_grants(grant_id),
+  operation TEXT NOT NULL CHECK(operation = 'EDIT_CONTENT'),
+  PRIMARY KEY(grant_id, operation)
+) STRICT;
+CREATE TABLE additional_document_requests (
+  request_id TEXT PRIMARY KEY CHECK(length(request_id) BETWEEN 1 AND 128),
+  grant_id TEXT NOT NULL REFERENCES document_write_grants(grant_id),
+  document_id TEXT NOT NULL CHECK(length(document_id) BETWEEN 1 AND 128),
+  requested_by_run_id TEXT NOT NULL REFERENCES agent_runs(id),
   status TEXT NOT NULL CHECK (status IN ('PENDING','APPROVED','REJECTED')),
-  decided_by_member_id TEXT,
-  decided_at TEXT
-);
+  request_revision INTEGER NOT NULL CHECK(request_revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  decided_by_member_id TEXT REFERENCES members(id),
+  decided_at INTEGER CHECK(decided_at >= created_at),
+  CHECK((status = 'PENDING' AND decided_by_member_id IS NULL AND decided_at IS NULL) OR (status IN ('APPROVED','REJECTED') AND decided_by_member_id IS NOT NULL AND decided_at IS NOT NULL))
+) STRICT;
 ```
+
+No grant uses JSON membership/operation columns. Each document is bound to its current source revision/
+digest; the cursor advances only after a confirmed edit or an explicit fresh-authoring read. Additional
+approval CASes both request and grant revisions and rechecks current scope/native collection/bot
+permission/run activity/source revision. Requests confer no authority. Grant expiry/revoke advances
+the grant revision and invalidates matching reserved connector operations without bumping the whole
+connector epoch.
 
 - [ ] **Step 4: Implement non-authorizing request and explicit grant extension**
 
@@ -582,28 +637,35 @@ export async function decideAdditionalDocumentRequest(command: DecideAdditionalD
   const request = await loadPendingRequest(command.requestId);
   if (command.decision === "REJECTED") return rejectRequest(request, command.memberId);
   await assertMemberMayGrant(command.memberId, request.documentId);
-  return extendGrantExact(request.grantId, request.documentId, command.expectedGrantRevision);
+  return extendGrantExact(request, command.expectedRequestRevision, command.expectedGrantRevision);
 }
 ```
 
 - [ ] **Step 5: Authorize immediately before each bot write**
 
 ```ts
-const authorization = await authority.execute({ kind: "AUTHORIZE_OPERATION", sessionId, sessionFence, operation: { kind: "MUTATE_OUTLINE", connectorId, connectorEpoch, documentId, expectedRevision, mutation: "EDIT_CONTENT" } });
-if (!authorization.ok) return authorization;
-return outline.mutate({ mutation: botEdit, expectedRevision });
+const proof = await authority.execute({ kind: "AUTHORIZE_OPERATION", sessionId, sessionFence, operation: exactOutlineGrantOperation });
+if (!proof.ok) return proof;
+return connectorAuthority.mutateAsAttempt({ actor, privateOperationProof: proof.value, grantId, grantRevision, command: exactMutation }, outlineContent);
 ```
+
+The one-time operation proof is server-internal, never browser/MCP-visible or stored in idempotency
+results. Immediately before provider use, ConnectorAuthority revalidates connector epoch, bot/OAuth
+credential, actual native collection, grant ID/revision/grantor/expiry, active run/attempt, exact
+document revision/digest and current fence. Revocation racing an issued proof fails this final gate.
 
 - [ ] **Step 6: Run GREEN**
 
-Run: `bun test tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts && bun run typecheck`
+Run: `bun test tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts src/server/db/migrations/0010_outline_grants.verify.ts tests/drills/backup-restore.test.ts && bun run typecheck`
 
-Expected: PASS; requests confer no authority until an explicit member decision.
+Expected: PASS; requests confer no authority until an explicit member decision. Verify v9-to-v10,
+rollback/history/FKs/integrity, and staged authenticated restore; restore revokes grants/reserved
+operations, requires connector/OAuth/bot review, and never resumes old grant work.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0010_outline_grants.sql src/server/db/migrations/0010_outline_grants.verify.ts src/server/db/migrate.ts src/shared/contracts/document-grants.ts src/server/modules/documents/write-grants.ts src/server/modules/documents/additional-document-requests.ts src/server/modules/documents/agent-operations.ts src/server/adapters/mcp/document-tools.ts tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts
+git add src/server/db/migrations/0010_outline_grants.sql src/server/db/migrations/0010_outline_grants.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/shared/contracts/document-grants.ts src/server/modules/documents/write-grants.ts src/server/modules/documents/additional-document-requests.ts src/server/modules/documents/agent-operations.ts src/server/adapters/mcp/document-tools.ts tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts tests/drills/backup-restore.test.ts
 git commit -m "feat(outline): authorize exact agent document grants"
 ```
 
@@ -615,12 +677,14 @@ git commit -m "feat(outline): authorize exact agent document grants"
 - Create: `src/server/db/migrations/0011_outline_proposals.sql`
 - Create: `src/server/db/migrations/0011_outline_proposals.verify.ts`
 - Modify: `src/server/db/migrate.ts`
+- Modify: `src/server/operations/{backup,restore}.ts`
 - Create: `src/shared/contracts/document-proposals.ts`
 - Create: `src/server/modules/documents/{proposals,conflicts,working-documents}.ts`
 - Create: `src/web/features/outline/{proposals,working-documents}/index.tsx`
 - Test: `tests/unit/documents/proposals.test.ts`
 - Test: `tests/integration/outline/{proposal-conflict,working-document}.test.ts`
 - Test: `tests/e2e/outline-proposals.spec.ts`
+- Test: `tests/drills/backup-restore.test.ts`
 
 **Interfaces:**
 - Consumes: exact source reference/revision, bounded `AuthoredDocumentPatch`, current
@@ -652,40 +716,78 @@ Expected: FAIL with missing proposal migration/module.
 
 ```sql
 CREATE TABLE document_proposals (
-  proposal_id TEXT PRIMARY KEY,
-  connector_id TEXT NOT NULL,
-  document_id TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  base_revision TEXT NOT NULL,
-  authored_patch TEXT NOT NULL,
-  authored_patch_digest TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('PENDING','APPLIED','REJECTED','CONFLICT')),
-  current_revision TEXT,
-  created_at TEXT NOT NULL,
-  decided_at TEXT
-);
+  proposal_id TEXT PRIMARY KEY CHECK(length(proposal_id) BETWEEN 1 AND 128),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
+  connector_epoch INTEGER NOT NULL CHECK(connector_epoch > 0),
+  document_id TEXT NOT NULL CHECK(length(document_id) BETWEEN 1 AND 128),
+  run_id TEXT NOT NULL REFERENCES agent_runs(id),
+  attempt_id TEXT NOT NULL REFERENCES execution_attempts(id),
+  base_revision TEXT NOT NULL CHECK(length(base_revision) BETWEEN 1 AND 256),
+  base_digest TEXT NOT NULL CHECK(length(base_digest) = 64 AND base_digest NOT GLOB '*[^a-f0-9]*'),
+  authored_patch TEXT NOT NULL CHECK(length(CAST(authored_patch AS BLOB)) BETWEEN 1 AND 131072),
+  authored_patch_digest TEXT NOT NULL CHECK(length(authored_patch_digest) = 64 AND authored_patch_digest NOT GLOB '*[^a-f0-9]*'),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+CREATE TABLE document_proposal_decisions (
+  decision_id TEXT PRIMARY KEY CHECK(length(decision_id) BETWEEN 1 AND 128),
+  proposal_id TEXT NOT NULL REFERENCES document_proposals(proposal_id),
+  decision_revision INTEGER NOT NULL CHECK(decision_revision > 0),
+  decision TEXT NOT NULL CHECK(decision IN ('APPLY','REJECT','CONFLICT')),
+  member_id TEXT REFERENCES members(id),
+  provider_revision TEXT CHECK(provider_revision IS NULL OR length(provider_revision) BETWEEN 1 AND 256),
+  decided_at INTEGER NOT NULL CHECK(decided_at >= 0),
+  UNIQUE(proposal_id, decision_revision)
+) STRICT;
+CREATE TABLE document_conflicts (
+  conflict_id TEXT PRIMARY KEY CHECK(length(conflict_id) BETWEEN 1 AND 128),
+  proposal_id TEXT NOT NULL REFERENCES document_proposals(proposal_id),
+  current_revision TEXT NOT NULL CHECK(length(current_revision) BETWEEN 1 AND 256),
+  current_digest TEXT NOT NULL CHECK(length(current_digest) = 64 AND current_digest NOT GLOB '*[^a-f0-9]*'),
+  detected_at INTEGER NOT NULL CHECK(detected_at >= 0),
+  UNIQUE(proposal_id, current_revision, current_digest)
+) STRICT;
 CREATE TABLE external_working_documents (
-  working_document_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL UNIQUE,
-  connector_id TEXT NOT NULL,
-  document_id TEXT NOT NULL,
-  observed_revision TEXT NOT NULL,
-  disposition TEXT NOT NULL CHECK (disposition IN ('KEEP','PROMOTE','ARCHIVE')),
-  disposition_actor_id TEXT,
-  disposition_at TEXT
-);
+  working_document_id TEXT PRIMARY KEY CHECK(length(working_document_id) BETWEEN 1 AND 128),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
+  connector_epoch INTEGER NOT NULL CHECK(connector_epoch > 0),
+  run_id TEXT NOT NULL UNIQUE REFERENCES agent_runs(id),
+  attempt_id TEXT NOT NULL REFERENCES execution_attempts(id),
+  document_id TEXT NOT NULL CHECK(length(document_id) BETWEEN 1 AND 128),
+  current_revision TEXT NOT NULL CHECK(length(current_revision) BETWEEN 1 AND 256),
+  current_digest TEXT NOT NULL CHECK(length(current_digest) = 64 AND current_digest NOT GLOB '*[^a-f0-9]*'),
+  enable_approval_id TEXT NOT NULL CHECK(length(enable_approval_id) BETWEEN 1 AND 128),
+  lifecycle_revision INTEGER NOT NULL CHECK(lifecycle_revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT;
+CREATE TABLE working_document_dispositions (
+  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+  working_document_id TEXT NOT NULL REFERENCES external_working_documents(working_document_id),
+  expected_lifecycle_revision INTEGER NOT NULL CHECK(expected_lifecycle_revision > 0),
+  disposition TEXT NOT NULL CHECK(disposition IN ('KEEP','PROMOTE','ARCHIVE')),
+  actor_member_id TEXT NOT NULL REFERENCES members(id),
+  resulting_revision TEXT CHECK(resulting_revision IS NULL OR length(resulting_revision) BETWEEN 1 AND 256),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  UNIQUE(working_document_id, expected_lifecycle_revision)
+) STRICT;
 ```
 
 - [ ] **Step 4: Implement conflict creation from current revision only**
 
 ```ts
-const current = await outline.read(reference);
+const current = await outline.read(currentScope, reference);
 if (!current.ok) return current;
-if (current.value.revision !== proposal.baseRevision) {
-  return markConflict({ proposalId, currentRevision: current.value.revision }); // current.value.body is not passed.
+if (current.value.sourceRevision !== proposal.baseRevision || current.value.comparableDigest !== proposal.baseDigest) {
+  return appendConflict({ proposalId, currentRevision: current.value.sourceRevision, currentDigest: current.value.comparableDigest }); // body is not passed.
 }
-return applyProposalWithMemberIdentity(proposal, decision.identity);
+return applyProposalAsAuthenticatedMember({ proposal, authoredPatch: proposal.authoredPatch, decisionRevision });
 ```
+
+Proposal content is immutable and decisions/conflicts are append-only. Active Member OAuth identity is
+derived server-side; read scope and current native collection are revalidated before apply, the
+provider mutation includes the bounded authored patch, and concurrent decisions CAS one decision
+revision. Base/current fetched bodies never persist.
 
 - [ ] **Step 5: Implement explicit dispositions**
 
@@ -697,16 +799,24 @@ switch (command.disposition) {
 }
 ```
 
+Working-document creation is explicitly enabled and approval-provenanced. If an agent creates it, a
+separate approval-gated bot-create mutation is required; an edit grant never confers create authority.
+Existence or run completion never implies promotion. `KEEP` preserves its working-material
+classification; Promote/Archive are separate member-authorized connector operations with current
+scope/revision and lifecycle CAS.
+
 - [ ] **Step 6: Run GREEN and browser proof**
 
-Run: `bun test tests/unit/documents/proposals.test.ts tests/integration/outline/{proposal-conflict,working-document}.test.ts && bun run test:e2e:run outline-proposals.spec.ts`
+Run: `bun test tests/unit/documents/proposals.test.ts tests/integration/outline/{proposal-conflict,working-document}.test.ts src/server/db/migrations/0011_outline_proposals.verify.ts tests/drills/backup-restore.test.ts && bun run test:e2e:run outline-proposals.spec.ts`
 
 Expected: PASS; no-action disposition is `KEEP`, and Promote/Archive require separate authorization.
+Verify v10-to-v11 and older supported backup restore through v11; bounded immutable proposals/history
+survive, while restore never auto-applies a proposal or resumes a working-document mutation.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0011_outline_proposals.sql src/server/db/migrations/0011_outline_proposals.verify.ts src/server/db/migrate.ts src/shared/contracts/document-proposals.ts src/server/modules/documents/proposals.ts src/server/modules/documents/conflicts.ts src/server/modules/documents/working-documents.ts src/web/features/outline/proposals src/web/features/outline/working-documents tests/unit/documents/proposals.test.ts tests/integration/outline/proposal-conflict.test.ts tests/integration/outline/working-document.test.ts tests/e2e/outline-proposals.spec.ts
+git add src/server/db/migrations/0011_outline_proposals.sql src/server/db/migrations/0011_outline_proposals.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/shared/contracts/document-proposals.ts src/server/modules/documents/proposals.ts src/server/modules/documents/conflicts.ts src/server/modules/documents/working-documents.ts src/web/features/outline/proposals src/web/features/outline/working-documents tests/unit/documents/proposals.test.ts tests/integration/outline/proposal-conflict.test.ts tests/integration/outline/working-document.test.ts tests/drills/backup-restore.test.ts tests/e2e/outline-proposals.spec.ts
 git commit -m "feat(outline): preserve authored conflict proposals"
 ```
 
@@ -727,7 +837,7 @@ git commit -m "feat(outline): preserve authored conflict proposals"
 - [ ] **Step 1: Write every revocation-race test**
 
 ```ts
-test.each(["MEMBER_GRANT", "BOT_CONNECTION", "CONNECTOR_SCOPE", "DOCUMENT_GRANT", "MEMBER_OFFBOARDING"] as const)(
+test.each(["MEMBER_GRANT", "BOT_CONNECTION", "CONNECTOR_SCOPE", "DOCUMENT_GRANT", "MEMBER_OFFBOARDING", "RESTORE"] as const)(
   "denies a write after %s revocation", async (cause) => {
     const pending = await fixture.authorizeBotWrite();
     await fixture.revoke(cause);
@@ -750,24 +860,44 @@ Expected: FAIL with missing document revocation implementation.
 
 ```ts
 export async function revokeOutlineAuthority(command: RevokeOutlineAuthority): Promise<Result<OutlineRevocation>> {
-  return transaction.immediate(async () => {
-    const epoch = await connectorEpochs.increment(command.connectorId, command.expectedEpoch);
-    await invalidateQueuedWrites(command.connectorId, epoch);
-    await authority.execute({ kind: "APPLY_REVOCATION", source: toRevocationSource(command, epoch) });
-    return success({ cause: command.cause, connectorEpoch: epoch, activeWork: "REDUCED_OR_WAITING" });
+  const committed = transaction.immediate(() => {
+    const revision = command.cause === "DOCUMENT_GRANT"
+      ? revokeExactGrantAndReservedOperations(command)
+      : revokeAuthorityAndAdvanceRequiredEpoch(command);
+    const intentId = persistOutlineRevocationIntent(command, revision);
+    return { revision, intentId, activeWork: deriveCommittedDisposition(command) };
   });
+  await revocationDispatcher.deliver(committed.intentId);
+  return success({ cause: command.cause, connectorEpoch: committed.revision.connectorEpoch, activeWork: committed.activeWork });
 }
 ```
+
+The immediate transaction performs only local synchronous writes: credential/grant/scope/epoch
+invalidation, queued-write holds, affected-work dispositions, safe audit and durable delivery intent.
+`APPLY_REVOCATION` and best-effort provider token revoke happen after commit and resume at startup.
+Document-grant revoke advances only that grant and invalidates matching reserved operations; broader
+member/bot/connector/scope/offboarding/restore causes advance the appropriate epoch. Provider failure
+never restores authority. Race tests cover search/read, human/bot write, proposal apply, working
+document, lost response, active run and `WAITING` versus proposal-only disposition.
 
 - [ ] **Step 4: Add one canary across all prohibited stores**
 
 ```ts
-const canary = `outline-canary-${crypto.randomUUID()}`;
-await exerciseSearchReadHumanEditGrantProposalConflictDisconnectBackupRestore(canary);
-for (const store of await prohibitedStores()) {
-  expect(store.bytes.includes(canary), `${store.name} contains source body canary`).toBe(false);
-}
+const canaries = generateOutlineCanaries();
+await exerciseEveryOutlinePath(canaries);
+const stores = await inspectEveryExpectedOutlineStore();
+expect(stores.map((store) => store.id).sort()).toEqual(EXPECTED_OUTLINE_STORE_IDS);
+for (const store of stores) for (const encoded of forbiddenCanaryEncodings(canaries.forbidden)) expect(store.bytes.includes(encoded)).toBe(false);
+expect(await authoredProposalPatch()).toContain(canaries.allowedAuthoredPatch);
 ```
+
+Use distinct forbidden canaries for fetched/denied/base/current bodies, snippets, raw queries,
+access/refresh tokens, PKCE/state/code material and provider errors, plus one allowed deliberate
+authored-patch canary. Extend the Foundation closed inventory to every Outline/projection/intent/
+idempotency/audit/outbox table, SQLite/WAL/SHM, logs/temp/staging, encrypted backup plus independently
+restored logical data, runner/CLI/MCP/browser caches/network captures/Playwright artifacts/container
+volumes/evidence/manifests. Search raw/JSON/URL/base64; missing, unreadable, skipped or unexpected
+stores fail.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -788,15 +918,22 @@ git commit -m "feat(outline): revoke document authority safely"
 
 **Files:**
 - Create: `tests/e2e/outline-dogfood.spec.ts`
+- Create: `tests/e2e/outline-live-dogfood.spec.ts`
+- Create: `tests/evidence/outline-matrix.ts`
+- Create: `tests/unit/evidence/outline-matrix.test.ts`
+- Create: `scripts/outline-evidence.ts`
 - Create: `docs/evidence/outline/EVIDENCE-TEMPLATE.md`
+- Create: `docs/evidence/outline/<build-id>.md`
 - Create: `docs/evidence/outline/LIVE-DOGFOOD-LEDGER.md`
 - Modify: `src/web/app.tsx`
+- Modify: `package.json`
 - Modify: `MANIFEST.md`
 - Modify: `MANIFEST.sha256`
 
 **Interfaces:**
 - Consumes: all Outline contracts, strict adapter fault controls, authorized disposable-workspace configuration, and acceptance evidence schema.
-- Produces: one fixture-backed two-member journey and one append-only live ledger with build, Git revision, Outline workspace/document revision, Collab run/grant/proposal/audit IDs, command/journey, result, reviewer, and blocker.
+- Produces: one fixture-backed two-member journey, strict `OUT-001`–`OUT-010` proof registry,
+  build-specific local record, and machine-validated append-only live ledger.
 
 - [ ] **Step 1: Write the complete fixture-backed journey**
 
@@ -824,6 +961,13 @@ Expected: FAIL until all routes, UI composition, and collaboration commands are 
 |---|---|---|---|---|---|---|---|---|
 ```
 
+The neutral template is `NOT_RUN`; the separate build record includes tested commit/dirty state and
+artifact/manifest/image identities. `outline-evidence` validates exact local/live test names, parses
+Playwright JSON, and derives `NOT_STARTED|LOCAL_PROOF_COMPLETE|IN_PROGRESS_LIVE|BLOCKED_ENV|PASS|FAIL`.
+Skipped, unreviewed, fixture-only, build-mismatched or blocked evidence cannot pass. Live execution
+requires approved disposable workspace ID plus approval ID and refuses unknown/production-looking
+targets. Evidence contains safe IDs/revisions only, no bodies/snippets/tokens/queries/provider URLs.
+
 - [ ] **Step 4: Run the local Outline gate GREEN**
 
 Run: `bun test tests/unit/outline tests/unit/documents tests/integration/outline tests/protocol/outline-surface-parity.test.ts tests/drills/outline-*.test.ts && bun run test:e2e:run outline-connection.spec.ts outline-coediting.spec.ts outline-proposals.spec.ts outline-dogfood.spec.ts`
@@ -832,19 +976,29 @@ Expected: PASS and exit 0; live-only rows remain `IN_PROGRESS` or `BLOCKED`.
 
 - [ ] **Step 5: Execute authorized disposable live evidence**
 
-Run: `COLLAB_LIVE_OUTLINE=1 bun run test:e2e:run outline-dogfood.spec.ts`
+Run only with explicit disposable-target approval: `COLLAB_LIVE_OUTLINE=1 bun run test:e2e:run outline-live-dogfood.spec.ts --reporter=json` then `bun run outline:evidence validate-live <playwright-json>`.
 
-Expected: PASS only with an explicitly approved disposable workspace; otherwise SKIP with `LIVE_OUTLINE_NOT_AUTHORIZED`, recorded as `BLOCKED`, never `PASS`.
+Expected: PASS only with approved disposable workspace and a human-reviewed result. Live cases verify
+native Member A/Member B/bot actors from Outline history, out-of-scope invisibility, repeated exact-
+grant edits, additional-document request, external conflict, optional working document/dispositions,
+grant/member/bot/scope revocation, and post-live local-store/backup/restore scan. Otherwise record
+`BLOCKED_ENV`; a skip is never PASS.
 
 - [ ] **Step 6: Run the full package gate**
 
-Run: `bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bunx playwright install chromium && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && SESSION_SECRET=0123456789abcdef0123456789abcdef PUBLIC_BASE_URL=https://collab.test WEBAUTHN_RP_ID=collab.test DEPLOYMENT_MASTER_KEY_FILE=.env.example BOOTSTRAP_SECRET_FILE=.env.example BACKUP_DIR=/backups docker compose config --quiet && docker build --tag 2collab:verify . && git diff --check`
+Run every AGENTS command separately and record each result. Use
+`tests/scripts/compose-config-with-temporary-secrets.sh`, never `.env.example` for secrets. Also run
+`archive:verify`, Outline evidence validation, compiled CLI smoke, packaged server readiness/shutdown,
+hardened container readiness, authenticated backup/verify, isolated restore, placeholder scan, and
+`git diff --check`. After final source/evidence inventory, run `manifest:generate`, then
+`manifest:verify` and `archive:verify`, preserving tested-build versus later evidence-commit identity.
 
-Expected: every command exits 0.
+Expected: every locally achievable command exits 0 and is recorded independently; live/environment
+failures remain separate and unrun checks do not inherit success.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add tests/e2e/outline-dogfood.spec.ts docs/evidence/outline/EVIDENCE-TEMPLATE.md docs/evidence/outline/LIVE-DOGFOOD-LEDGER.md src/web/app.tsx MANIFEST.md MANIFEST.sha256
+git add tests/e2e/outline-dogfood.spec.ts tests/e2e/outline-live-dogfood.spec.ts tests/evidence/outline-matrix.ts tests/unit/evidence/outline-matrix.test.ts scripts/outline-evidence.ts docs/evidence/outline src/web/app.tsx package.json MANIFEST.md MANIFEST.sha256
 git commit -m "test(outline): record bidirectional collaboration evidence"
 ```

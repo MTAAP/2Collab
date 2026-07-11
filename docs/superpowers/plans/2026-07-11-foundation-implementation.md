@@ -399,7 +399,7 @@ export interface SourceConnector<R, P, M> {
   scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<P>>>;
 }
 export interface ContextConnector<R, LiveRead, Projection, M> {
-  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
+  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<EphemeralSearchPage<R>>>;
   read(scope: ConnectorScope, reference: R): Promise<Result<EphemeralObserved<LiveRead>>>;
   mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<M>): Promise<Result<Observed<Projection>>>;
 }
@@ -418,7 +418,9 @@ receive an opaque short-lived `ConnectorOperationAuthorization`; they never deci
 persist idempotency/audit/projections, or mutate epochs.
 
 `EphemeralObserved<T>` is response-only and intentionally incompatible with `Observed<Projection>`;
-the authority has no API that persists a live read. Mutation confirmation requires an injected closed
+`EphemeralSearchPage<R>` likewise contains bounded live snippets separately from safe references, uses
+aggregate query/result/byte/time budgets, and cannot enter persistence. The authority has no API that
+persists a live search/read. Mutation confirmation requires an injected closed
 `ConnectorProjectionCodec`, reparses the normalized provider result, enforces byte/schema bounds, and
 persists/idempotently replays only that safe projection. Provider bodies, snippets, patches, raw
 payloads, token sets, or error objects cannot be typed or cast into the persistence path. Connector
