@@ -67,6 +67,9 @@ describe("runner WSS client", () => {
       }),
     );
     expect(client.state).toBe("ACTIVE");
+    client.stop();
+    socket.dispatchEvent(new CloseEvent("close"));
+    expect(client.state).toBe("STOPPED");
   });
 
   test("rejects insecure or decorated endpoints before obtaining credentials", async () => {

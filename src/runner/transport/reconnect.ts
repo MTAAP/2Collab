@@ -55,6 +55,7 @@ export class RunnerReconnectState {
   }
 
   disconnected(reason: DisconnectReason, _now: number): void {
+    if (this.state === "STOPPED") return;
     if (reason === "AUTHENTICATION" || reason === "PROTOCOL" || reason === "POLICY") {
       this.state = "STOPPED";
       return;
@@ -69,6 +70,12 @@ export class RunnerReconnectState {
   retrying(): void {
     if (this.state !== "BACKING_OFF") throw new Error("RUNNER_CONNECTION_TRANSITION_INVALID");
     this.state = "AUTHENTICATING";
+  }
+
+  stop(): void {
+    this.#activeSince = null;
+    this.#stable = false;
+    this.state = "STOPPED";
   }
 
   nextDelaySeconds(): number | null {

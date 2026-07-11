@@ -35,4 +35,15 @@ describe("runner reconnect", () => {
       expect(reconnect.nextDelaySeconds()).toBeNull();
     }
   });
+
+  test("an explicit stop is terminal even if the socket later closes", () => {
+    const reconnect = new RunnerReconnectState();
+    reconnect.authenticating();
+    reconnect.negotiating();
+    reconnect.active(0);
+    reconnect.stop();
+    reconnect.disconnected("NETWORK", 1);
+    expect(reconnect.state).toBe("STOPPED");
+    expect(reconnect.nextDelaySeconds()).toBeNull();
+  });
 });

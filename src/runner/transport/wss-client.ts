@@ -156,6 +156,7 @@ export function createRunnerWssClient(dependencies: Dependencies) {
     },
 
     stop(): void {
+      reconnect.stop();
       fail(1000, "CLIENT_STOP");
       socket = null;
     },
