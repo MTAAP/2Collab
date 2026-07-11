@@ -3,6 +3,7 @@ import {
   createOutlineOAuth,
   type OutlineOAuthTransactionStore,
 } from "../../../src/server/adapters/outline/oauth.ts";
+import { createOutlineConnectorRoutes } from "../../../src/server/adapters/http/routes/connectors-outline.ts";
 import { StrictOutlineOAuthProvider } from "../../fixtures/outline/strict-outline-adapter.ts";
 
 function store(): OutlineOAuthTransactionStore {
@@ -73,4 +74,34 @@ test("binds OAuth callback to state, member, session, redirect, connector, and e
     redirectOrigin: "https://collab.test",
   });
   expect(replay.ok).toBe(false);
+});
+
+test("exposes safe identity health without returning provider tokens", async () => {
+  const app = createOutlineConnectorRoutes({
+    async begin() {
+      return { ok: true, value: { authorizationUrl: "https://outline.test/oauth/authorize" } };
+    },
+    async finish() {
+      return {
+        ok: true,
+        value: {
+          connectorId: "connector_1",
+          workspaceId: "workspace_1",
+          identityKind: "MEMBER",
+          providerUserId: "provider_member_1",
+          refreshStatus: "READY",
+          expiresAt: 10_000,
+        },
+      };
+    },
+    async revoke() {
+      return { ok: true, value: { revoked: true } };
+    },
+  });
+  const response = await app.request("/oauth/callback", { method: "POST" });
+  const body = await response.text();
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(body).not.toContain("accessToken");
+  expect(body).not.toContain("refreshToken");
+  expect(body).toContain("provider_member_1");
 });
