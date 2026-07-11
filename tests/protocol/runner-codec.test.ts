@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createInMemoryRunnerChannel, validRunnerHeartbeat } from "../fixtures/runner-channel.ts";
+import { RunnerEnvelopeSchema, ServerEnvelopeSchema } from "../../src/shared/contracts/protocol.ts";
 
 describe("runner wire codec", () => {
   test("rejects unknown kinds, binary, compression, invalid UTF-8, and oversized frames", () => {
@@ -69,5 +70,62 @@ describe("runner wire codec", () => {
       code: "FRAME_TIME_INVALID",
       close: true,
     });
+  });
+
+  test("keeps both wire directions closed and denies local execution configuration", () => {
+    const runner = validRunnerHeartbeat();
+    expect(RunnerEnvelopeSchema.safeParse(runner).success).toBeTrue();
+    expect(
+      RunnerEnvelopeSchema.safeParse({
+        ...runner,
+        command: "git status",
+        environment: { TOKEN: "x" },
+      }).success,
+    ).toBeFalse();
+
+    const launch = {
+      protocolVersion: "1.0",
+      messageId: "message_launch",
+      sequence: 1,
+      issuedAt: 1_000,
+      expiresAt: 1_010,
+      body: {
+        kind: "LAUNCH_ATTEMPT",
+        deliveryId: "delivery_1",
+        semanticDigest: "a".repeat(64),
+        runId: "run_1",
+        attemptId: "attempt_1",
+        dispatchPermit: "p".repeat(32),
+        goal: "Inspect the repository",
+        bootstrap: {
+          schemaVersion: 1,
+          contextRecipe: { id: "recipe_1", version: 1, digest: "b".repeat(64) },
+          references: [],
+        },
+        projectMappingRevision: 1,
+        repositoryMode: "INSPECT_ONLY",
+        repositoryAssurance: "ADVISORY",
+        baseRevision: "c".repeat(40),
+        host: "NATIVE",
+        interaction: "HEADLESS",
+        profileVersionId: "profile_1",
+        profileFingerprint: "d".repeat(64),
+        policyExpiresAt: 1_010,
+        deadlineAt: 2_000,
+      },
+    };
+    expect(ServerEnvelopeSchema.safeParse(launch).success).toBeTrue();
+    expect(
+      ServerEnvelopeSchema.safeParse({
+        ...launch,
+        body: {
+          ...launch.body,
+          command: "rm -rf /",
+          arguments: ["--dangerous"],
+          environment: { TOKEN: "secret" },
+          localPath: "/private/repository",
+        },
+      }).success,
+    ).toBeFalse();
   });
 });

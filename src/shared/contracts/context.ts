@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ConnectorId, CoordinationRecordId, ProjectId } from "./ids.ts";
-import { IdentifierSchema, RevisionSchema } from "./ids.ts";
+import { IdentifierSchema, RevisionSchema, Sha256Schema } from "./ids.ts";
 
 export type SourceRef = Readonly<{
   kind: "GITHUB_ISSUE" | "GITHUB_PULL_REQUEST" | "OUTLINE_DOCUMENT";
@@ -49,3 +49,46 @@ export const CoordinationSelectionSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
+
+export const BootstrapContextReferenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("COORDINATION_RECORD"),
+      referenceId: IdentifierSchema,
+      revision: RevisionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("SOURCE_PROJECTION"),
+      connectorId: IdentifierSchema,
+      referenceId: z.string().min(1).max(256),
+      observedRevision: z.string().min(1).max(128),
+      projectionDigest: Sha256Schema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("PUBLISHED_GIT_REFERENCE"),
+      remoteIdentity: IdentifierSchema,
+      referenceId: z.string().min(1).max(512),
+      commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+    })
+    .strict(),
+]);
+
+export const BootstrapEnvelopeSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    contextRecipe: z
+      .object({
+        id: IdentifierSchema,
+        version: RevisionSchema,
+        digest: Sha256Schema,
+      })
+      .strict(),
+    references: z.array(BootstrapContextReferenceSchema).max(64),
+  })
+  .strict();
+
+export type BootstrapEnvelope = Readonly<z.infer<typeof BootstrapEnvelopeSchema>>;
