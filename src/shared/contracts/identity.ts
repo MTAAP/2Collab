@@ -20,17 +20,20 @@ export type MemberSession = Readonly<{
   expiresAt: Instant;
 }>;
 
+export type MemberSessionIssue = MemberSession & Readonly<{ proof: string }>;
+
 export type MemberActor = Readonly<{
   kind: "MEMBER";
   memberId: MemberId;
   sessionId: SessionId;
+  sessionProof: string;
 }>;
 
 export type RegistrationPrincipal =
   | MemberActor
   | Readonly<{ kind: "BOOTSTRAP"; secret: string }>
   | Readonly<{ kind: "INVITATION"; secret: string }>
-  | Readonly<{ kind: "RECOVERY"; sessionId: SessionId }>;
+  | Readonly<{ kind: "RECOVERY"; sessionId: SessionId; sessionProof: string }>;
 
 export type BootstrapDeployment = Readonly<{
   idempotencyKey: string;
@@ -56,7 +59,9 @@ export type PasskeyChallenge = Readonly<{
 
 export type FinishPasskeyRegistration = Readonly<{
   idempotencyKey: string;
-  principal: MemberActor | Readonly<{ kind: "RECOVERY"; sessionId: SessionId }>;
+  principal:
+    | MemberActor
+    | Readonly<{ kind: "RECOVERY"; sessionId: SessionId; sessionProof: string }>;
   challengeId: string;
   credentialName: string;
   response: unknown;
@@ -119,6 +124,7 @@ export type RecoverySession = Readonly<{
   memberId: MemberId;
   expiresAt: Instant;
 }>;
+export type RecoverySessionIssue = RecoverySession & Readonly<{ proof: string }>;
 
 export type CreateInvitation = Readonly<{
   actor: MemberActor;
@@ -177,18 +183,33 @@ export const MemberSessionSchema = z
   .object({ id: IdentifierSchema, memberId: IdentifierSchema, expiresAt: InstantSchema })
   .strict();
 
+export const MemberSessionIssueSchema = MemberSessionSchema.extend({
+  proof: z.string().min(32).max(512),
+}).strict();
+
 const DisplayNameSchema = z.string().trim().min(1).max(120);
 const OneTimeSecretSchema = z.string().min(32).max(512);
 const IdempotencyKeySchema = IdentifierSchema;
 const MemberActorSchema = z
-  .object({ kind: z.literal("MEMBER"), memberId: IdentifierSchema, sessionId: IdentifierSchema })
+  .object({
+    kind: z.literal("MEMBER"),
+    memberId: IdentifierSchema,
+    sessionId: IdentifierSchema,
+    sessionProof: OneTimeSecretSchema,
+  })
   .strict();
 
 export const RegistrationPrincipalSchema = z.discriminatedUnion("kind", [
   MemberActorSchema,
   z.object({ kind: z.literal("BOOTSTRAP"), secret: OneTimeSecretSchema }).strict(),
   z.object({ kind: z.literal("INVITATION"), secret: OneTimeSecretSchema }).strict(),
-  z.object({ kind: z.literal("RECOVERY"), sessionId: IdentifierSchema }).strict(),
+  z
+    .object({
+      kind: z.literal("RECOVERY"),
+      sessionId: IdentifierSchema,
+      sessionProof: OneTimeSecretSchema,
+    })
+    .strict(),
 ]);
 
 export const BootstrapDeploymentSchema = z
@@ -214,7 +235,13 @@ export const FinishPasskeyRegistrationSchema = z
   .object({
     principal: z.union([
       MemberActorSchema,
-      z.object({ kind: z.literal("RECOVERY"), sessionId: IdentifierSchema }).strict(),
+      z
+        .object({
+          kind: z.literal("RECOVERY"),
+          sessionId: IdentifierSchema,
+          sessionProof: OneTimeSecretSchema,
+        })
+        .strict(),
     ]),
     idempotencyKey: IdempotencyKeySchema,
     challengeId: IdentifierSchema,
@@ -353,6 +380,10 @@ export const RecoverySessionSchema = z
     expiresAt: InstantSchema,
   })
   .strict();
+
+export const RecoverySessionIssueSchema = RecoverySessionSchema.extend({
+  proof: OneTimeSecretSchema,
+}).strict();
 
 export const InspectInvitationSchema = z
   .object({ actor: MemberActorSchema, invitationId: IdentifierSchema })

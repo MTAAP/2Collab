@@ -12,7 +12,12 @@ import { CommitShaSchema } from "../../../src/shared/contracts/ids.ts";
 import { RunnerFrameSchema } from "../../../src/shared/contracts/protocol.ts";
 import { DomainErrorSchema } from "../../../src/shared/contracts/result.ts";
 
-const memberActor = { kind: "MEMBER", memberId: "member_1", sessionId: "session_1" } as const;
+const memberActor = {
+  kind: "MEMBER",
+  memberId: "member_1",
+  sessionId: "session_1",
+  sessionProof: "proof_value_with_at_least_thirty_two_bytes",
+} as const;
 const commandBase = { idempotencyKey: "idem_1", actor: memberActor } as const;
 const fullSha1 = "a".repeat(40);
 const fullSha256 = "b".repeat(64);

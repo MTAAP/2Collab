@@ -13,12 +13,12 @@ import type {
   InvitationIssue,
   InvitationSession,
   ListPasskeys,
-  MemberSession,
+  MemberSessionIssue,
   PasskeyChallenge,
   PasskeyCredential,
   PasskeyRevocation,
   RecoveryCodeSet,
-  RecoverySession,
+  RecoverySessionIssue,
   RedeemRecoveryCode,
   RevokeInvitation,
   RevokePasskey,
@@ -26,20 +26,20 @@ import type {
 } from "../../../shared/contracts/identity.ts";
 
 export interface IdentityAuthority {
-  bootstrap(command: BootstrapDeployment): Promise<Result<MemberSession>>;
+  bootstrap(command: BootstrapDeployment): Promise<Result<MemberSessionIssue>>;
   beginPasskeyRegistration(command: BeginPasskeyRegistration): Promise<Result<PasskeyChallenge>>;
   finishPasskeyRegistration(command: FinishPasskeyRegistration): Promise<Result<PasskeyCredential>>;
   beginPasskeyAuthentication(
     command: BeginPasskeyAuthentication,
   ): Promise<Result<PasskeyChallenge>>;
-  authenticate(command: AuthenticatePasskey): Promise<Result<MemberSession>>;
+  authenticate(command: AuthenticatePasskey): Promise<Result<MemberSessionIssue>>;
   revokePasskey(command: RevokePasskey): Promise<Result<PasskeyRevocation>>;
   listPasskeys(query: ListPasskeys): Promise<Result<readonly PasskeyCredential[]>>;
   generateRecoveryCodes(command: GenerateRecoveryCodes): Promise<Result<RecoveryCodeSet>>;
-  redeemRecoveryCode(command: RedeemRecoveryCode): Promise<Result<RecoverySession>>;
+  redeemRecoveryCode(command: RedeemRecoveryCode): Promise<Result<RecoverySessionIssue>>;
   invite(command: CreateInvitation): Promise<Result<InvitationIssue>>;
   exchangeInvitation(command: ExchangeInvitationSecret): Promise<Result<InvitationSession>>;
   inspectInvitation(query: InspectInvitation): Promise<Result<TeamInvitation>>;
   revokeInvitation(command: RevokeInvitation): Promise<Result<TeamInvitation>>;
-  accept(command: AcceptInvitationWithVerifiedIdentity): Promise<Result<MemberSession>>;
+  accept(command: AcceptInvitationWithVerifiedIdentity): Promise<Result<MemberSessionIssue>>;
 }

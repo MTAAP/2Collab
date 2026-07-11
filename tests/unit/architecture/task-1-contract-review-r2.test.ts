@@ -7,7 +7,12 @@ import { EvidenceInputSchema } from "../../../src/shared/contracts/runs.ts";
 import { ResultSchema } from "../../../src/shared/contracts/result.ts";
 import { validateImportEdge } from "./dependency-rules.ts";
 
-const actor = { kind: "MEMBER", memberId: "member_1", sessionId: "session_1" } as const;
+const actor = {
+  kind: "MEMBER",
+  memberId: "member_1",
+  sessionId: "session_1",
+  sessionProof: "proof_value_with_at_least_thirty_two_bytes",
+} as const;
 const commandBase = { actor, idempotencyKey: "idem_1" } as const;
 const fullSha = "a".repeat(40);
 

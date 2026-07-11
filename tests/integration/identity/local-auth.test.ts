@@ -109,6 +109,7 @@ describe("local identity lifecycle", () => {
           kind: "MEMBER" as const,
           memberId: successfulAcceptance.value.memberId,
           sessionId: successfulAcceptance.value.id,
+          sessionProof: successfulAcceptance.value.proof,
         }
       : undefined;
     if (!memberActor) throw new Error("accept failed");
@@ -147,6 +148,7 @@ describe("local identity lifecycle", () => {
       kind: "MEMBER",
       memberId: owner.value.memberId,
       sessionId: owner.value.id,
+      sessionProof: owner.value.proof,
     } as const;
     const inspected = await value.identity.inspectInvitation({
       actor,
@@ -188,6 +190,7 @@ describe("local identity lifecycle", () => {
       kind: "MEMBER",
       memberId: owner.value.memberId,
       sessionId: owner.value.id,
+      sessionProof: owner.value.proof,
     } as const;
     const begunRegistration = await value.identity.beginPasskeyRegistration({
       idempotencyKey: "begin-second-passkey",
@@ -306,6 +309,7 @@ describe("local identity lifecycle", () => {
       kind: "MEMBER",
       memberId: owner.value.memberId,
       sessionId: owner.value.id,
+      sessionProof: owner.value.proof,
     } as const;
     const first = await value.identity.generateRecoveryCodes({
       actor,
@@ -356,7 +360,12 @@ describe("local identity lifecycle", () => {
     expect(Number(session?.expiresAt)).toBe(value.now() + 15 * 60);
     if (!session) throw new Error("recovery failed");
     const restricted = await value.identity.generateRecoveryCodes({
-      actor: { kind: "MEMBER", memberId: session.memberId, sessionId: session.id },
+      actor: {
+        kind: "MEMBER",
+        memberId: session.memberId,
+        sessionId: session.id,
+        sessionProof: session.proof,
+      },
       idempotencyKey: "recovery-cannot-administer",
     });
     expect(restricted.ok).toBe(false);
@@ -364,13 +373,13 @@ describe("local identity lifecycle", () => {
 
     const registration = await value.identity.beginPasskeyRegistration({
       idempotencyKey: "begin-recovery-registration",
-      principal: { kind: "RECOVERY", sessionId: session.id },
+      principal: { kind: "RECOVERY", sessionId: session.id, sessionProof: session.proof },
       displayName: "Ada",
     });
     if (!registration.ok) throw new Error(registration.error.code);
     const replacementCredential = await value.identity.finishPasskeyRegistration({
       idempotencyKey: "finish-recovery-registration",
-      principal: { kind: "RECOVERY", sessionId: session.id },
+      principal: { kind: "RECOVERY", sessionId: session.id, sessionProof: session.proof },
       challengeId: registration.value.challengeId,
       credentialName: "Recovered passkey",
       response: {
@@ -382,7 +391,7 @@ describe("local identity lifecycle", () => {
     expect(replacementCredential.ok).toBe(true);
     const consumedRecoverySession = await value.identity.beginPasskeyRegistration({
       idempotencyKey: "begin-consumed-recovery",
-      principal: { kind: "RECOVERY", sessionId: session.id },
+      principal: { kind: "RECOVERY", sessionId: session.id, sessionProof: session.proof },
       displayName: "Ada",
     });
     expect(consumedRecoverySession.ok).toBe(false);

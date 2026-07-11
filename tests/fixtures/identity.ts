@@ -195,9 +195,17 @@ export function createIdentityFixture(overrides: Partial<IdentityAuthorityDepend
     } as BootstrapDeployment);
   }
 
-  async function invite(owner: { id: string; memberId: string }, label = "Teammate") {
+  async function invite(
+    owner: { id: string; memberId: string; proof: string },
+    label = "Teammate",
+  ) {
     return identity.invite({
-      actor: { kind: "MEMBER", memberId: owner.memberId, sessionId: owner.id },
+      actor: {
+        kind: "MEMBER",
+        memberId: owner.memberId,
+        sessionId: owner.id,
+        sessionProof: owner.proof,
+      },
       idempotencyKey: `invite-${key(label)}`,
       label,
     } as CreateInvitation);

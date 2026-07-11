@@ -6,6 +6,7 @@ export type MemberActor = Readonly<{
   kind: "MEMBER";
   memberId: MemberId;
   sessionId: SessionId;
+  sessionProof: string;
 }>;
 
 export type SchedulerActor = Readonly<{
@@ -23,7 +24,12 @@ export type RunnerActor = Readonly<{
 export type AuthenticatedActor = MemberActor | SchedulerActor | RunnerActor;
 
 export const MemberActorSchema = z
-  .object({ kind: z.literal("MEMBER"), memberId: IdentifierSchema, sessionId: IdentifierSchema })
+  .object({
+    kind: z.literal("MEMBER"),
+    memberId: IdentifierSchema,
+    sessionId: IdentifierSchema,
+    sessionProof: z.string().min(32).max(512),
+  })
   .strict();
 export const SchedulerActorSchema = z
   .object({

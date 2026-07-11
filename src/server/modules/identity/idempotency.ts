@@ -1,31 +1,111 @@
 import type { Database } from "bun:sqlite";
-import type { Result } from "../../../shared/contracts/result.ts";
+import { z } from "zod";
+import { AuditIdSchema, DomainErrorSchema, type Result } from "../../../shared/contracts/result.ts";
 
 const MAX_CANONICAL_INPUT_BYTES = 64 * 1024;
+const MAX_CANONICAL_DEPTH = 16;
+const MAX_CANONICAL_NODES = 4_096;
 
 export type IdempotencyTicket = Readonly<{
   actorId: string;
-  key: string;
+  storageKey: string;
   inputHash: string;
 }>;
 
-type StoredResult =
-  | Readonly<{ kind: "RESULT"; result: Result<unknown> }>
-  | Readonly<{ kind: "SECRET_ISSUED"; code: string; message: string }>;
+const StoredSuccessSchema = z
+  .object({ ok: z.literal(true), value: z.unknown(), auditId: AuditIdSchema.optional() })
+  .strict()
+  .refine((value) => Object.hasOwn(value, "value"), "Stored success value is required");
+const StoredFailureSchema = z
+  .object({ ok: z.literal(false), error: DomainErrorSchema, auditId: AuditIdSchema.optional() })
+  .strict();
+const StoredResultSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("RESULT"),
+      result: z.union([StoredSuccessSchema, StoredFailureSchema]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("SECRET_ISSUED"),
+      code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+      message: z.string().min(1).max(240),
+    })
+    .strict(),
+]);
 
-function canonicalize(value: unknown): unknown {
-  if (value === null || typeof value !== "object") return value;
-  if (value instanceof Uint8Array) return { bytes: Buffer.from(value).toString("base64url") };
-  if (Array.isArray(value)) return value.map(canonicalize);
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, canonicalize(entry)]),
+type StoredResult = z.infer<typeof StoredResultSchema>;
+
+type CanonicalState = {
+  nodes: number;
+  stringBytes: number;
+  seen: WeakSet<object>;
+};
+
+function addString(state: CanonicalState, value: string): void {
+  state.stringBytes += new TextEncoder().encode(value).length;
+  if (state.stringBytes > MAX_CANONICAL_INPUT_BYTES) throw new Error("CANONICAL_LIMIT");
+}
+
+function canonicalize(value: unknown, state: CanonicalState, depth: number): unknown {
+  if (depth > MAX_CANONICAL_DEPTH) throw new Error("CANONICAL_LIMIT");
+  state.nodes += 1;
+  if (state.nodes > MAX_CANONICAL_NODES) throw new Error("CANONICAL_LIMIT");
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    addString(state, value);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("CANONICAL_UNSUPPORTED");
+    return value;
+  }
+  if (typeof value !== "object") throw new Error("CANONICAL_UNSUPPORTED");
+  if (state.seen.has(value)) throw new Error("CANONICAL_CYCLE");
+  state.seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalize(entry, state, depth + 1));
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error("CANONICAL_UNSUPPORTED");
+  }
+  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+    left.localeCompare(right),
   );
+  const normalized: Record<string, unknown> = {};
+  for (const [key, entry] of entries) {
+    addString(state, key);
+    normalized[key] = canonicalize(entry, state, depth + 1);
+  }
+  return normalized;
 }
 
 function hex(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("hex");
+}
+
+function invalidInput(): Result<never> {
+  return {
+    ok: false,
+    error: {
+      code: "IDENTITY_INPUT_INVALID",
+      message: "Identity input is invalid.",
+      retry: "NEVER",
+    },
+  };
+}
+
+function invalidStorage(): Result<never> {
+  return {
+    ok: false,
+    error: {
+      code: "IDEMPOTENCY_STORAGE_INVALID",
+      message: "Stored idempotency result is invalid.",
+      retry: "NEVER",
+    },
+  };
 }
 
 export class IdentityIdempotency {
@@ -33,43 +113,47 @@ export class IdentityIdempotency {
     private readonly database: Database,
     private readonly digest: (value: string) => Promise<Uint8Array>,
     private readonly clock: () => number,
+    private readonly onInvalidStorage?: () => void,
   ) {}
 
-  async ticket(actorId: string, key: string, input: unknown): Promise<Result<IdempotencyTicket>> {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(key)) {
-      return {
-        ok: false,
-        error: {
-          code: "IDENTITY_INPUT_INVALID",
-          message: "Identity input is invalid.",
-          retry: "NEVER",
-        },
-      };
+  private invalidStorage<T>(): Result<T> {
+    this.onInvalidStorage?.();
+    return invalidStorage();
+  }
+
+  async ticket(
+    operation: string,
+    actorId: string,
+    key: string,
+    input: unknown,
+  ): Promise<Result<IdempotencyTicket>> {
+    if (
+      !/^[A-Z][A-Z0-9_]{0,63}$/.test(operation) ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(key)
+    ) {
+      return invalidInput();
     }
     let canonical: string;
     try {
-      canonical = JSON.stringify(canonicalize(input));
+      const state: CanonicalState = { nodes: 0, stringBytes: 0, seen: new WeakSet() };
+      canonical = JSON.stringify({
+        input: canonicalize(input, state, 0),
+        operation,
+      });
+      if (new TextEncoder().encode(canonical).length > MAX_CANONICAL_INPUT_BYTES) {
+        return invalidInput();
+      }
     } catch {
-      return {
-        ok: false,
-        error: {
-          code: "IDENTITY_INPUT_INVALID",
-          message: "Identity input is invalid.",
-          retry: "NEVER",
-        },
-      };
+      return invalidInput();
     }
-    if (new TextEncoder().encode(canonical).length > MAX_CANONICAL_INPUT_BYTES) {
-      return {
-        ok: false,
-        error: {
-          code: "IDENTITY_INPUT_INVALID",
-          message: "Identity input is invalid.",
-          retry: "NEVER",
-        },
-      };
-    }
-    return { ok: true, value: { actorId, key, inputHash: hex(await this.digest(canonical)) } };
+    return {
+      ok: true,
+      value: {
+        actorId,
+        storageKey: `${operation}:${key}`,
+        inputHash: hex(await this.digest(canonical)),
+      },
+    };
   }
 
   replay<T>(ticket: IdempotencyTicket): Result<T> | undefined {
@@ -77,7 +161,7 @@ export class IdentityIdempotency {
       .query<{ input_hash: string; result_json: string }, [string, string]>(
         "SELECT input_hash, result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
       )
-      .get(ticket.actorId, ticket.key);
+      .get(ticket.actorId, ticket.storageKey);
     if (!row) return undefined;
     if (row.input_hash !== ticket.inputHash) {
       return {
@@ -89,14 +173,23 @@ export class IdentityIdempotency {
         },
       };
     }
-    const stored = JSON.parse(row.result_json) as StoredResult;
-    if (stored.kind === "SECRET_ISSUED") {
-      return {
-        ok: false,
-        error: { code: stored.code, message: stored.message, retry: "NEVER" },
-      };
+    if (new TextEncoder().encode(row.result_json).length > MAX_CANONICAL_INPUT_BYTES) {
+      return this.invalidStorage();
     }
-    return stored.result as Result<T>;
+    try {
+      const parsed = StoredResultSchema.safeParse(JSON.parse(row.result_json));
+      if (!parsed.success) return this.invalidStorage();
+      const stored: StoredResult = parsed.data;
+      if (stored.kind === "SECRET_ISSUED") {
+        return {
+          ok: false,
+          error: { code: stored.code, message: stored.message, retry: "NEVER" },
+        };
+      }
+      return stored.result as Result<T>;
+    } catch {
+      return this.invalidStorage();
+    }
   }
 
   storeResult<T>(ticket: IdempotencyTicket, result: Result<T>): void {
@@ -112,6 +205,12 @@ export class IdentityIdempotency {
       .query<void, [string, string, string, string, number]>(
         "INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
       )
-      .run(ticket.actorId, ticket.key, ticket.inputHash, JSON.stringify(result), this.clock());
+      .run(
+        ticket.actorId,
+        ticket.storageKey,
+        ticket.inputHash,
+        JSON.stringify(result),
+        this.clock(),
+      );
   }
 }

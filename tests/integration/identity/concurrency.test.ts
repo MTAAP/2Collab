@@ -10,7 +10,7 @@ import {
 } from "../../../src/server/modules/identity/identity-authority.ts";
 import { hashOneTimeSecret, sha256 } from "../../../src/server/modules/identity/recovery.ts";
 import type { IdentityAuthority } from "../../../src/server/modules/identity/contract.ts";
-import type { MemberSession } from "../../../src/shared/contracts/identity.ts";
+import type { MemberSessionIssue } from "../../../src/shared/contracts/identity.ts";
 import type { Result } from "../../../src/shared/contracts/result.ts";
 import { StrictFakeWebAuthn } from "../../fixtures/identity.ts";
 
@@ -113,7 +113,7 @@ async function authorityPair(
 async function bootstrap(
   identity: IdentityAuthority,
   bootstrapSecret: string,
-): Promise<Result<MemberSession>> {
+): Promise<Result<MemberSessionIssue>> {
   const begun = await identity.beginPasskeyRegistration({
     idempotencyKey: "file-bootstrap-begin",
     principal: { kind: "BOOTSTRAP", secret: bootstrapSecret },
@@ -185,6 +185,7 @@ describe("file-backed identity concurrency", () => {
         kind: "MEMBER",
         memberId: owner.value.memberId,
         sessionId: owner.value.id,
+        sessionProof: owner.value.proof,
       } as const;
       const invitation = await pair.first.invite({
         actor,
@@ -254,6 +255,7 @@ describe("file-backed identity concurrency", () => {
         kind: "MEMBER",
         memberId: owner.value.memberId,
         sessionId: owner.value.id,
+        sessionProof: owner.value.proof,
       } as const;
       const codes = await pair.first.generateRecoveryCodes({
         actor,
@@ -321,9 +323,10 @@ describe("file-backed identity concurrency", () => {
   test("owner authority is revalidated after async secret hashing", async () => {
     let mutate: (() => void) | undefined;
     let armed = false;
+    let proofOrSecretDigests = 0;
     const digest = async (value: string) => {
       const result = await sha256(value);
-      if (armed && value.length === 43) {
+      if (armed && value.length === 43 && ++proofOrSecretDigests === 2) {
         armed = false;
         mutate?.();
       }
@@ -342,7 +345,12 @@ describe("file-backed identity concurrency", () => {
       };
       armed = true;
       const result = await pair.first.invite({
-        actor: { kind: "MEMBER", memberId: owner.value.memberId, sessionId: owner.value.id },
+        actor: {
+          kind: "MEMBER",
+          memberId: owner.value.memberId,
+          sessionId: owner.value.id,
+          sessionProof: owner.value.proof,
+        },
         idempotencyKey: "stale-owner-invite",
         label: "Grace",
       });

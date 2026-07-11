@@ -63,6 +63,7 @@ CREATE TABLE passkey_credential_transports (
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   member_id TEXT NOT NULL REFERENCES members(id),
+  proof_hash BLOB NOT NULL UNIQUE CHECK (length(proof_hash) = 32),
   kind TEXT NOT NULL CHECK (kind IN ('BROWSER', 'RECOVERY', 'DEVICE', 'HOST_RECOVERY')),
   expires_at INTEGER NOT NULL CHECK (expires_at >= 0),
   idle_expires_at INTEGER CHECK (idle_expires_at IS NULL OR idle_expires_at >= 0),

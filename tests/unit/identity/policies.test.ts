@@ -61,6 +61,7 @@ describe("identity policies", () => {
         kind: "MEMBER",
         memberId: "unknown" as never,
         sessionId: "secret-session-value" as never,
+        sessionProof: "wrong-session-proof-that-is-long-enough",
       },
       idempotencyKey: "denied-invite",
       label: "Denied",

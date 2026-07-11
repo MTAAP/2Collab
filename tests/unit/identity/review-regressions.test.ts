@@ -160,7 +160,12 @@ describe("Task 3 review regressions", () => {
       },
     });
     await value.identity.invite({
-      actor: { kind: "MEMBER", memberId: "unknown" as never, sessionId: "hidden-session" as never },
+      actor: {
+        kind: "MEMBER",
+        memberId: "unknown" as never,
+        sessionId: "hidden-session" as never,
+        sessionProof: "hidden-session-proof-that-is-long-enough",
+      },
       idempotencyKey: "failed-invitation",
       label: "Denied",
     });
@@ -192,6 +197,7 @@ describe("Task 3 review regressions", () => {
       kind: "MEMBER",
       memberId: owner.value.memberId,
       sessionId: owner.value.id,
+      sessionProof: owner.value.proof,
     } as const;
     const first = await value.identity.invite({
       actor,
@@ -223,7 +229,7 @@ describe("Task 3 review regressions", () => {
     if (!retry.ok) expect(retry.error.code).toBe("SECRET_ALREADY_ISSUED");
     const stored = value.database
       .query<{ input_hash: string; result_json: string }, [string]>(
-        "SELECT input_hash, result_json FROM idempotency_results WHERE idempotency_key = ?",
+        "SELECT input_hash, result_json FROM idempotency_results WHERE idempotency_key LIKE '%' || ?",
       )
       .get(command.idempotencyKey);
     expect(stored?.input_hash).toMatch(/^[a-f0-9]{64}$/);
@@ -239,6 +245,7 @@ describe("Task 3 review regressions", () => {
       kind: "MEMBER",
       memberId: owner.value.memberId,
       sessionId: owner.value.id,
+      sessionProof: owner.value.proof,
     } as const;
     const listed = await value.identity.listPasskeys({ actor });
     if (!listed.ok) throw new Error(listed.error.code);
