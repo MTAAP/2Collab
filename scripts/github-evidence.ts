@@ -1,5 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { validateGitHubEvidence } from "../tests/evidence/github-matrix.ts";
+import { createHash } from "node:crypto";
+import {
+  validateGitHubEvidence,
+  validateGitHubLiveEvidence,
+} from "../tests/evidence/github-matrix.ts";
 
 type ReportResult = Readonly<{ status?: string }>;
 type ReportTest = Readonly<{ results?: readonly ReportResult[] }>;
@@ -37,25 +41,32 @@ async function main() {
     "COLLAB_GITHUB_REPOSITORY_ID",
     "COLLAB_GITHUB_PROJECT_ID",
     "COLLAB_GITHUB_APPROVAL_ID",
+    "COLLAB_GITHUB_BUILD_ID",
   ])
     if (!process.env[name] || !/^[A-Za-z0-9_-]{1,128}$/.test(process.env[name] ?? ""))
       fail(`LIVE_GITHUB_TARGET_INVALID:${name}`);
   if (!String(process.env.COLLAB_GITHUB_APPROVAL_ID).startsWith("approval_"))
     fail("LIVE_GITHUB_APPROVAL_INVALID");
-  const report = JSON.parse(await readFile(reportPath, "utf8")) as Report;
+  const reportBytes = await readFile(reportPath);
+  const report = JSON.parse(reportBytes.toString("utf8")) as Report;
   const evidencePath = process.env.COLLAB_GITHUB_EVIDENCE_RECORD;
   if (!evidencePath) fail("LIVE_GITHUB_EVIDENCE_RECORD_REQUIRED");
   const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
+  const liveValidation = validateGitHubLiveEvidence(evidence, {
+    buildId: String(process.env.COLLAB_GITHUB_BUILD_ID),
+    approvalId: String(process.env.COLLAB_GITHUB_APPROVAL_ID),
+  });
+  if (!liveValidation.valid) fail(liveValidation.reason ?? "LIVE_GITHUB_EVIDENCE_RECORD_INVALID");
+  const reportDigest = createHash("sha256").update(reportBytes).digest("hex");
   if (
-    evidence.schemaVersion !== 1 ||
-    evidence.approvalId !== process.env.COLLAB_GITHUB_APPROVAL_ID ||
-    !/^[A-Za-z0-9_-]{1,128}$/.test(evidence.reviewer?.memberId ?? "") ||
-    Number.isNaN(Date.parse(evidence.reviewer?.reviewedAt ?? "")) ||
-    ![evidence.providerResourceIds, evidence.collabResourceIds, evidence.auditEventIds].every(
-      (values) => Array.isArray(values) && values.length > 0,
+    !evidence.envelope.testReports.some(
+      (provenance: { path?: string; sha256?: string; runner?: string }) =>
+        provenance.path === reportPath &&
+        provenance.sha256 === reportDigest &&
+        provenance.runner === "PLAYWRIGHT",
     )
   )
-    fail("LIVE_GITHUB_EVIDENCE_RECORD_INVALID");
+    fail("LIVE_GITHUB_REPORT_PROVENANCE_MISMATCH");
   const mutations = [
     "CREATE_ISSUE",
     "EDIT_ISSUE",
@@ -84,6 +95,9 @@ async function main() {
     ["github-live-check-exact-sha", "CHECK_EXACT_SHA"],
     ["github-live-check-failed-conclusion-blocked", "CHECK_FAILURE_BLOCKED"],
     ["github-live-diff-and-collision-evidence", "DIFF_AND_COLLISION_EVIDENCE"],
+    ["github-live-missed-webhook-reconciled", "MISSED_WEBHOOK_RECONCILED"],
+    ["github-live-late-link-canonicalized", "LATE_LINK_CANONICALIZED"],
+    ["github-live-scope-narrowing-enforced", "SCOPE_NARROWING_ENFORCED"],
   ]);
   const specs: ReportSpec[] = [];
   const visit = (suite: ReportSuite) => {
@@ -104,7 +118,9 @@ async function main() {
   for (const [title, obligation] of requiredEvidence)
     if (!statuses.get(title)?.length || statuses.get(title)?.some((status) => status !== "passed"))
       fail(`LIVE_GITHUB_OBLIGATION_MISSING:${title}`);
-    else if (evidence.obligations?.[obligation] !== true)
+    else if (
+      !evidence.records.some((record: { obligation?: string }) => record.obligation === obligation)
+    )
       fail(`LIVE_GITHUB_EVIDENCE_MISSING:${obligation}`);
   console.log("Live GitHub evidence report validated.");
 }

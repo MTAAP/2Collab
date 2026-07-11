@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "envelope": null,
+  "rows": [
+    {
+      "requirement": "AUT-001",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/unit/workflows/definition.test.ts",
+      "testName": "has exactly the seven closed node kinds"
+    },
+    {
+      "requirement": "AUT-002",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/execution.test.ts",
+      "testName": "starts one durable child step only through ExecutionAuthority"
+    },
+    {
+      "requirement": "AUT-003",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/parallel-review.test.ts",
+      "testName": "parallel groups prepare only bounded INSPECT_ONLY branches"
+    },
+    {
+      "requirement": "AUT-004",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/unit/workflows/joins.test.ts",
+      "testName": "ALL emits one keyed artifact map after every distinct branch"
+    },
+    {
+      "requirement": "AUT-005",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/conditional-fix.test.ts",
+      "testName": "one typed major finding launches exactly one Fix Agent Run"
+    },
+    {
+      "requirement": "AUT-006",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/human-decision.test.ts",
+      "testName": "a durable decision survives restart and schedules its choice once"
+    },
+    {
+      "requirement": "AUT-007",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/managed-loop.test.ts",
+      "testName": "failed starts and lost attempts consume the same immutable maximum"
+    },
+    {
+      "requirement": "AUT-008",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/restart.test.ts",
+      "testName": "a committed launch intent creates one child run after restart"
+    },
+    {
+      "requirement": "AUT-009",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/drafts.test.ts",
+      "testName": "YAML round-trips only the executable schema"
+    },
+    {
+      "requirement": "AUT-010",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/workflows/planning.test.ts",
+      "testName": "a portable Plan Artifact crosses runtime and runner choices"
+    },
+    {
+      "requirement": "AUT-011",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/unit/gates/fingerprint.test.ts",
+      "testName": "fingerprints the closed manifest deterministically without exposing local recipes"
+    },
+    {
+      "requirement": "AUT-012",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/runner/gates/local-evaluator.test.ts",
+      "testName": "resolves the approved recipe locally, authorizes it, and never invokes a shell"
+    },
+    {
+      "requirement": "AUT-013",
+      "status": "LOCAL_PROOF_AVAILABLE",
+      "proofClass": "LOCAL",
+      "testPath": "tests/integration/gates/evaluations.test.ts",
+      "testName": "persists bounded local evidence and fails tracked mutation"
+    },
+    {
+      "requirement": "AUT-014",
+      "status": "IN_PROGRESS_EXTERNAL",
+      "proofClass": "LIVE",
+      "testPath": "tests/e2e/bounded-automation.spec.ts",
+      "testName": "live canonical real PR remains blocked without approved resources"
+    }
+  ]
+}

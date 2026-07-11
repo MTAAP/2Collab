@@ -3,7 +3,7 @@
 - Schema version: 1
 - Package status: NOT_RUN
 - Foundation status: NOT_STARTED
-- Canonical exit criterion: NOT_EVALUATED
+- Canonical exit criterion: "Exit when both owners can start headless and interactive Claude or Codex attempts on their own trusted machines from web and CLI; exact permit replay and stale-policy cases fail; a lost runner produces run `WAITING` plus attempt `LOST`; server backup and isolated restore drills pass; and one week of dogfood produces no need for direct database repair."
 - Human reviewer: UNREVIEWED
 
 ## Required values

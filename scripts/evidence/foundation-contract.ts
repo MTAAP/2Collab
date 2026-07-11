@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PHASE_EXIT_QUOTES, validateEvidenceEnvelope } from "./evidence-envelope.ts";
 
 const OpaqueId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/);
 const Sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -51,8 +52,8 @@ export const MachineRunEvidenceSchema = z
     launchSurface: z.enum(["WEB", "CLI"]),
     startedAt: UtcInstant,
     terminalAt: UtcInstant,
-    attemptLifecycle: z.enum(["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "LOST"]),
-    runResult: z.enum(["SUCCEEDED", "FAILED", "WAITING", "CANCELLED"]),
+    attemptLifecycle: z.enum(["EXITED", "FAILED_TO_START", "CANCELLED", "TIMED_OUT", "LOST"]),
+    runResult: z.enum(["DELIVERED", "NO_CHANGES", "BLOCKED", "ESCALATED"]),
     hostAdapterProvenance: z.enum(["NATIVE_ADAPTER", "ORCA_ADAPTER"]),
     interactiveLocalPresence: z.enum(["NOT_APPLICABLE", "PASS", "FAIL"]),
     sharedTransportPrivacy: z.enum(["PASS", "FAIL"]),
@@ -135,6 +136,7 @@ export const FoundationEvidenceSchema = z
     frozenBuild: FrozenBuildSchema,
     timezone: z.string().min(1).max(64),
     initializedAt: UtcInstant,
+    evidenceEnvelope: z.unknown().optional(),
     machines: z.array(MachineEnrollmentSchema),
     runs: z.array(MachineRunEvidenceSchema),
     restores: z.array(RestoreEvidenceSchema),
@@ -273,6 +275,18 @@ export function deriveConsecutiveDayStreak(
 export function validateEvidence(input: FoundationEvidence): { status: "IN_PROGRESS_EXTERNAL" } {
   const evidence = FoundationEvidenceSchema.parse(input);
   assertIanaTimezone(evidence.timezone);
+  if (evidence.evidenceEnvelope) {
+    const envelope = validateEvidenceEnvelope(evidence.evidenceEnvelope, {
+      phase: "FOUNDATION",
+      buildId: evidence.frozenBuild.buildId,
+      canonicalExitQuote: PHASE_EXIT_QUOTES.FOUNDATION,
+    });
+    if (!envelope.valid) throw new Error(envelope.reasons[0] ?? "EVIDENCE_ENVELOPE_INVALID");
+    if (envelope.envelope?.repositoryRevision !== evidence.frozenBuild.repositoryCommit)
+      throw new Error("EVIDENCE_FROZEN_REVISION_MISMATCH");
+    if (envelope.envelope?.artifactSha256 !== evidence.frozenBuild.artifactManifestSha256)
+      throw new Error("EVIDENCE_FROZEN_ARTIFACT_MISMATCH");
+  }
   const days = resolveEffectiveDogfoodDays(evidence.days);
   const effectiveRestores = resolveCorrections(evidence.restores);
   for (let index = 1; index < evidence.days.length; index += 1) {
@@ -321,6 +335,7 @@ export function checkFoundationExit(
   | { ok: false; code: "FOUNDATION_EXIT_NOT_MET"; missing: readonly string[] } {
   validateEvidence(evidence);
   const missing: string[] = [];
+  if (!evidence.evidenceEnvelope) missing.push("BUILD_BOUND_EVIDENCE_ENVELOPE");
   const machines = activeMachines(evidence);
   if (machines.length !== 2 || new Set(machines.map((row) => row.ownerId)).size !== 2)
     missing.push("TWO_REVIEWED_OWNERS_AND_MACHINES");

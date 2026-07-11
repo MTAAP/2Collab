@@ -4,6 +4,7 @@
 - Package status: PACKAGE_LOCAL_VERIFIED
 - Foundation status: IN_PROGRESS_EXTERNAL
 - Canonical exit criterion: NOT_MET
+- Canonical exit criterion (verbatim): "Exit when both owners can start headless and interactive Claude or Codex attempts on their own trusted machines from web and CLI; exact permit replay and stale-policy cases fail; a lost runner produces run `WAITING` plus attempt `LOST`; server backup and isolated restore drills pass; and one week of dogfood produces no need for direct database repair."
 - Tested repository commit: `9c8fc20edcec7ac7b12950be5acf748d38889b4b`
 - Dirty-tree state during final gate: `?? docs/evidence/foundation/live-evidence.json` (the initialized evidence artifact, not executable input)
 - Build identifier: `foundation-9c8fc20edcec7ac7`
@@ -17,6 +18,7 @@
 - Human reviewer: UNREVIEWED
 
 The tested-build artifact manifest was generated outside the source inventory. This later evidence document and its commit are not the tested executable build.
+The build identifier, repository commit, and artifact-manifest digest above exactly match `live-evidence.json`. This historical record has no shared clean-build evidence envelope and therefore remains local, unreviewed proof only.
 
 ## Command record
 
