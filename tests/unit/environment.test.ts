@@ -54,10 +54,43 @@ describe("readServerEnvironment", () => {
       HOST: "0.0.0.0",
       NODE_ENV: "production",
       SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+      PUBLIC_BASE_URL: "https://collab.example",
+      WEBAUTHN_RP_ID: "collab.example",
+      DEPLOYMENT_MASTER_KEY_FILE: "/run/secrets/deployment_master_key",
     });
 
     expect(environment.hostname).toBe("0.0.0.0");
     expect(environment.mode).toBe("production");
     expect(environment.sessionSecret).toHaveLength(32);
+  });
+
+  test("requires an HTTPS canonical URL, matching RP ID, and master key in production", () => {
+    const base = {
+      NODE_ENV: "production",
+      SESSION_SECRET: "0123456789abcdef0123456789abcdef",
+      DEPLOYMENT_MASTER_KEY_FILE: "/run/secrets/key",
+    };
+    expect(() =>
+      readServerEnvironment({
+        ...base,
+        PUBLIC_BASE_URL: "http://collab.example",
+        WEBAUTHN_RP_ID: "collab.example",
+      }),
+    ).toThrow("PUBLIC_BASE_URL");
+    expect(() =>
+      readServerEnvironment({
+        ...base,
+        PUBLIC_BASE_URL: "https://collab.example",
+        WEBAUTHN_RP_ID: "evil.example",
+      }),
+    ).toThrow("WEBAUTHN_RP_ID");
+    expect(() =>
+      readServerEnvironment({
+        ...base,
+        DEPLOYMENT_MASTER_KEY_FILE: undefined,
+        PUBLIC_BASE_URL: "https://collab.example",
+        WEBAUTHN_RP_ID: "collab.example",
+      }),
+    ).toThrow("DEPLOYMENT_MASTER_KEY_FILE");
   });
 });

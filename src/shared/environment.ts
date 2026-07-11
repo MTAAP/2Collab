@@ -53,6 +53,36 @@ export function readServerEnvironment(
     );
   }
 
+  if (parsed.data.NODE_ENV === "production") {
+    let publicUrl: URL;
+    try {
+      publicUrl = new URL(parsed.data.PUBLIC_BASE_URL);
+    } catch {
+      throw new Error(
+        "Invalid server environment: PUBLIC_BASE_URL must be an absolute HTTPS origin in production",
+      );
+    }
+    if (
+      publicUrl.protocol !== "https:" ||
+      publicUrl.username !== "" ||
+      publicUrl.password !== "" ||
+      publicUrl.pathname !== "/" ||
+      publicUrl.search !== "" ||
+      publicUrl.hash !== ""
+    )
+      throw new Error(
+        "Invalid server environment: PUBLIC_BASE_URL must be an absolute HTTPS origin in production",
+      );
+    const host = publicUrl.hostname.toLowerCase();
+    const rpId = parsed.data.WEBAUTHN_RP_ID.toLowerCase();
+    if (host !== rpId && !host.endsWith(`.${rpId}`))
+      throw new Error("Invalid server environment: WEBAUTHN_RP_ID must match PUBLIC_BASE_URL");
+    if (!parsed.data.DEPLOYMENT_MASTER_KEY_FILE)
+      throw new Error(
+        "Invalid server environment: DEPLOYMENT_MASTER_KEY_FILE is required in production",
+      );
+  }
+
   return {
     backupDir: parsed.data.BACKUP_DIR,
     bootstrapSecretFile: parsed.data.BOOTSTRAP_SECRET_FILE,

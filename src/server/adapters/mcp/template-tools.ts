@@ -1,16 +1,16 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TemplateBindingOperations } from "../../modules/templates/bindings.ts";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
 
-const InputSchema = z
-  .object({ idempotencyKey: z.string().min(1).max(128), actorMemberId: z.string().min(1).max(128) })
-  .passthrough();
+const InputSchema = z.object({ idempotencyKey: z.string().min(1).max(128) }).passthrough();
 const OutputSchema = z
   .object({ ok: z.boolean(), value: z.unknown().optional(), error: z.unknown().optional() })
   .strict();
 
 export function registerTemplateTools(
   server: McpServer,
+  actor: MemberActor,
   operations: TemplateBindingOperations,
 ): void {
   server.registerTool(
@@ -22,7 +22,7 @@ export function registerTemplateTools(
       outputSchema: OutputSchema,
     },
     async (command) => {
-      const result = await operations.bind(command);
+      const result = await operations.bind({ ...command, actorMemberId: actor.memberId });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
         structuredContent: result,

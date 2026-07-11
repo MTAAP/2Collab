@@ -13,6 +13,9 @@ import {
 } from "./adapters/http/routes/github-issues.ts";
 import { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
 import { createInboxRoutes } from "./adapters/http/routes/inbox.ts";
+import { foundationSecurityHeaders } from "./adapters/http/security-headers.ts";
+import { createWorkflowRoutes } from "./adapters/http/routes/workflows.ts";
+import { createTemplateRoutes } from "./adapters/http/routes/templates.ts";
 
 type AppOptions = {
   docsRoot?: string;
@@ -21,6 +24,12 @@ type AppOptions = {
   githubWebhooks?: GitHubWebhookRouteDependencies;
   inbox?: Parameters<typeof createInboxRoutes>[0];
   webRoot?: string;
+  automation?: Readonly<{
+    authentication: FoundationHttpDependencies["authentication"];
+    rateLimits: FoundationHttpDependencies["rateLimits"];
+    workflows: Parameters<typeof createWorkflowRoutes>[0]["operations"];
+    templates: Parameters<typeof createTemplateRoutes>[0]["operations"];
+  }>;
 };
 
 type ErrorBody = {
@@ -40,6 +49,12 @@ export function createApp(
 ): Hono {
   const app = new Hono();
 
+  app.use("*", foundationSecurityHeaders());
+  app.use("*", async (context, next) => {
+    context.header("cache-control", "no-store");
+    await next();
+  });
+
   app.get("/healthz", (context) =>
     context.json({
       apiVersion: APP_METADATA.apiVersion,
@@ -51,7 +66,7 @@ export function createApp(
 
   app.get("/readyz", (context) => {
     const readiness = dependencies?.readiness;
-    const ready = readiness ? readiness.ready() : true;
+    const ready = readiness ? readiness.ready() : false;
     return ready
       ? context.json({
           apiVersion: APP_METADATA.apiVersion,
@@ -83,6 +98,24 @@ export function createApp(
     app.route("/", createGitHubPlanningRoutes(options.githubPlanning));
   }
   if (options.inbox) app.route("/", createInboxRoutes(options.inbox));
+  if (options.automation) {
+    app.route(
+      "/",
+      createWorkflowRoutes({
+        authentication: options.automation.authentication,
+        rateLimits: options.automation.rateLimits,
+        operations: options.automation.workflows,
+      }),
+    );
+    app.route(
+      "/",
+      createTemplateRoutes({
+        authentication: options.automation.authentication,
+        rateLimits: options.automation.rateLimits,
+        operations: options.automation.templates,
+      }),
+    );
+  }
 
   app.all("/api/*", (context) =>
     context.json(errorBody("NOT_FOUND", "The requested API resource does not exist."), 404),

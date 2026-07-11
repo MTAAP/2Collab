@@ -8,6 +8,10 @@ import { listKnownProjects } from "./commands/projects.ts";
 import { startRun } from "./commands/start.ts";
 import { projectStatus } from "./commands/status.ts";
 import type { ProjectsApi } from "./ports/projects-api.ts";
+import type { WorkflowAuthoringOperations } from "../server/modules/workflows/authoring.ts";
+import type { TemplateBindingOperations } from "../server/modules/templates/bindings.ts";
+import { workflowCommand } from "./commands/workflows.ts";
+import { templateCommand } from "./commands/templates.ts";
 
 export type CliIo = {
   error: (line: string) => void;
@@ -22,6 +26,8 @@ export type CliDependencies = {
   registry?: LocalProjectRegistry;
   runsApi?: PublicRunClient;
   mcpBridge?: () => Promise<void>;
+  workflowOperations?: WorkflowAuthoringOperations;
+  templateOperations?: TemplateBindingOperations;
 };
 
 const defaultIo: CliIo = {
@@ -43,6 +49,8 @@ const HELP = [
   "  start      Create an Agent Run from a Personal Run Preset",
   "  run        Exact alias for start",
   "  mcp        Serve the public tools over stdio",
+  "  workflows  Save a canonical workflow draft",
+  "  templates  Bind an exact workflow preset",
   "  --version  Print the CLI version",
   "  --help     Show this help",
 ];
@@ -108,6 +116,26 @@ export async function runCli(
     }
     await dependencies.mcpBridge();
     return 0;
+  }
+
+  if (command === "workflows" || command === "templates") {
+    const operations =
+      command === "workflows" ? dependencies.workflowOperations : dependencies.templateOperations;
+    if (!operations) {
+      io.error("AUTOMATION_NOT_CONFIGURED");
+      return 3;
+    }
+    try {
+      const result =
+        command === "workflows"
+          ? await workflowCommand(commandArgs, operations as WorkflowAuthoringOperations)
+          : await templateCommand(commandArgs, operations as TemplateBindingOperations);
+      io.log(JSON.stringify(result));
+      return result.ok ? 0 : 1;
+    } catch (error) {
+      io.error(error instanceof Error ? error.message : "AUTOMATION_ARGUMENTS_INVALID");
+      return 2;
+    }
   }
 
   if (["init", "list", "projects", "status"].includes(command)) {
