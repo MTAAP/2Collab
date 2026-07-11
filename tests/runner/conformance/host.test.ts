@@ -23,7 +23,7 @@ function launch(
 }
 
 describe("execution host conformance", () => {
-  for (const fixture of [
+  const fixtures = [
     {
       name: "Native",
       host: createNativeExecutionHost({
@@ -42,7 +42,8 @@ describe("execution host conformance", () => {
         attach: async () => ({ localAttachmentId: "orca_attachment" }),
       }),
     },
-  ]) {
+  ];
+  for (const fixture of fixtures) {
     for (const interaction of ["HEADLESS", "INTERACTIVE"] as const) {
       test(`${fixture.name} ${interaction} starts only prepared advisory execution`, async () => {
         expect(await fixture.host.start(launch(interaction))).toMatchObject({
@@ -59,4 +60,15 @@ describe("execution host conformance", () => {
       });
     });
   }
+
+  test("Native and Orca start prepared headless and interactive execution locally", async () => {
+    for (const fixture of fixtures) {
+      for (const interaction of ["HEADLESS", "INTERACTIVE"] as const) {
+        expect(await fixture.host.start(launch(interaction))).toMatchObject({
+          ok: true,
+          value: { interaction },
+        });
+      }
+    }
+  });
 });

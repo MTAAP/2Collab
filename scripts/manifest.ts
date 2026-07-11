@@ -6,6 +6,7 @@ const root = resolve(import.meta.dir, "..");
 const manifestPath = join(root, "MANIFEST.sha256");
 const excludedDirectories = new Set([
   ".git",
+  ".worktrees",
   ".superpowers",
   "coverage",
   "credentials",

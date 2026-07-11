@@ -80,4 +80,12 @@ describe("runtime adapter conformance", () => {
       ).toMatchObject({ ok: false, error: { code: "CAPABILITY_UNSUPPORTED" } });
     });
   }
+
+  test("Claude and Codex prepare argv without starting a process", async () => {
+    for (const fixture of fixtures) {
+      const result = await fixture.adapter.prepare(request(fixture.profile));
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.invocation.argv[0]).toBe(fixture.profile.executable);
+    }
+  });
 });

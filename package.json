@@ -36,7 +36,10 @@
     "archive:verify": "bun run scripts/verify-archive.ts",
     "manifest:generate": "bun run scripts/manifest.ts generate",
     "manifest:verify": "bun run scripts/manifest.ts verify",
-    "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify"
+    "evidence:verify": "bun run scripts/verify-evidence.ts",
+    "evidence:validate": "bun run scripts/foundation-evidence.ts validate",
+    "evidence:foundation-exit": "bun run scripts/foundation-evidence.ts check-exit",
+    "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify && bun run evidence:verify && bun run evidence:validate"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
