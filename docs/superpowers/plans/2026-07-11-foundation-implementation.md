@@ -846,6 +846,7 @@ git commit -m "feat: implement execution authority"
 - Create: `src/server/modules/presets/{personal-run-presets,configuration-resolver}.ts`
 - Create: `src/server/modules/context/context-recipes.ts`
 - Create: `src/server/modules/telemetry/usage.ts`
+- Modify: `src/shared/contracts/{presets,context,telemetry}.ts`
 - Test: `tests/unit/configuration/{presets,context,telemetry}.test.ts`
 - Test: `tests/integration/configuration/snapshots.test.ts`
 
@@ -878,17 +879,32 @@ Expected: FAIL because configuration modules do not exist.
 - [ ] **Step 3: Implement bounded configuration values**
 
 ```ts
-export type ContextRecipe = Readonly<{ id: string; version: number; categories: readonly ContextCategory[]; maximumItems: number; maximumPreviewBytes: number; freshnessSeconds: number }>;
-export function assembleBootstrapEnvelope(recipe: ContextRecipe, refs: readonly ContextReference[]): BootstrapEnvelope {
-  const selected = refs.filter((ref) => recipe.categories.includes(ref.category)).slice(0, recipe.maximumItems);
-  const previews = boundUtf8Previews(selected, recipe.maximumPreviewBytes);
-  return Object.freeze({ recipeId: recipe.id, recipeVersion: recipe.version, references: selected.map(toSafeReference), previews });
-}
-export function aggregateUsage(attempts: readonly UsageObservation[]): UsageCoverage {
-  const known = attempts.filter((item): item is KnownUsage => item.units !== "UNKNOWN");
-  return { knownUnits: known.reduce((sum, item) => sum + item.units, 0), knownAttempts: known.length, totalAttempts: attempts.length, coverage: known.length === attempts.length ? "COMPLETE" : known.length === 0 ? "UNKNOWN" : "PARTIAL" };
-}
+export type ContextRecipeVersion = Readonly<{
+  id: string;
+  version: number;
+  projectId: string;
+  perCategoryLimits: Readonly<Record<ContextCategory, number>>;
+  maximumReferences: number;
+  maximumPreviewBytes: number;
+  freshnessSeconds: number;
+  predecessorPolicy: PredecessorContextPolicy;
+}>;
+export function assembleBootstrapEnvelope(
+  recipe: ContextRecipeVersion,
+  authorizedCandidates: readonly AuthorizedContextCandidate[],
+  now: number,
+): Result<BootstrapEnvelope>;
+export function aggregateUsage(
+  eligibleAttempts: readonly AttemptUsageEligibility[],
+  observations: readonly UsageObservation[],
+): readonly UsageCoverageGroup[];
 ```
+
+Personal Run Presets are member-owned logical records with immutable versions, optional Project scope/default, expected-version edits, and archive state. Resolution snapshots the full safe effective configuration and canonical digest atomically with the Run: Team template/core and typed variables, labelled personal addendum, per-run goal/input, exact recipe/envelope provenance, runner/mapping/profile/exposure/acknowledgement/policy facts, grants/gates, bounds, and visible overrides remain separate rather than a flattened prompt. Every later layer may narrow but never widen mode, assurance, source/grant scope, gates, or bounds; stale bindings fail without substitution.
+
+Context Recipes are immutable Project-owned versions. They intersect already-authorized candidates, never grant access, apply deterministic category and total limits, deduplicate with stable tie-breaks, report `FRESH`, `STALE`, `UNAVAILABLE`, and `FORBIDDEN` plus omission reasons, and bound previews in UTF-8 bytes without splitting code points. Stored envelopes contain safe identifiers/revisions/provenance and bounded authored previews only—no fetched bodies, diffs, logs, transcripts, absolute paths, or broad history.
+
+Usage persistence separates eligible attempts from append-only deduplicated observations. Aggregation groups compatible runtime/provider, reported model, and metric category; it never adds `TOTAL` to components or combines incompatible dimensions. Structured zero is known, unavailable is `UNKNOWN`, coverage counts eligible attempts, declared model remains configuration provenance, and no cost/currency/pricing field exists.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -899,7 +915,7 @@ Expected: PASS; future edits do not alter history, recipes grant no authority, p
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/modules/presets src/server/modules/context src/server/modules/telemetry tests/unit/configuration tests/integration/configuration
+git add src/shared/contracts/presets.ts src/shared/contracts/context.ts src/shared/contracts/telemetry.ts src/server/modules/presets src/server/modules/context src/server/modules/telemetry tests/unit/configuration tests/integration/configuration
 git commit -m "feat: add immutable run configuration"
 ```
 
