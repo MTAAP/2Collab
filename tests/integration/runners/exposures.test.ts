@@ -50,6 +50,7 @@ describe("team runner exposures", () => {
       ).toThrow();
 
       const updatedProfile = await fixture.registry.advertiseProfile({
+        idempotencyKey: "profile_update",
         actor: fixture.actor("member_a"),
         runnerId: paired.runnerId,
         profileId: exposure.profileId,
@@ -66,8 +67,8 @@ describe("team runner exposures", () => {
         actor: fixture.actor("member_b"),
         ...exposure,
       });
-      expect(stale.ok && stale.value.disposition).toBe("STALE");
-      if (stale.ok) expect(stale.value.staleReasons).toContain("PROFILE_VERSION_STALE");
+      expect(stale.ok).toBeFalse();
+      if (!stale.ok) expect(stale.error.code).toBe("RUNNER_NOT_OWNED_OR_EXPOSED");
     } finally {
       fixture.close();
     }

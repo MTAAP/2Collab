@@ -8,6 +8,7 @@ describe("runner revocation", () => {
       const paired = await fixture.pair("member_a");
       await fixture.expose(paired.runnerId);
       const revoked = await fixture.registry.revoke({
+        idempotencyKey: "runner_revoke",
         actor: fixture.actor("member_a"),
         runnerId: paired.runnerId,
         expectedRunnerEpoch: 1,

@@ -257,14 +257,23 @@ export type RunnerAccessIssue = Readonly<{
   expiresAt: number;
 }>;
 
-export type BeginRunnerPairing = Readonly<{ principal: VerifiedDevicePrincipal }>;
-export type ConfirmRunnerPairing = Readonly<{ actor: MemberActor; pairingId: string }>;
+export type BeginRunnerPairing = Readonly<{
+  idempotencyKey: string;
+  principal: VerifiedDevicePrincipal;
+}>;
+export type ConfirmRunnerPairing = Readonly<{
+  idempotencyKey: string;
+  actor: MemberActor;
+  pairingId: string;
+}>;
 export type ConsumeRunnerPairing = Readonly<{
+  idempotencyKey: string;
   pairingSecret: string;
   keyId: string;
   keyProof: string;
 }>;
 export type RegisterRunnerMapping = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   runnerId: RegisteredRunnerId;
   projectId: ProjectId;
@@ -278,6 +287,7 @@ export type RevokeRunnerMapping = Readonly<{
   expectedRevision: number;
 }>;
 export type AdvertiseSafeProfileVersion = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   runnerId: RegisteredRunnerId;
   profileId?: SafeProfileId;
@@ -298,22 +308,30 @@ export type PreviewExposureAcknowledgement = Readonly<{
   profileVersion: number;
 }>;
 export type AcknowledgeTeamExposure = ExposureSubject &
-  Readonly<{ actor: MemberActor; expectedDigest: string }>;
+  Readonly<{ idempotencyKey: string; actor: MemberActor; expectedDigest: string }>;
 export type RevokeExposureAcknowledgement = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   acknowledgementId: ExposureAcknowledgementId;
+  expectedVersion: number;
 }>;
 export type CreateTeamExposure = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   acknowledgementId: ExposureAcknowledgementId;
 }>;
 export type RevokeTeamExposure = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   exposureId: string;
   expectedRevision: number;
 }>;
-export type RunnerHeartbeat = Readonly<{ principal: VerifiedRunnerPrincipal }>;
+export type RunnerHeartbeat = Readonly<{
+  idempotencyKey: string;
+  principal: VerifiedRunnerPrincipal;
+}>;
 export type RevokeRunner = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   runnerId: RegisteredRunnerId;
   expectedRunnerEpoch: number;

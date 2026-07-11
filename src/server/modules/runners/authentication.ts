@@ -8,6 +8,7 @@ import type {
   RunnerKeyProofPort,
   RunnerRequestProofPort,
 } from "./contract.ts";
+import { inImmediateTransaction } from "../../db/transaction.ts";
 import { runnerDigest, runnerSecret, validRunnerId } from "./pairing.ts";
 
 const RUNNER_ACCESS_SECONDS = 600;
@@ -40,6 +41,11 @@ export function createRunnerAuthenticationAuthority(
   const digest = dependencies.digest ?? runnerDigest;
   const randomSecret = dependencies.randomSecret ?? runnerSecret;
   const access = new Map<string, AccessClaims>();
+  const purgeExpiredAccess = (now: number): void => {
+    for (const [tokenHash, claims] of access) {
+      if (claims.expiresAt <= now) access.delete(tokenHash);
+    }
+  };
 
   const authenticateAccess: RunnerAuthenticationAuthority["authenticateAccess"] = async (
     command,
@@ -76,6 +82,7 @@ export function createRunnerAuthenticationAuthority(
       return failure("RUNNER_ACCESS_INVALID", "Runner access credential is invalid.");
     }
     const tokenHash = Buffer.from(await digest(command.accessToken)).toString("hex");
+    purgeExpiredAccess(dependencies.clock());
     const claims = access.get(tokenHash);
     if (!claims || dependencies.clock() >= claims.expiresAt || command.nonce !== claims.nonce) {
       return failure("RUNNER_ACCESS_INVALID", "Runner access credential is invalid.");
@@ -96,22 +103,40 @@ export function createRunnerAuthenticationAuthority(
     ) {
       return failure("RUNNER_DPOP_INVALID", "Runner request proof is invalid.");
     }
-    const current = dependencies.database
-      .query<{ id: string }, [string, number, string]>(
-        `SELECT runners.id FROM runners JOIN members ON members.id = runners.owner_member_id
-         WHERE runners.id = ? AND runners.runner_epoch = ? AND runners.owner_member_id = ?
-           AND runners.revoked_at IS NULL AND members.status = 'ACTIVE'`,
-      )
-      .get(claims.runnerId, claims.runnerEpoch, claims.ownerMemberId);
-    if (!current) return failure("RUNNER_ACCESS_INVALID", "Runner access credential is invalid.");
-    const proofIdHash = await digest(`RUNNER_DPOP:${requestProof.value.jti}`);
+    const proofIdHash = await digest(
+      `RUNNER_DPOP:${claims.keyThumbprint}:${requestProof.value.jti}`,
+    );
     try {
-      dependencies.database
-        .query(
-          `INSERT INTO dpop_replays(proof_id_hash, sender_key_thumbprint, created_at, expires_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(proofIdHash, claims.keyThumbprint, dependencies.clock(), dependencies.clock() + 600);
+      const accepted = inImmediateTransaction(dependencies.database, () => {
+        const now = dependencies.clock();
+        if (now >= claims.expiresAt) {
+          return false;
+        }
+        dependencies.database.query("DELETE FROM dpop_replays WHERE expires_at <= ?").run(now);
+        const current = dependencies.database
+          .query<{ id: string }, [string, number, string, string]>(
+            `SELECT runners.id FROM runners
+             JOIN members ON members.id = runners.owner_member_id
+             JOIN runner_credentials AS credentials ON credentials.runner_id = runners.id
+             WHERE runners.id = ? AND runners.runner_epoch = ? AND runners.owner_member_id = ?
+               AND runners.revoked_at IS NULL AND members.status = 'ACTIVE'
+               AND credentials.key_thumbprint = ? AND credentials.revoked_at IS NULL
+               AND credentials.runner_epoch = runners.runner_epoch
+               AND credentials.member_authority_epoch = members.authority_epoch`,
+          )
+          .get(claims.runnerId, claims.runnerEpoch, claims.ownerMemberId, claims.keyThumbprint);
+        if (!current) return false;
+        dependencies.database
+          .query(
+            `INSERT INTO dpop_replays(proof_id_hash, sender_key_thumbprint, created_at, expires_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(proofIdHash, claims.keyThumbprint, now, now + 600);
+        return true;
+      });
+      if (!accepted) {
+        return failure("RUNNER_ACCESS_INVALID", "Runner access credential is invalid.");
+      }
     } catch {
       return failure("RUNNER_DPOP_REPLAY", "Runner request proof was replayed.");
     }
@@ -130,6 +155,7 @@ export function createRunnerAuthenticationAuthority(
 
   return {
     async exchangeCredential(command) {
+      purgeExpiredAccess(dependencies.clock());
       if (command.runnerCredential.length < 32 || command.runnerCredential.length > 512) {
         return failure("RUNNER_CREDENTIAL_INVALID", "Runner credential is invalid.");
       }

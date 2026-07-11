@@ -11,12 +11,16 @@ describe("runner heartbeat", () => {
       });
       const authenticated = await fixture.authenticate(paired, "heartbeat_1");
       const callerStatus = await fixture.registry.heartbeat({
+        idempotencyKey: "invalid_heartbeat",
         principal: authenticated.principal,
         status: "ONLINE",
         observedAt: 0,
       } as never);
       expect(callerStatus.ok).toBeFalse();
-      await fixture.registry.heartbeat({ principal: authenticated.principal });
+      await fixture.registry.heartbeat({
+        idempotencyKey: "valid_heartbeat",
+        principal: authenticated.principal,
+      });
       fixture.setNow(fixture.now() + 29);
       expect(fixture.registry.inspectLease(paired.runnerId).state).toBe("ONLINE");
       fixture.setNow(fixture.now() + 1);

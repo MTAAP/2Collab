@@ -7,6 +7,9 @@ import foundationMigration from "../../../src/server/db/migrations/0001_foundati
 import projectsMigration from "../../../src/server/db/migrations/0002_projects.sql" with {
   type: "text",
 };
+import runnersMigration from "../../../src/server/db/migrations/0003_runners.sql" with {
+  type: "text",
+};
 import { verifyRunnersSchema } from "../../../src/server/db/migrations/0003_runners.verify.ts";
 
 function versionTwoDatabase(): Database {
@@ -17,6 +20,49 @@ function versionTwoDatabase(): Database {
 }
 
 describe("runner migration", () => {
+  for (const [name, mutate] of [
+    [
+      "no-op immutable trigger",
+      (sql: string) => sql.replace("SELECT RAISE(ABORT, 'RUNNER_OWNER_IMMUTABLE');", "SELECT 1;"),
+    ],
+    [
+      "non-partial active credential index",
+      (sql: string) =>
+        sql.replace(
+          "ON runner_credentials(runner_id) WHERE revoked_at IS NULL;",
+          "ON runner_credentials(runner_id);",
+        ),
+    ],
+    [
+      "weakened runner concurrency check",
+      (sql: string) =>
+        sql.replace(
+          "CHECK (maximum_concurrent_attempts BETWEEN 1 AND 32)",
+          "CHECK (maximum_concurrent_attempts BETWEEN 1 AND 64)",
+        ),
+    ],
+    [
+      "weakened exposure tuple foreign key",
+      (sql: string) =>
+        sql.replace(
+          /,\n {2}FOREIGN KEY \(\n {4}acknowledgement_id,[\s\S]*?security_digest\n {2}\)\n\) STRICT;/,
+          "\n) STRICT;",
+        ),
+    ],
+  ] as const) {
+    test(`rejects claimed v3 drift: ${name}`, () => {
+      const database = versionTwoDatabase();
+      try {
+        const changed = mutate(runnersMigration);
+        expect(changed).not.toBe(runnersMigration);
+        database.exec(changed);
+        expect(() => verifyRunnersSchema(database)).toThrow("SCHEMA_INTEGRITY_INVALID");
+      } finally {
+        database.close();
+      }
+    });
+  }
+
   test("keeps the v3 runner schema verified after later migrations", () => {
     const database = new Database(":memory:", { strict: true });
     try {

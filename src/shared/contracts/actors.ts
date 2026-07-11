@@ -31,6 +31,7 @@ export type VerifiedDevicePrincipal = Readonly<{
   deviceFamilyId: string;
   deviceId: string;
   senderKeyThumbprint: string;
+  expiresAt: number;
   readonly [verifiedDevice]: true;
 }>;
 

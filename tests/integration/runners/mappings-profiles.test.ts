@@ -7,6 +7,7 @@ describe("runner mappings and profiles", () => {
     try {
       const paired = await fixture.pair("member_a");
       const mapping = await fixture.registry.registerMapping({
+        idempotencyKey: "mapping_create",
         actor: fixture.actor("member_a"),
         runnerId: paired.runnerId,
         projectId: "project_1" as never,
@@ -14,6 +15,7 @@ describe("runner mappings and profiles", () => {
       });
       expect(mapping).toMatchObject({ ok: true, value: { revision: 1 } });
       const replaced = await fixture.registry.replaceMapping({
+        idempotencyKey: "mapping_replace",
         actor: fixture.actor("member_a"),
         runnerId: paired.runnerId,
         projectId: "project_1" as never,
@@ -22,6 +24,7 @@ describe("runner mappings and profiles", () => {
       });
       expect(replaced).toMatchObject({ ok: true, value: { revision: 2 } });
       const unsafe = await fixture.registry.advertiseProfile({
+        idempotencyKey: "unsafe_profile",
         actor: fixture.actor("member_a"),
         runnerId: paired.runnerId,
         displayName: "Unsafe",

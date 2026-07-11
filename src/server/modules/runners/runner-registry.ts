@@ -13,11 +13,15 @@ import { MemberActorSchema } from "../../../shared/contracts/actors.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import type {
   ExposureAcknowledgement,
+  ConfirmedRunnerPairing,
   ExposureSubject,
+  RunnerCredentialEnvelope,
   RunnerEligibilityFacts,
   RunnerLeaseView,
   RunnerMapping,
   RunnerPolicyFacts,
+  RunnerPairingChallenge,
+  RunnerRevocation,
   SafeProfileVersion,
   TeamDispatchExposure,
 } from "../../../shared/contracts/runners.ts";
@@ -122,6 +126,7 @@ type ExposureRow = Readonly<{
 const PositiveRevisionSchema = z.number().int().positive();
 const MappingBaseSchema = z
   .object({
+    idempotencyKey: IdentifierSchema,
     actor: MemberActorSchema,
     runnerId: IdentifierSchema,
     projectId: IdentifierSchema,
@@ -130,6 +135,7 @@ const MappingBaseSchema = z
   .strict();
 const ProfileSchema = z
   .object({
+    idempotencyKey: IdentifierSchema,
     actor: MemberActorSchema,
     runnerId: IdentifierSchema,
     profileId: IdentifierSchema.optional(),
@@ -266,6 +272,89 @@ export function createRunnerServices(dependencies: Dependencies) {
   const digest = dependencies.digest ?? runnerDigest;
   const randomSecret = dependencies.randomSecret ?? runnerSecret;
 
+  type WriteTicket = Readonly<{ actorId: string; key: string; inputHash: string }>;
+  const canonical = (value: unknown): string => {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
+      .join(",")}}`;
+  };
+  const writeTicket = async (
+    operation: string,
+    actorId: string,
+    key: string,
+    safeInput: unknown,
+  ): Promise<WriteTicket> => ({
+    actorId: `RUNNER_${operation}:${actorId}`,
+    key,
+    inputHash: Buffer.from(
+      await digest(`RUNNER_WRITE:${operation}:${canonical(safeInput)}`),
+    ).toString("hex"),
+  });
+  const replayWrite = <T>(ticket: WriteTicket): Result<T> | null => {
+    const row = dependencies.database
+      .query<{ input_hash: string; result_json: string }, [string, string]>(
+        "SELECT input_hash, result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
+      )
+      .get(ticket.actorId, ticket.key);
+    if (!row) return null;
+    if (row.input_hash !== ticket.inputHash) {
+      return failure("IDEMPOTENCY_CONFLICT", "Idempotency key was used with different input.");
+    }
+    try {
+      const stored = JSON.parse(row.result_json) as
+        | Readonly<{ kind: "SECRET_ISSUED" }>
+        | Readonly<{ kind: "RESULT"; result: Result<T> }>;
+      return stored.kind === "RESULT"
+        ? stored.result
+        : failure("SECRET_ALREADY_ISSUED", "Runner secret was already issued.");
+    } catch {
+      return failure("RUNNER_IDEMPOTENCY_FAILED", "Runner idempotency state is invalid.");
+    }
+  };
+  const storeWrite = <T>(
+    ticket: WriteTicket,
+    result: Result<T>,
+    input: Readonly<{
+      secret?: boolean;
+      auditKind: string;
+      actorKind: "DEVICE" | "MEMBER" | "RUNNER";
+      actorId: string;
+      subjectId?: string;
+      safeDetails: Readonly<Record<string, unknown>>;
+    }>,
+  ): Result<T> => {
+    dependencies.database
+      .query(
+        `INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        ticket.actorId,
+        ticket.key,
+        ticket.inputHash,
+        JSON.stringify(input.secret ? { kind: "SECRET_ISSUED" } : { kind: "RESULT", result }),
+        dependencies.clock(),
+      );
+    dependencies.database
+      .query(
+        `INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        dependencies.id("audit"),
+        input.auditKind,
+        input.actorKind,
+        input.actorId,
+        input.subjectId ?? null,
+        canonical(input.safeDetails),
+        dependencies.clock(),
+      );
+    return result;
+  };
+
   const memberAuthority = async (actor: MemberActor) => {
     if (actor.sessionProof.length < 32 || actor.sessionProof.length > 512) return null;
     const proofHash = await digest(actor.sessionProof);
@@ -281,6 +370,40 @@ export function createRunnerServices(dependencies: Dependencies) {
       )
       .get(actor.memberId, actor.sessionId, proofHash, dependencies.clock(), dependencies.clock());
     return member ? { memberId: member.member_id, proofHash } : null;
+  };
+
+  const revalidateMemberAuthority = (actor: MemberActor, proofHash: Uint8Array): boolean =>
+    dependencies.database
+      .query<{ member_id: string }, [string, string, Uint8Array, number, number]>(
+        `SELECT members.id AS member_id FROM members
+         JOIN sessions ON sessions.member_id = members.id
+         WHERE members.id = ? AND sessions.id = ? AND sessions.proof_hash = ?
+           AND members.status = 'ACTIVE' AND sessions.kind = 'BROWSER'
+           AND sessions.revoked_at IS NULL
+           AND sessions.idle_expires_at > ? AND sessions.absolute_expires_at > ?
+           AND sessions.member_authority_epoch = members.authority_epoch`,
+      )
+      .get(
+        actor.memberId,
+        actor.sessionId,
+        proofHash,
+        dependencies.clock(),
+        dependencies.clock(),
+      ) !== null;
+
+  const revalidateOwner = (
+    actor: MemberActor,
+    proofHash: Uint8Array,
+    runnerId: string,
+  ): RunnerRow | null => {
+    if (!revalidateMemberAuthority(actor, proofHash)) return null;
+    return (
+      dependencies.database
+        .query<RunnerRow, [string, string]>(
+          "SELECT * FROM runners WHERE id = ? AND owner_member_id = ? AND revoked_at IS NULL",
+        )
+        .get(runnerId, actor.memberId) ?? null
+    );
   };
 
   const activeOwner = async (actor: MemberActor, runnerId: string) => {
@@ -373,6 +496,7 @@ export function createRunnerServices(dependencies: Dependencies) {
     async beginPairing(command) {
       const input = z
         .object({
+          idempotencyKey: IdentifierSchema,
           principal: z
             .object({
               kind: z.literal("VERIFIED_DEVICE"),
@@ -381,12 +505,16 @@ export function createRunnerServices(dependencies: Dependencies) {
               deviceFamilyId: IdentifierSchema,
               deviceId: IdentifierSchema,
               senderKeyThumbprint: IdentifierSchema,
+              expiresAt: z.number().int().positive(),
             })
             .strict(),
         })
         .strict()
         .safeParse(command);
       if (!input.success) return failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
+      if (dependencies.clock() >= input.data.principal.expiresAt) {
+        return failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
+      }
       const currentDevice = dependencies.database
         .query<{ id: string }, [string, number, string, string, string]>(
           `SELECT families.id FROM device_credential_families AS families
@@ -405,33 +533,60 @@ export function createRunnerServices(dependencies: Dependencies) {
         );
       if (!currentDevice)
         return failure("RUNNER_PAIRING_DEVICE_INVALID", "Runner pairing device is invalid.");
+      const ticket = await writeTicket(
+        "PAIRING_BEGIN",
+        input.data.principal.deviceFamilyId,
+        input.data.idempotencyKey,
+        {
+          memberId: input.data.principal.memberId,
+          memberAuthorityEpoch: input.data.principal.memberAuthorityEpoch,
+          deviceFamilyId: input.data.principal.deviceFamilyId,
+          deviceId: input.data.principal.deviceId,
+          senderKeyThumbprint: input.data.principal.senderKeyThumbprint,
+          expiresAt: input.data.principal.expiresAt,
+        },
+      );
+      const prior = replayWrite<RunnerPairingChallenge>(ticket);
+      if (prior) return prior;
       const pairingSecret = randomSecret("runner_pairing");
       const pairingHash = await digest(pairingSecret);
       const pairingId = dependencies.id("runner_pairing");
       const now = dependencies.clock();
       try {
-        dependencies.database
-          .query(
-            `INSERT INTO runner_pairings(
-               id, pairing_secret_hash, device_member_id, device_member_authority_epoch,
-               device_family_id, device_id, device_key_thumbprint, state, revision, created_at, expires_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?)`,
-          )
-          .run(
-            pairingId,
-            pairingHash,
-            input.data.principal.memberId,
-            input.data.principal.memberAuthorityEpoch,
-            input.data.principal.deviceFamilyId,
-            input.data.principal.deviceId,
-            input.data.principal.senderKeyThumbprint,
-            now,
-            now + RUNNER_PAIRING_SECONDS,
-          );
-        return {
-          ok: true,
-          value: { pairingId, pairingSecret, expiresAt: now + RUNNER_PAIRING_SECONDS },
-        };
+        return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<RunnerPairingChallenge>(ticket);
+          if (raced) return raced;
+          dependencies.database
+            .query(
+              `INSERT INTO runner_pairings(
+                 id, pairing_secret_hash, device_member_id, device_member_authority_epoch,
+                 device_family_id, device_id, device_key_thumbprint, state, revision, created_at, expires_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, ?, ?)`,
+            )
+            .run(
+              pairingId,
+              pairingHash,
+              input.data.principal.memberId,
+              input.data.principal.memberAuthorityEpoch,
+              input.data.principal.deviceFamilyId,
+              input.data.principal.deviceId,
+              input.data.principal.senderKeyThumbprint,
+              now,
+              now + RUNNER_PAIRING_SECONDS,
+            );
+          const result = {
+            ok: true as const,
+            value: { pairingId, pairingSecret, expiresAt: now + RUNNER_PAIRING_SECONDS },
+          };
+          return storeWrite(ticket, result, {
+            secret: true,
+            auditKind: "RUNNER_PAIRING_BEGUN",
+            actorKind: "DEVICE",
+            actorId: input.data.principal.deviceFamilyId,
+            subjectId: pairingId,
+            safeDetails: { ownerMemberId: input.data.principal.memberId },
+          });
+        });
       } catch {
         return failure("RUNNER_PAIRING_FAILED", "Runner pairing failed.");
       }
@@ -439,7 +594,11 @@ export function createRunnerServices(dependencies: Dependencies) {
 
     async confirmPairing(command) {
       const input = z
-        .object({ actor: MemberActorSchema, pairingId: IdentifierSchema })
+        .object({
+          idempotencyKey: IdentifierSchema,
+          actor: MemberActorSchema,
+          pairingId: IdentifierSchema,
+        })
         .strict()
         .safeParse(command);
       if (!input.success) return failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
@@ -454,21 +613,48 @@ export function createRunnerServices(dependencies: Dependencies) {
       if (pairing?.device_member_id !== authority.memberId) {
         return failure("RUNNER_PAIRING_MEMBER_MISMATCH", "Runner pairing member does not match.");
       }
+      const ticket = await writeTicket(
+        "PAIRING_CONFIRM",
+        authority.memberId,
+        input.data.idempotencyKey,
+        { pairingId: input.data.pairingId },
+      );
+      const prior = replayWrite<ConfirmedRunnerPairing>(ticket);
+      if (prior) return prior;
       const now = dependencies.clock();
-      const changed = dependencies.database
-        .query(
-          `UPDATE runner_pairings SET state = 'CONFIRMED', confirmed_at = ?, revision = revision + 1
-           WHERE id = ? AND revision = ? AND state = 'PENDING' AND expires_at > ?`,
-        )
-        .run(now, input.data.pairingId, pairing.revision, now);
-      return changed.changes === 1
-        ? { ok: true, value: { pairingId: input.data.pairingId, confirmedAt: now } }
-        : failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
+      return inImmediateTransaction(dependencies.database, () => {
+        const raced = replayWrite<ConfirmedRunnerPairing>(ticket);
+        if (raced) return raced;
+        if (!revalidateMemberAuthority(input.data.actor as MemberActor, authority.proofHash)) {
+          return failure("AUTHORITY_STALE", "Identity authority changed.", "REFRESH");
+        }
+        const changed = dependencies.database
+          .query(
+            `UPDATE runner_pairings SET state = 'CONFIRMED', confirmed_at = ?, revision = revision + 1
+             WHERE id = ? AND revision = ? AND state = 'PENDING' AND expires_at > ?`,
+          )
+          .run(now, input.data.pairingId, pairing.revision, now);
+        if (changed.changes !== 1) {
+          return failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
+        }
+        const result = {
+          ok: true as const,
+          value: { pairingId: input.data.pairingId, confirmedAt: now },
+        };
+        return storeWrite(ticket, result, {
+          auditKind: "RUNNER_PAIRING_CONFIRMED",
+          actorKind: "MEMBER",
+          actorId: authority.memberId,
+          subjectId: input.data.pairingId,
+          safeDetails: { ownerMemberId: authority.memberId },
+        });
+      });
     },
 
     async consumePairing(command) {
       const input = z
         .object({
+          idempotencyKey: IdentifierSchema,
           pairingSecret: z.string().min(32).max(512),
           keyId: IdentifierSchema,
           keyProof: z.string().min(1).max(2048),
@@ -483,6 +669,7 @@ export function createRunnerServices(dependencies: Dependencies) {
             id: string;
             device_member_id: string;
             device_member_authority_epoch: number;
+            device_family_id: string;
             state: string;
             revision: number;
             expires_at: number;
@@ -491,6 +678,17 @@ export function createRunnerServices(dependencies: Dependencies) {
         >("SELECT * FROM runner_pairings WHERE pairing_secret_hash = ?")
         .get(pairingHash);
       if (!pairing) return failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
+      const ticket = await writeTicket(
+        "PAIRING_CONSUME",
+        pairing.device_family_id,
+        input.data.idempotencyKey,
+        {
+          pairingId: pairing.id,
+          keyId: input.data.keyId,
+        },
+      );
+      const prior = replayWrite<RunnerCredentialEnvelope>(ticket);
+      if (prior) return prior;
       if (pairing.state === "CONSUMED") {
         return failure("RUNNER_PAIRING_CONSUMED", "Runner pairing was already consumed.");
       }
@@ -556,7 +754,7 @@ export function createRunnerServices(dependencies: Dependencies) {
               pairing.device_member_authority_epoch,
               now,
             );
-          return {
+          const result = {
             ok: true,
             value: {
               runnerId: runnerId as RegisteredRunnerId,
@@ -565,7 +763,15 @@ export function createRunnerServices(dependencies: Dependencies) {
               runnerCredential: credential,
               keyThumbprint: key.value.keyThumbprint,
             },
-          };
+          } as const;
+          return storeWrite(ticket, result, {
+            secret: true,
+            auditKind: "RUNNER_CREDENTIAL_ISSUED",
+            actorKind: "DEVICE",
+            actorId: pairing.device_family_id,
+            subjectId: runnerId,
+            safeDetails: { ownerMemberId: pairing.device_member_id },
+          });
         });
       } catch {
         return failure("RUNNER_PAIRING_FAILED", "Runner pairing failed.");
@@ -578,8 +784,31 @@ export function createRunnerServices(dependencies: Dependencies) {
       const owner = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
       if (!owner)
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+      const ticket = await writeTicket(
+        "MAPPING_REGISTER",
+        owner.member.memberId,
+        input.data.idempotencyKey,
+        {
+          runnerId: input.data.runnerId,
+          projectId: input.data.projectId,
+          localMappingId: input.data.localMappingId,
+        },
+      );
+      const prior = replayWrite<RunnerMapping>(ticket);
+      if (prior) return prior;
       try {
         return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<RunnerMapping>(ticket);
+          if (raced) return raced;
+          if (
+            !revalidateOwner(
+              input.data.actor as MemberActor,
+              owner.member.proofHash,
+              input.data.runnerId,
+            )
+          ) {
+            return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+          }
           const project = dependencies.database
             .query<{ id: string }, [string]>("SELECT id FROM projects WHERE id = ?")
             .get(input.data.projectId);
@@ -601,7 +830,7 @@ export function createRunnerServices(dependencies: Dependencies) {
                ) VALUES (?, ?, 1, ?, ?)`,
             )
             .run(input.data.runnerId, input.data.projectId, input.data.localMappingId, now);
-          return {
+          const result = {
             ok: true,
             value: mappingView({
               runner_id: input.data.runnerId,
@@ -611,7 +840,17 @@ export function createRunnerServices(dependencies: Dependencies) {
               created_at: now,
               revoked_at: null,
             }),
-          };
+          } as const;
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_MAPPING_REGISTERED",
+            actorKind: "MEMBER",
+            actorId: owner.member.memberId,
+            subjectId: input.data.runnerId,
+            safeDetails: {
+              ownerMemberId: owner.member.memberId,
+              projectId: input.data.projectId,
+            },
+          });
         });
       } catch {
         return failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
@@ -623,11 +862,36 @@ export function createRunnerServices(dependencies: Dependencies) {
         .strict()
         .safeParse(command);
       if (!input.success) return failure("RUNNER_MAPPING_INVALID", "Runner mapping is invalid.");
-      if (!(await activeOwner(input.data.actor as MemberActor, input.data.runnerId))) {
+      const owner = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
+      if (!owner) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
+      const ticket = await writeTicket(
+        "MAPPING_REPLACE",
+        owner.member.memberId,
+        input.data.idempotencyKey,
+        {
+          runnerId: input.data.runnerId,
+          projectId: input.data.projectId,
+          localMappingId: input.data.localMappingId,
+          expectedRevision: input.data.expectedRevision,
+        },
+      );
+      const prior = replayWrite<RunnerMapping>(ticket);
+      if (prior) return prior;
       try {
         return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<RunnerMapping>(ticket);
+          if (raced) return raced;
+          if (
+            !revalidateOwner(
+              input.data.actor as MemberActor,
+              owner.member.proofHash,
+              input.data.runnerId,
+            )
+          ) {
+            return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+          }
           const now = dependencies.clock();
           const changed = dependencies.database
             .query(
@@ -655,7 +919,7 @@ export function createRunnerServices(dependencies: Dependencies) {
               input.data.localMappingId,
               now,
             );
-          return {
+          const result = {
             ok: true,
             value: mappingView({
               runner_id: input.data.runnerId,
@@ -665,7 +929,17 @@ export function createRunnerServices(dependencies: Dependencies) {
               created_at: now,
               revoked_at: null,
             }),
-          };
+          } as const;
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_MAPPING_REPLACED",
+            actorKind: "MEMBER",
+            actorId: owner.member.memberId,
+            subjectId: input.data.runnerId,
+            safeDetails: {
+              ownerMemberId: owner.member.memberId,
+              projectId: input.data.projectId,
+            },
+          });
         });
       } catch {
         return failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
@@ -676,6 +950,7 @@ export function createRunnerServices(dependencies: Dependencies) {
       const input = z
         .object({
           actor: MemberActorSchema,
+          idempotencyKey: IdentifierSchema,
           runnerId: IdentifierSchema,
           projectId: IdentifierSchema,
           expectedRevision: PositiveRevisionSchema,
@@ -683,34 +958,88 @@ export function createRunnerServices(dependencies: Dependencies) {
         .strict()
         .safeParse(command);
       if (!input.success) return failure("RUNNER_MAPPING_INVALID", "Runner mapping is invalid.");
-      if (!(await activeOwner(input.data.actor as MemberActor, input.data.runnerId))) {
+      const owner = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
+      if (!owner) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
-      const now = dependencies.clock();
-      const changed = dependencies.database
-        .query(
-          `UPDATE runner_mapping_versions SET revoked_at = ?
-           WHERE runner_id = ? AND project_id = ? AND revision = ? AND revoked_at IS NULL`,
-        )
-        .run(now, input.data.runnerId, input.data.projectId, input.data.expectedRevision);
-      if (changed.changes !== 1)
-        return failure("RUNNER_MAPPING_STALE", "Runner mapping revision is stale.");
-      const row = dependencies.database
-        .query<MappingRow, [string, string, number]>(
-          "SELECT * FROM runner_mapping_versions WHERE runner_id = ? AND project_id = ? AND revision = ?",
-        )
-        .get(input.data.runnerId, input.data.projectId, input.data.expectedRevision);
-      return row
-        ? { ok: true, value: mappingView(row) }
-        : failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
+      const ticket = await writeTicket(
+        "MAPPING_REVOKE",
+        owner.member.memberId,
+        input.data.idempotencyKey,
+        {
+          runnerId: input.data.runnerId,
+          projectId: input.data.projectId,
+          expectedRevision: input.data.expectedRevision,
+        },
+      );
+      const prior = replayWrite<RunnerMapping>(ticket);
+      if (prior) return prior;
+      return inImmediateTransaction(dependencies.database, () => {
+        const raced = replayWrite<RunnerMapping>(ticket);
+        if (raced) return raced;
+        if (
+          !revalidateOwner(
+            input.data.actor as MemberActor,
+            owner.member.proofHash,
+            input.data.runnerId,
+          )
+        ) {
+          return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+        }
+        const now = dependencies.clock();
+        const changed = dependencies.database
+          .query(
+            `UPDATE runner_mapping_versions SET revoked_at = ?
+             WHERE runner_id = ? AND project_id = ? AND revision = ? AND revoked_at IS NULL`,
+          )
+          .run(now, input.data.runnerId, input.data.projectId, input.data.expectedRevision);
+        if (changed.changes !== 1)
+          return failure("RUNNER_MAPPING_STALE", "Runner mapping revision is stale.");
+        const row = dependencies.database
+          .query<MappingRow, [string, string, number]>(
+            "SELECT * FROM runner_mapping_versions WHERE runner_id = ? AND project_id = ? AND revision = ?",
+          )
+          .get(input.data.runnerId, input.data.projectId, input.data.expectedRevision);
+        if (!row) return failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
+        const result = { ok: true as const, value: mappingView(row) };
+        return storeWrite(ticket, result, {
+          auditKind: "RUNNER_MAPPING_REVOKED",
+          actorKind: "MEMBER",
+          actorId: owner.member.memberId,
+          subjectId: input.data.runnerId,
+          safeDetails: {
+            ownerMemberId: owner.member.memberId,
+            projectId: input.data.projectId,
+          },
+        });
+      });
     },
 
     async advertiseProfile(command) {
       const input = ProfileSchema.safeParse(command);
       if (!input.success) return failure("RUNNER_PROFILE_INVALID", "Runner profile is invalid.");
-      if (!(await activeOwner(input.data.actor as MemberActor, input.data.runnerId))) {
+      const owner = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
+      if (!owner) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
+      const ticket = await writeTicket(
+        "PROFILE_ADVERTISE",
+        owner.member.memberId,
+        input.data.idempotencyKey,
+        {
+          runnerId: input.data.runnerId,
+          profileId: input.data.profileId,
+          expectedVersion: input.data.expectedVersion,
+          displayName: input.data.displayName,
+          adapter: input.data.adapter,
+          hosts: input.data.hosts,
+          interactions: input.data.interactions,
+          riskSummary: input.data.riskSummary,
+          fingerprint: input.data.fingerprint,
+        },
+      );
+      const prior = replayWrite<SafeProfileVersion>(ticket);
+      if (prior) return prior;
       const profileId = input.data.profileId ?? dependencies.id("profile");
       const version = input.data.expectedVersion === undefined ? 1 : input.data.expectedVersion + 1;
       if (input.data.expectedVersion !== undefined) {
@@ -723,47 +1052,71 @@ export function createRunnerServices(dependencies: Dependencies) {
           return failure("RUNNER_PROFILE_STALE", "Runner profile version is stale.", "SAME_INPUT");
         }
       }
-      const now = dependencies.clock();
       try {
-        dependencies.database
-          .query(
-            `INSERT INTO safe_profile_versions(
+        return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<SafeProfileVersion>(ticket);
+          if (raced) return raced;
+          if (
+            !revalidateOwner(
+              input.data.actor as MemberActor,
+              owner.member.proofHash,
+              input.data.runnerId,
+            )
+          ) {
+            return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+          }
+          const now = dependencies.clock();
+          dependencies.database
+            .query(
+              `INSERT INTO safe_profile_versions(
                runner_id, profile_id, version, display_name, adapter, supports_native,
                supports_orca, supports_headless, supports_interactive, risk_summary,
                fingerprint, created_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            input.data.runnerId,
-            profileId,
-            version,
-            input.data.displayName,
-            input.data.adapter,
-            input.data.hosts.includes("NATIVE") ? 1 : 0,
-            input.data.hosts.includes("ORCA") ? 1 : 0,
-            input.data.interactions.includes("HEADLESS") ? 1 : 0,
-            input.data.interactions.includes("INTERACTIVE") ? 1 : 0,
-            input.data.riskSummary,
-            input.data.fingerprint,
-            now,
-          );
-        return {
-          ok: true,
-          value: profileView({
-            runner_id: input.data.runnerId,
-            profile_id: profileId,
-            version,
-            display_name: input.data.displayName,
-            adapter: input.data.adapter,
-            supports_native: input.data.hosts.includes("NATIVE") ? 1 : 0,
-            supports_orca: input.data.hosts.includes("ORCA") ? 1 : 0,
-            supports_headless: input.data.interactions.includes("HEADLESS") ? 1 : 0,
-            supports_interactive: input.data.interactions.includes("INTERACTIVE") ? 1 : 0,
-            risk_summary: input.data.riskSummary,
-            fingerprint: input.data.fingerprint,
-            created_at: now,
-          }),
-        };
+            )
+            .run(
+              input.data.runnerId,
+              profileId,
+              version,
+              input.data.displayName,
+              input.data.adapter,
+              input.data.hosts.includes("NATIVE") ? 1 : 0,
+              input.data.hosts.includes("ORCA") ? 1 : 0,
+              input.data.interactions.includes("HEADLESS") ? 1 : 0,
+              input.data.interactions.includes("INTERACTIVE") ? 1 : 0,
+              input.data.riskSummary,
+              input.data.fingerprint,
+              now,
+            );
+          const result = {
+            ok: true as const,
+            value: profileView({
+              runner_id: input.data.runnerId,
+              profile_id: profileId,
+              version,
+              display_name: input.data.displayName,
+              adapter: input.data.adapter,
+              supports_native: input.data.hosts.includes("NATIVE") ? 1 : 0,
+              supports_orca: input.data.hosts.includes("ORCA") ? 1 : 0,
+              supports_headless: input.data.interactions.includes("HEADLESS") ? 1 : 0,
+              supports_interactive: input.data.interactions.includes("INTERACTIVE") ? 1 : 0,
+              risk_summary: input.data.riskSummary,
+              fingerprint: input.data.fingerprint,
+              created_at: now,
+            }),
+          };
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_PROFILE_ADVERTISED",
+            actorKind: "MEMBER",
+            actorId: owner.member.memberId,
+            subjectId: input.data.runnerId,
+            safeDetails: {
+              ownerMemberId: owner.member.memberId,
+              profileId,
+              version,
+            },
+          });
+        });
       } catch {
         return failure("RUNNER_PROFILE_FAILED", "Runner profile failed.");
       }
@@ -791,21 +1144,19 @@ export function createRunnerServices(dependencies: Dependencies) {
     },
 
     async acknowledgeExposure(command) {
-      const input = SubjectSchema.extend({ actor: MemberActorSchema, expectedDigest: Sha256Schema })
+      const input = SubjectSchema.extend({
+        idempotencyKey: IdentifierSchema,
+        actor: MemberActorSchema,
+        expectedDigest: Sha256Schema,
+      })
         .strict()
         .safeParse(command);
       if (!input.success)
         return failure("RUNNER_ACKNOWLEDGEMENT_INVALID", "Runner acknowledgement is invalid.");
-      if (!(await activeOwner(input.data.actor as MemberActor, input.data.runnerId))) {
+      const authority = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
+      if (!authority) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
-      const current = currentSubject(
-        input.data.runnerId,
-        input.data.projectId,
-        input.data.mappingRevision,
-        input.data.profileId,
-        input.data.profileVersion,
-      );
       const submitted = SubjectSchema.parse({
         runnerId: input.data.runnerId,
         ownerMemberId: input.data.ownerMemberId,
@@ -818,53 +1169,95 @@ export function createRunnerServices(dependencies: Dependencies) {
         securityPolicyVersion: input.data.securityPolicyVersion,
         securityDigest: input.data.securityDigest,
       });
-      if (!current || JSON.stringify(current) !== JSON.stringify(submitted)) {
-        return failure("RUNNER_ACKNOWLEDGEMENT_STALE", "Runner acknowledgement facts are stale.");
-      }
-      const text = exposureAcknowledgementText(current);
-      const expected = exposureAcknowledgementDigest(current, text);
-      if (expected !== input.data.expectedDigest) {
-        return failure(
-          "RUNNER_ACKNOWLEDGEMENT_DIGEST_MISMATCH",
-          "Runner acknowledgement digest does not match.",
-        );
-      }
+      const ticket = await writeTicket(
+        "EXPOSURE_ACKNOWLEDGE",
+        authority.member.memberId,
+        input.data.idempotencyKey,
+        { ...submitted, expectedDigest: input.data.expectedDigest },
+      );
+      const prior = replayWrite<ExposureAcknowledgement>(ticket);
+      if (prior) return prior;
       const id = dependencies.id("runner_ack");
-      const now = dependencies.clock();
       try {
-        dependencies.database
-          .query(
-            `INSERT INTO runner_exposure_acknowledgements(
-               id, version, runner_id, owner_member_id, project_id, mapping_revision,
-               profile_id, profile_version, profile_fingerprint, policy_revision,
-               security_policy_version, security_digest, acknowledgement_text,
-               acknowledgement_digest, accepted_at
-             ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            id,
-            current.runnerId,
-            current.ownerMemberId,
-            current.projectId,
-            current.mappingRevision,
-            current.profileId,
-            current.profileVersion,
-            current.profileFingerprint,
-            current.policyRevision,
-            current.securityPolicyVersion,
-            current.securityDigest,
-            text,
-            expected,
-            now,
+        return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<ExposureAcknowledgement>(ticket);
+          if (raced) return raced;
+          if (
+            !revalidateOwner(
+              input.data.actor as MemberActor,
+              authority.member.proofHash,
+              input.data.runnerId,
+            )
+          ) {
+            return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+          }
+          const current = currentSubject(
+            input.data.runnerId,
+            input.data.projectId,
+            input.data.mappingRevision,
+            input.data.profileId,
+            input.data.profileVersion,
           );
-        const row = dependencies.database
-          .query<AcknowledgementRow, [string]>(
-            "SELECT * FROM runner_exposure_acknowledgements WHERE id = ?",
-          )
-          .get(id);
-        return row
-          ? { ok: true, value: acknowledgementView(row) }
-          : failure("RUNNER_ACKNOWLEDGEMENT_FAILED", "Runner acknowledgement failed.");
+          if (!current || JSON.stringify(current) !== JSON.stringify(submitted)) {
+            return failure(
+              "RUNNER_ACKNOWLEDGEMENT_STALE",
+              "Runner acknowledgement facts are stale.",
+            );
+          }
+          const text = exposureAcknowledgementText(current);
+          const expected = exposureAcknowledgementDigest(current, text);
+          if (expected !== input.data.expectedDigest) {
+            return failure(
+              "RUNNER_ACKNOWLEDGEMENT_DIGEST_MISMATCH",
+              "Runner acknowledgement digest does not match.",
+            );
+          }
+          const now = dependencies.clock();
+          dependencies.database
+            .query(
+              `INSERT INTO runner_exposure_acknowledgements(
+                 id, version, runner_id, owner_member_id, project_id, mapping_revision,
+                 profile_id, profile_version, profile_fingerprint, policy_revision,
+                 security_policy_version, security_digest, acknowledgement_text,
+                 acknowledgement_digest, accepted_at
+               ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              id,
+              current.runnerId,
+              current.ownerMemberId,
+              current.projectId,
+              current.mappingRevision,
+              current.profileId,
+              current.profileVersion,
+              current.profileFingerprint,
+              current.policyRevision,
+              current.securityPolicyVersion,
+              current.securityDigest,
+              text,
+              expected,
+              now,
+            );
+          const row = dependencies.database
+            .query<AcknowledgementRow, [string]>(
+              "SELECT * FROM runner_exposure_acknowledgements WHERE id = ?",
+            )
+            .get(id);
+          if (!row) {
+            return failure("RUNNER_ACKNOWLEDGEMENT_FAILED", "Runner acknowledgement failed.");
+          }
+          const result = { ok: true as const, value: acknowledgementView(row) };
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_EXPOSURE_ACKNOWLEDGED",
+            actorKind: "MEMBER",
+            actorId: authority.member.memberId,
+            subjectId: input.data.runnerId,
+            safeDetails: {
+              ownerMemberId: authority.member.memberId,
+              projectId: input.data.projectId,
+            },
+          });
+        });
       } catch {
         return failure("RUNNER_ACKNOWLEDGEMENT_FAILED", "Runner acknowledgement failed.");
       }
@@ -872,7 +1265,12 @@ export function createRunnerServices(dependencies: Dependencies) {
 
     async revokeAcknowledgement(command) {
       const input = z
-        .object({ actor: MemberActorSchema, acknowledgementId: IdentifierSchema })
+        .object({
+          idempotencyKey: IdentifierSchema,
+          actor: MemberActorSchema,
+          acknowledgementId: IdentifierSchema,
+          expectedVersion: PositiveRevisionSchema,
+        })
         .strict()
         .safeParse(command);
       if (!input.success)
@@ -882,21 +1280,65 @@ export function createRunnerServices(dependencies: Dependencies) {
           "SELECT * FROM runner_exposure_acknowledgements WHERE id = ?",
         )
         .get(input.data.acknowledgementId);
-      if (!row || !(await activeOwner(input.data.actor as MemberActor, row.runner_id))) {
+      const authority = row
+        ? await activeOwner(input.data.actor as MemberActor, row.runner_id)
+        : null;
+      if (!row || !authority) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
-      const now = dependencies.clock();
-      dependencies.database
-        .query(
-          "UPDATE runner_exposure_acknowledgements SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-        )
-        .run(now, row.id);
-      return { ok: true, value: acknowledgementView({ ...row, revoked_at: now }) };
+      const ticket = await writeTicket(
+        "EXPOSURE_ACKNOWLEDGEMENT_REVOKE",
+        authority.member.memberId,
+        input.data.idempotencyKey,
+        {
+          acknowledgementId: input.data.acknowledgementId,
+          expectedVersion: input.data.expectedVersion,
+        },
+      );
+      const prior = replayWrite<ExposureAcknowledgement>(ticket);
+      if (prior) return prior;
+      return inImmediateTransaction(dependencies.database, () => {
+        const raced = replayWrite<ExposureAcknowledgement>(ticket);
+        if (raced) return raced;
+        if (
+          !revalidateOwner(
+            input.data.actor as MemberActor,
+            authority.member.proofHash,
+            row.runner_id,
+          )
+        ) {
+          return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+        }
+        const now = dependencies.clock();
+        const changed = dependencies.database
+          .query(
+            "UPDATE runner_exposure_acknowledgements SET revoked_at = ? WHERE id = ? AND version = ? AND revoked_at IS NULL",
+          )
+          .run(now, row.id, input.data.expectedVersion);
+        if (changed.changes !== 1) {
+          return failure("RUNNER_ACKNOWLEDGEMENT_STALE", "Runner acknowledgement facts are stale.");
+        }
+        const result = {
+          ok: true as const,
+          value: acknowledgementView({ ...row, revoked_at: now }),
+        };
+        return storeWrite(ticket, result, {
+          auditKind: "RUNNER_EXPOSURE_ACKNOWLEDGEMENT_REVOKED",
+          actorKind: "MEMBER",
+          actorId: authority.member.memberId,
+          subjectId: row.runner_id,
+          safeDetails: { ownerMemberId: authority.member.memberId, acknowledgementId: row.id },
+        });
+      });
     },
 
     async createExposure(command) {
       const input = z
-        .object({ actor: MemberActorSchema, acknowledgementId: IdentifierSchema })
+        .object({
+          idempotencyKey: IdentifierSchema,
+          actor: MemberActorSchema,
+          acknowledgementId: IdentifierSchema,
+        })
         .strict()
         .safeParse(command);
       if (!input.success) return failure("RUNNER_EXPOSURE_INVALID", "Runner exposure is invalid.");
@@ -905,72 +1347,98 @@ export function createRunnerServices(dependencies: Dependencies) {
           "SELECT * FROM runner_exposure_acknowledgements WHERE id = ?",
         )
         .get(input.data.acknowledgementId);
-      if (
-        !acknowledgement ||
-        !(await activeOwner(input.data.actor as MemberActor, acknowledgement.runner_id))
-      ) {
+      const authority = acknowledgement
+        ? await activeOwner(input.data.actor as MemberActor, acknowledgement.runner_id)
+        : null;
+      if (!acknowledgement || !authority) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
-      const current = currentSubject(
-        acknowledgement.runner_id,
-        acknowledgement.project_id,
-        acknowledgement.mapping_revision,
-        acknowledgement.profile_id,
-        acknowledgement.profile_version,
+      const ticket = await writeTicket(
+        "EXPOSURE_CREATE",
+        authority.member.memberId,
+        input.data.idempotencyKey,
+        { acknowledgementId: input.data.acknowledgementId },
       );
-      const runner = runnerById(acknowledgement.runner_id);
-      if (
-        acknowledgement.revoked_at !== null ||
-        !current ||
-        JSON.stringify(current) !==
-          JSON.stringify({
-            runnerId: acknowledgement.runner_id,
-            ownerMemberId: acknowledgement.owner_member_id,
-            projectId: acknowledgement.project_id,
-            mappingRevision: acknowledgement.mapping_revision,
-            profileId: acknowledgement.profile_id,
-            profileVersion: acknowledgement.profile_version,
-            profileFingerprint: acknowledgement.profile_fingerprint,
-            policyRevision: acknowledgement.policy_revision,
-            securityPolicyVersion: acknowledgement.security_policy_version,
-            securityDigest: acknowledgement.security_digest,
-          }) ||
-        runner?.dispatch_audience !== "TEAM"
-      ) {
-        return failure("RUNNER_EXPOSURE_STALE", "Runner exposure facts are stale.");
-      }
+      const prior = replayWrite<TeamDispatchExposure>(ticket);
+      if (prior) return prior;
       const id = dependencies.id("runner_exposure");
-      const now = dependencies.clock();
       try {
-        dependencies.database
-          .query(
-            `INSERT INTO runner_exposures(
-               id, runner_id, owner_member_id, project_id, mapping_revision, profile_id,
-               profile_version, profile_fingerprint, policy_revision, security_policy_version,
-               security_digest, acknowledgement_id, revision, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-          )
-          .run(
-            id,
+        return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<TeamDispatchExposure>(ticket);
+          if (raced) return raced;
+          const runner = revalidateOwner(
+            input.data.actor as MemberActor,
+            authority.member.proofHash,
             acknowledgement.runner_id,
-            acknowledgement.owner_member_id,
+          );
+          const current = currentSubject(
+            acknowledgement.runner_id,
             acknowledgement.project_id,
             acknowledgement.mapping_revision,
             acknowledgement.profile_id,
             acknowledgement.profile_version,
-            acknowledgement.profile_fingerprint,
-            acknowledgement.policy_revision,
-            acknowledgement.security_policy_version,
-            acknowledgement.security_digest,
-            acknowledgement.id,
-            now,
           );
-        const row = dependencies.database
-          .query<ExposureRow, [string]>("SELECT * FROM runner_exposures WHERE id = ?")
-          .get(id);
-        return row
-          ? { ok: true, value: exposureView(row) }
-          : failure("RUNNER_EXPOSURE_FAILED", "Runner exposure failed.");
+          if (
+            !runner ||
+            acknowledgement.revoked_at !== null ||
+            !current ||
+            JSON.stringify(current) !==
+              JSON.stringify({
+                runnerId: acknowledgement.runner_id,
+                ownerMemberId: acknowledgement.owner_member_id,
+                projectId: acknowledgement.project_id,
+                mappingRevision: acknowledgement.mapping_revision,
+                profileId: acknowledgement.profile_id,
+                profileVersion: acknowledgement.profile_version,
+                profileFingerprint: acknowledgement.profile_fingerprint,
+                policyRevision: acknowledgement.policy_revision,
+                securityPolicyVersion: acknowledgement.security_policy_version,
+                securityDigest: acknowledgement.security_digest,
+              }) ||
+            runner.dispatch_audience !== "TEAM"
+          ) {
+            return failure("RUNNER_EXPOSURE_STALE", "Runner exposure facts are stale.");
+          }
+          const now = dependencies.clock();
+          dependencies.database
+            .query(
+              `INSERT INTO runner_exposures(
+                 id, runner_id, owner_member_id, project_id, mapping_revision, profile_id,
+                 profile_version, profile_fingerprint, policy_revision, security_policy_version,
+                 security_digest, acknowledgement_id, revision, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+            )
+            .run(
+              id,
+              acknowledgement.runner_id,
+              acknowledgement.owner_member_id,
+              acknowledgement.project_id,
+              acknowledgement.mapping_revision,
+              acknowledgement.profile_id,
+              acknowledgement.profile_version,
+              acknowledgement.profile_fingerprint,
+              acknowledgement.policy_revision,
+              acknowledgement.security_policy_version,
+              acknowledgement.security_digest,
+              acknowledgement.id,
+              now,
+            );
+          const row = dependencies.database
+            .query<ExposureRow, [string]>("SELECT * FROM runner_exposures WHERE id = ?")
+            .get(id);
+          if (!row) return failure("RUNNER_EXPOSURE_FAILED", "Runner exposure failed.");
+          const result = { ok: true as const, value: exposureView(row) };
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_EXPOSURE_CREATED",
+            actorKind: "MEMBER",
+            actorId: authority.member.memberId,
+            subjectId: acknowledgement.runner_id,
+            safeDetails: {
+              ownerMemberId: authority.member.memberId,
+              projectId: acknowledgement.project_id,
+            },
+          });
+        });
       } catch {
         return failure("RUNNER_EXPOSURE_FAILED", "Runner exposure failed.");
       }
@@ -980,6 +1448,7 @@ export function createRunnerServices(dependencies: Dependencies) {
       const input = z
         .object({
           actor: MemberActorSchema,
+          idempotencyKey: IdentifierSchema,
           exposureId: IdentifierSchema,
           expectedRevision: PositiveRevisionSchema,
         })
@@ -989,23 +1458,59 @@ export function createRunnerServices(dependencies: Dependencies) {
       const row = dependencies.database
         .query<ExposureRow, [string]>("SELECT * FROM runner_exposures WHERE id = ?")
         .get(input.data.exposureId);
-      if (!row || !(await activeOwner(input.data.actor as MemberActor, row.runner_id))) {
+      const authority = row
+        ? await activeOwner(input.data.actor as MemberActor, row.runner_id)
+        : null;
+      if (!row || !authority) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
-      const now = dependencies.clock();
-      const changed = dependencies.database
-        .query(
-          "UPDATE runner_exposures SET revoked_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND revoked_at IS NULL",
-        )
-        .run(now, row.id, input.data.expectedRevision);
-      return changed.changes === 1
-        ? { ok: true, value: exposureView({ ...row, revision: row.revision + 1, revoked_at: now }) }
-        : failure("RUNNER_EXPOSURE_STALE", "Runner exposure revision is stale.");
+      const ticket = await writeTicket(
+        "EXPOSURE_REVOKE",
+        authority.member.memberId,
+        input.data.idempotencyKey,
+        { exposureId: input.data.exposureId, expectedRevision: input.data.expectedRevision },
+      );
+      const prior = replayWrite<TeamDispatchExposure>(ticket);
+      if (prior) return prior;
+      return inImmediateTransaction(dependencies.database, () => {
+        const raced = replayWrite<TeamDispatchExposure>(ticket);
+        if (raced) return raced;
+        if (
+          !revalidateOwner(
+            input.data.actor as MemberActor,
+            authority.member.proofHash,
+            row.runner_id,
+          )
+        ) {
+          return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+        }
+        const now = dependencies.clock();
+        const changed = dependencies.database
+          .query(
+            "UPDATE runner_exposures SET revoked_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND revoked_at IS NULL",
+          )
+          .run(now, row.id, input.data.expectedRevision);
+        if (changed.changes !== 1) {
+          return failure("RUNNER_EXPOSURE_STALE", "Runner exposure revision is stale.");
+        }
+        const result = {
+          ok: true as const,
+          value: exposureView({ ...row, revision: row.revision + 1, revoked_at: now }),
+        };
+        return storeWrite(ticket, result, {
+          auditKind: "RUNNER_EXPOSURE_REVOKED",
+          actorKind: "MEMBER",
+          actorId: authority.member.memberId,
+          subjectId: row.runner_id,
+          safeDetails: { ownerMemberId: authority.member.memberId, exposureId: row.id },
+        });
+      });
     },
 
     async heartbeat(command) {
       const input = z
         .object({
+          idempotencyKey: IdentifierSchema,
           principal: z
             .object({
               kind: z.literal("VERIFIED_RUNNER"),
@@ -1022,26 +1527,61 @@ export function createRunnerServices(dependencies: Dependencies) {
       if (!input.success || dependencies.clock() >= input.data.principal.accessExpiresAt) {
         return failure("RUNNER_AUTHENTICATION_INVALID", "Runner authentication is invalid.");
       }
-      const now = dependencies.clock();
-      const changed = dependencies.database
-        .query(
-          `UPDATE runners SET last_heartbeat_at = ?
-           WHERE id = ? AND runner_epoch = ? AND owner_member_id = ? AND revoked_at IS NULL`,
-        )
-        .run(
-          now,
-          input.data.principal.runnerId,
-          input.data.principal.runnerEpoch,
-          input.data.principal.ownerMemberId,
-        );
-      return changed.changes === 1
-        ? { ok: true, value: inspectLease(input.data.principal.runnerId) }
-        : failure("RUNNER_AUTHENTICATION_INVALID", "Runner authentication is invalid.");
+      const ticket = await writeTicket(
+        "HEARTBEAT",
+        input.data.principal.runnerId,
+        input.data.idempotencyKey,
+        {
+          runnerId: input.data.principal.runnerId,
+          runnerEpoch: input.data.principal.runnerEpoch,
+          accessExpiresAt: input.data.principal.accessExpiresAt,
+        },
+      );
+      const prior = replayWrite<RunnerLeaseView>(ticket);
+      if (prior) return prior;
+      return inImmediateTransaction(dependencies.database, () => {
+        const raced = replayWrite<RunnerLeaseView>(ticket);
+        if (raced) return raced;
+        const now = dependencies.clock();
+        if (now >= input.data.principal.accessExpiresAt) {
+          return failure("RUNNER_AUTHENTICATION_INVALID", "Runner authentication is invalid.");
+        }
+        const changed = dependencies.database
+          .query(
+            `UPDATE runners SET last_heartbeat_at = ?
+             WHERE id = ? AND runner_epoch = ? AND owner_member_id = ? AND revoked_at IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM members
+                 WHERE members.id = runners.owner_member_id AND members.status = 'ACTIVE'
+               )`,
+          )
+          .run(
+            now,
+            input.data.principal.runnerId,
+            input.data.principal.runnerEpoch,
+            input.data.principal.ownerMemberId,
+          );
+        if (changed.changes !== 1) {
+          return failure("RUNNER_AUTHENTICATION_INVALID", "Runner authentication is invalid.");
+        }
+        const result = { ok: true as const, value: inspectLease(input.data.principal.runnerId) };
+        return storeWrite(ticket, result, {
+          auditKind: "RUNNER_HEARTBEAT_ACCEPTED",
+          actorKind: "RUNNER",
+          actorId: input.data.principal.runnerId,
+          subjectId: input.data.principal.runnerId,
+          safeDetails: {
+            ownerMemberId: input.data.principal.ownerMemberId,
+            runnerEpoch: input.data.principal.runnerEpoch,
+          },
+        });
+      });
     },
 
     async revoke(command) {
       const input = z
         .object({
+          idempotencyKey: IdentifierSchema,
           actor: MemberActorSchema,
           runnerId: IdentifierSchema,
           expectedRunnerEpoch: PositiveRevisionSchema,
@@ -1050,12 +1590,32 @@ export function createRunnerServices(dependencies: Dependencies) {
         .safeParse(command);
       if (!input.success)
         return failure("RUNNER_REVOCATION_INVALID", "Runner revocation is invalid.");
-      if (!(await activeOwner(input.data.actor as MemberActor, input.data.runnerId))) {
+      const owner = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
+      if (!owner) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
+      const ticket = await writeTicket(
+        "RUNNER_REVOKE",
+        owner.member.memberId,
+        input.data.idempotencyKey,
+        { runnerId: input.data.runnerId, expectedRunnerEpoch: input.data.expectedRunnerEpoch },
+      );
+      const prior = replayWrite<RunnerRevocation>(ticket);
+      if (prior) return prior;
       const now = dependencies.clock();
       try {
         return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<RunnerRevocation>(ticket);
+          if (raced) return raced;
+          if (
+            !revalidateOwner(
+              input.data.actor as MemberActor,
+              owner.member.proofHash,
+              input.data.runnerId,
+            )
+          ) {
+            return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+          }
           const nextEpoch = input.data.expectedRunnerEpoch + 1;
           const changed = dependencies.database
             .query(
@@ -1079,7 +1639,7 @@ export function createRunnerServices(dependencies: Dependencies) {
                ) VALUES (?, ?, 'DIRECT_REVOCATION', ?, 'PENDING', ?)`,
             )
             .run(dependencies.id("runner_authority"), input.data.runnerId, nextEpoch, now);
-          return {
+          const result = {
             ok: true,
             value: {
               runnerId: input.data.runnerId as RegisteredRunnerId,
@@ -1087,7 +1647,17 @@ export function createRunnerServices(dependencies: Dependencies) {
               disposition: "REVOKED" as const,
               revokedAt: now,
             },
-          };
+          } as const;
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_REVOKED",
+            actorKind: "MEMBER",
+            actorId: owner.member.memberId,
+            subjectId: input.data.runnerId,
+            safeDetails: {
+              ownerMemberId: owner.member.memberId,
+              runnerEpoch: nextEpoch,
+            },
+          });
         });
       } catch {
         return failure("RUNNER_REVOCATION_FAILED", "Runner revocation failed.");
@@ -1110,15 +1680,80 @@ export function createRunnerServices(dependencies: Dependencies) {
       if (!input.success)
         return failure("RUNNER_ELIGIBILITY_INVALID", "Runner eligibility input is invalid.");
       const member = await memberAuthority(input.data.actor as MemberActor);
+      if (!member) return failure("RUNNER_NOT_OWNED_OR_EXPOSED", "Runner is not owned or exposed.");
+      const owner = Boolean(
+        dependencies.database
+          .query<{ id: string }, [string, string]>(
+            "SELECT id FROM runners WHERE id = ? AND owner_member_id = ?",
+          )
+          .get(input.data.runnerId, member.memberId),
+      );
+      if (!owner) {
+        const exposed = dependencies.database
+          .query<{ id: string }, [string, string, number, string, number, string, string]>(
+            `SELECT exposures.id FROM runner_exposures AS exposures
+             JOIN runners ON runners.id = exposures.runner_id
+             JOIN runner_mapping_versions AS mappings
+               ON mappings.runner_id = exposures.runner_id
+              AND mappings.project_id = exposures.project_id
+              AND mappings.revision = exposures.mapping_revision
+             JOIN safe_profile_versions AS profiles
+               ON profiles.runner_id = exposures.runner_id
+              AND profiles.profile_id = exposures.profile_id
+              AND profiles.version = exposures.profile_version
+             JOIN runner_exposure_acknowledgements AS acknowledgements
+               ON acknowledgements.id = exposures.acknowledgement_id
+             WHERE exposures.runner_id = ? AND exposures.project_id = ?
+               AND exposures.mapping_revision = ? AND exposures.profile_id = ?
+               AND exposures.profile_version = ? AND exposures.revoked_at IS NULL
+               AND mappings.revoked_at IS NULL AND acknowledgements.revoked_at IS NULL
+               AND runners.revoked_at IS NULL AND runners.dispatch_audience = 'TEAM'
+               AND exposures.owner_member_id = runners.owner_member_id
+               AND exposures.policy_revision = runners.policy_revision
+               AND exposures.security_policy_version = runners.security_policy_version
+               AND exposures.security_digest = runners.security_digest
+               AND acknowledgements.runner_id = exposures.runner_id
+               AND acknowledgements.owner_member_id = exposures.owner_member_id
+               AND acknowledgements.project_id = exposures.project_id
+               AND acknowledgements.mapping_revision = exposures.mapping_revision
+               AND acknowledgements.profile_id = exposures.profile_id
+               AND acknowledgements.profile_version = exposures.profile_version
+               AND acknowledgements.profile_fingerprint = exposures.profile_fingerprint
+               AND acknowledgements.policy_revision = exposures.policy_revision
+               AND acknowledgements.security_policy_version = exposures.security_policy_version
+               AND acknowledgements.security_digest = exposures.security_digest
+               AND profiles.fingerprint = exposures.profile_fingerprint
+               AND NOT EXISTS (
+                 SELECT 1 FROM safe_profile_versions AS newer
+                 WHERE newer.runner_id = profiles.runner_id
+                   AND newer.profile_id = profiles.profile_id
+                   AND newer.version > profiles.version
+               )
+               AND (? = '' OR exposures.id = ?)`,
+          )
+          .get(
+            input.data.runnerId,
+            input.data.projectId,
+            input.data.mappingRevision,
+            input.data.profileId,
+            input.data.profileVersion,
+            input.data.exposureId ?? "",
+            input.data.exposureId ?? "",
+          );
+        if (!exposed) {
+          return failure("RUNNER_NOT_OWNED_OR_EXPOSED", "Runner is not owned or exposed.");
+        }
+      }
       const runner = runnerById(input.data.runnerId);
-      if (!member || !runner)
+      if (!runner) {
         return failure("RUNNER_NOT_OWNED_OR_EXPOSED", "Runner is not owned or exposed.");
-      const owner = runner.owner_member_id === member.memberId;
+      }
       const exposure = dependencies.database
         .query<ExposureRow, [string, string, number, string, number]>(
           `SELECT * FROM runner_exposures
            WHERE runner_id = ? AND project_id = ? AND mapping_revision = ?
              AND profile_id = ? AND profile_version = ?
+             ${owner ? "" : "AND revoked_at IS NULL"}
            ORDER BY revision DESC LIMIT 1`,
         )
         .get(

@@ -63,4 +63,60 @@ describe("runner authentication", () => {
       fixture.close();
     }
   });
+
+  test("scopes replay to the sender and purges expired replay rows", async () => {
+    const fixture = createRunnerFixture();
+    try {
+      const first = await fixture.pair("member_a");
+      const second = await fixture.pair("member_b");
+      const firstAccess = await fixture.authentication.exchangeCredential({
+        runnerCredential: first.runnerCredential,
+        keyProof: `possession:${first.keyThumbprint}`,
+      });
+      const secondAccess = await fixture.authentication.exchangeCredential({
+        runnerCredential: second.runnerCredential,
+        keyProof: `possession:${second.keyThumbprint}`,
+      });
+      if (!firstAccess.ok || !secondAccess.ok) throw new Error("access issue failed");
+      for (const access of [firstAccess.value, secondAccess.value]) {
+        expect(
+          await fixture.authentication.authenticateAccess({
+            accessToken: access.accessToken,
+            proof: "dpop:shared_jti",
+            nonce: access.nonce,
+            method: "GET",
+            uri: "https://collab.test/runner/v1",
+          }),
+        ).toMatchObject({ ok: true });
+      }
+      expect(
+        fixture.database
+          .query<{ count: number }, []>("SELECT count(*) AS count FROM dpop_replays")
+          .get(),
+      ).toEqual({ count: 2 });
+
+      fixture.setNow(fixture.now() + 601);
+      const refreshed = await fixture.authentication.exchangeCredential({
+        runnerCredential: first.runnerCredential,
+        keyProof: `possession:${first.keyThumbprint}`,
+      });
+      if (!refreshed.ok) throw new Error(refreshed.error.code);
+      expect(
+        await fixture.authentication.authenticateAccess({
+          accessToken: refreshed.value.accessToken,
+          proof: "dpop:fresh_jti",
+          nonce: refreshed.value.nonce,
+          method: "GET",
+          uri: "https://collab.test/runner/v1",
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        fixture.database
+          .query<{ count: number }, []>("SELECT count(*) AS count FROM dpop_replays")
+          .get(),
+      ).toEqual({ count: 1 });
+    } finally {
+      fixture.close();
+    }
+  });
 });

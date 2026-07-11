@@ -3,11 +3,7 @@ import foundationMigration from "./migrations/0001_foundation.sql" with { type: 
 import projectsMigration from "./migrations/0002_projects.sql" with { type: "text" };
 import { verifyProjectsTableSchema } from "./migrations/0002_projects.verify.ts";
 import runnersMigration from "./migrations/0003_runners.sql" with { type: "text" };
-import {
-  RUNNER_INDEXES,
-  RUNNER_TABLES,
-  RUNNER_TRIGGERS,
-} from "./migrations/0003_runners.verify.ts";
+import { verifyRunnersSchema } from "./migrations/0003_runners.verify.ts";
 import runsAuthorityMigration from "./migrations/0004_runs_authority.sql" with { type: "text" };
 import { verifyRunsAuthoritySchema } from "./migrations/0004_runs_authority.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
@@ -96,19 +92,7 @@ function validateClaimedSchema(database: Database, version: number): void {
     verifyProjectsTableSchema(database);
   }
   if (version >= 3) {
-    const triggers = new Set(
-      database
-        .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'trigger'")
-        .all()
-        .map((row) => row.name),
-    );
-    if (
-      RUNNER_TABLES.some((table) => !tables.has(table)) ||
-      RUNNER_INDEXES.some((index) => !indexes.has(index)) ||
-      RUNNER_TRIGGERS.some((trigger) => !triggers.has(trigger))
-    ) {
-      throw new Error("SCHEMA_INTEGRITY_INVALID");
-    }
+    verifyRunnersSchema(database);
   }
   if (version >= 4) {
     verifyRunsAuthoritySchema(database);

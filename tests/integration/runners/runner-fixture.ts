@@ -35,12 +35,20 @@ export function createRunnerFixture() {
   `);
   let now = 1_000;
   let sequence = 0;
+  let beforeDigest: ((value: string) => void) | undefined;
+  let beforeClock: (() => void) | undefined;
   const services = createRunnerServices({
     database,
-    clock: () => now,
+    clock: () => {
+      beforeClock?.();
+      return now;
+    },
     id: (prefix) => `${prefix}_${++sequence}`,
     randomSecret: (prefix) => `${prefix}_${String(++sequence).padStart(40, "x")}`,
-    digest: async (value) => hash(value),
+    digest: async (value) => {
+      beforeDigest?.(value);
+      return hash(value);
+    },
     defaultSecurityDigest: "0".repeat(64),
     runnerKeyProof: {
       async verifyNewKey(input) {
@@ -102,18 +110,24 @@ export function createRunnerFixture() {
       deviceFamilyId: `family_${memberId}`,
       deviceId: `device_${memberId}`,
       senderKeyThumbprint: `device_thumb_${memberId}`,
+      expiresAt: 10_000,
     }) as never;
 
   async function pair(memberId: "member_a" | "member_b") {
-    const begun = await services.registry.beginPairing({ principal: device(memberId) });
+    const begun = await services.registry.beginPairing({
+      idempotencyKey: `pair_begin_${memberId}_${++sequence}`,
+      principal: device(memberId),
+    });
     if (!begun.ok) throw new Error(begun.error.code);
     const confirmed = await services.registry.confirmPairing({
+      idempotencyKey: `pair_confirm_${memberId}_${++sequence}`,
       actor: actor(memberId),
       pairingId: begun.value.pairingId,
     });
     if (!confirmed.ok) throw new Error(confirmed.error.code);
     const keyId = `key_${memberId}`;
     const consumed = await services.registry.consumePairing({
+      idempotencyKey: `pair_consume_${memberId}_${++sequence}`,
       pairingSecret: begun.value.pairingSecret,
       keyId,
       keyProof: `new:${keyId}`,
@@ -124,6 +138,7 @@ export function createRunnerFixture() {
 
   async function expose(runnerId: RegisteredRunnerId) {
     const mapping = await services.registry.registerMapping({
+      idempotencyKey: `mapping_register_${++sequence}`,
       actor: actor("member_a"),
       runnerId,
       projectId: "project_1" as never,
@@ -131,6 +146,7 @@ export function createRunnerFixture() {
     });
     if (!mapping.ok) throw new Error(mapping.error.code);
     const profile = await services.registry.advertiseProfile({
+      idempotencyKey: `profile_advertise_${++sequence}`,
       actor: actor("member_a"),
       runnerId,
       displayName: "Safe profile",
@@ -157,12 +173,14 @@ export function createRunnerFixture() {
     });
     if (!preview.ok) throw new Error(preview.error.code);
     const acknowledgement = await services.registry.acknowledgeExposure({
+      idempotencyKey: `exposure_ack_${++sequence}`,
       actor: actor("member_a"),
       ...preview.value.subject,
       expectedDigest: preview.value.digest,
     });
     if (!acknowledgement.ok) throw new Error(acknowledgement.error.code);
     const exposure = await services.registry.createExposure({
+      idempotencyKey: `exposure_create_${++sequence}`,
       actor: actor("member_a"),
       acknowledgementId: acknowledgement.value.id,
     });
@@ -205,6 +223,12 @@ export function createRunnerFixture() {
     now: () => now,
     setNow(value: number) {
       now = value;
+    },
+    setBeforeDigest(value: ((input: string) => void) | undefined) {
+      beforeDigest = value;
+    },
+    setBeforeClock(value: (() => void) | undefined) {
+      beforeClock = value;
     },
     close() {
       database.close();
