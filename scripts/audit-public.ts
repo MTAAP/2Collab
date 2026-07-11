@@ -12,6 +12,7 @@ const root = resolve(import.meta.dir, "..");
 const canonicalProductSpec = "docs/product/PRODUCT-SPEC.md";
 const ignoredDirectories = new Set([
   ".git",
+  ".superpowers",
   "coverage",
   "data",
   "dist",
