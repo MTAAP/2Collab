@@ -1248,17 +1248,27 @@ git commit -m "feat: add authenticated recovery operations"
 
 **Files:**
 - Modify: `src/server/{app,index}.ts`
+- Create: `src/server/{command,dependencies}.ts`
 - Modify: `src/cli/{command,index}.ts`
+- Create: `src/cli/dependencies.ts`
 - Modify: `src/web/app.tsx`
 - Modify: `src/shared/environment.ts`
 - Modify: `package.json`
 - Modify: `Dockerfile`
 - Modify: `compose.yaml`
+- Modify: `.github/workflows/ci.yml`
+- Modify: `.env.example`
+- Modify: `playwright.config.ts`
+- Modify: `public-manifest.json`
+- Create: `tests/scripts/compose-config-with-temporary-secrets.sh`
 - Test: `tests/integration/composition.test.ts`
 
 **Interfaces:**
-- Consumes: all Foundation module constructors.
-- Produces: import-safe `createApp(dependencies)`, `createCli(dependencies)`, server command dispatch, complete test scripts, canonical Compose inputs.
+- Consumes: all Foundation module constructors and validated environment supplied only at the
+  executable boundary.
+- Produces: import-safe `createApp(dependencies)`, `createCli(dependencies)`, pure dependency
+  factories, server command dispatch, complete test scripts, canonical Compose inputs, and bounded
+  readiness/shutdown behavior.
 
 - [ ] **Step 1: Write failing composition test**
 
@@ -1283,24 +1293,89 @@ Expected: FAIL because current composition roots expose only the seed applicatio
 - [ ] **Step 3: Wire explicit dependencies and operational configuration**
 
 ```ts
-export type AppDependencies = Readonly<{ identity: IdentityAuthority; projects: ProjectRegistry; runners: RunnerRegistry; authority: ExecutionAuthority; presets: PersonalRunPresets; events: ProjectionEvents }>;
+export type AppDependencies = Readonly<{
+  identity: IdentityAuthority;
+  browserSessions: BrowserSessionAuthority;
+  csrf: CsrfAuthority;
+  projects: ProjectRegistry;
+  runners: RunnerRegistry;
+  runnerTransport: RunnerTransportAuthority;
+  runnerAuthentication: RunnerAuthenticationAuthority;
+  deviceAuthorization: DeviceAuthorizationAuthority;
+  authority: ExecutionAuthority;
+  presets: PersonalRunPresets;
+  operations: OperationAuthority;
+  backups: BackupAuthority;
+  mcp: McpSurface;
+  events: ProjectionEvents;
+  readiness: ReadinessProbe;
+  limits: PublicRequestLimits;
+}>;
 export function createApp(deps: AppDependencies, options: AppOptions = {}): Hono {
   const app = new Hono();
-  app.use("/api/*", sessionMiddleware(deps.identity));
+  app.get("/healthz", healthHandler());
+  app.get("/readyz", readinessHandler(deps.readiness));
+  app.route("/api/v1/bootstrap", createBootstrapRoutes(deps.identity));
   app.route("/api/v1/auth", createAuthRoutes(deps.identity));
+  app.route("/api/v1/invitations/exchange", createInvitationExchangeRoutes(deps.identity));
+  app.route("/api/v1/device", createDeviceAuthorizationRoutes(deps.deviceAuthorization));
+  app.use("/api/v1/*", publicBodyLimit(deps.limits));
+  app.use("/api/v1/*", browserSessionMiddleware(deps.browserSessions));
+  app.use("/api/v1/*", csrfMiddleware(deps.csrf));
   app.route("/api/v1/projects", createProjectRoutes(deps.projects));
   app.route("/api/v1/runners", createRunnerRoutes(deps.runners));
   app.route("/api/v1/runs", createRunRoutes(deps.authority));
   app.route("/api/v1/presets", createPresetRoutes(deps.presets));
-  app.get("/api/v1/events", createSseHandler(deps.events));
+  app.route("/api/v1/operations", createOperationRoutes(deps.operations));
+  app.route("/api/v1/backups", createBackupRoutes(deps.backups));
+  app.route("/mcp", createMcpRoutes(deps.mcp));
+  app.get("/runner/v1", createRunnerWebSocketUpgrade(deps.runnerAuthentication, deps.runnerTransport));
+  app.get("/api/v1/events", createAuthenticatedSseHandler(deps.browserSessions, deps.events));
   return attachSeedRoutesAndStaticFiles(app, options);
 }
 ```
 
+The order above is a trust boundary, not presentation preference. Health and readiness are public and
+bounded. Bootstrap/authentication/invitation exchange/device authorization have their own
+purpose-bound pre-authentication principals. Browser session and CSRF checks cover every stateful
+browser API but do not run in front of MCP bearer/DPoP authentication or runner WSS authentication.
+Runner WebSocket upgrades authenticate the pairing/access credential before protocol dispatch. SSE
+requires an ordinary browser session. Static assets and the browser-history fallback are registered
+last and never consume `/api`, `/mcp`, or `/runner` traffic.
+
+`createServerDependencies(environment, resources)` and `createCliDependencies(environment,
+resources)` are pure factories: they receive the already-open database, clock, crypto, connector
+clients, runner listener, filesystem adapters, and logger. Importing app, CLI, or command modules must
+not read environment variables, open SQLite, bind a port, create directories, start timers, or launch
+processes. `src/server/index.ts` is the only server executable boundary. It validates environment,
+opens/migrates storage, constructs dependencies, reconciles startup state, starts listeners, and owns
+graceful shutdown. `src/cli/index.ts` is likewise the only CLI executable boundary.
+
+The compiled `collab` executable exposes user commands plus explicit `server` and `mcp-stdio` modes.
+The container runs `collab server`; MCP stdio runs through the same injected MCP command handlers and
+`ExecutionAuthority` rather than importing HTTP route code. `collab start` and its exact `collab run`
+alias resolve the canonical server origin, load local project identity, acquire device credentials,
+and call the same public command contract as Web and MCP.
+
+Environment parsing is strict and allowlisted. Unknown `COLLAB_` server variables are rejected.
+Secrets are accepted only through mounted files, with regular-file/no-symlink/owner-only permission
+checks and bounded reads; their contents never enter errors or diagnostics. Development-only HTTP is
+limited to exact `localhost`. Proxy headers are trusted only when the explicit proxy-trust policy
+matches the direct peer. `/healthz` proves only that the process loop is alive. `/readyz` remains
+non-ready until migration, key loading, authority-incarnation initialization, backup staging cleanup,
+and startup reconciliation have succeeded. Shutdown stops new work, closes upgrade paths, asks the
+runner transport to quiesce, records unresolved attempts honestly, closes SQLite, and exits within the
+bounded grace period.
+
 ```json
 {
   "scripts": {
-    "test": "bun test tests/unit tests/integration tests/protocol tests/runner tests/drills",
+    "test": "bun run test:unit && bun run test:integration && bun run test:protocol && bun run test:runner && bun run test:drills",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "test:protocol": "bun test tests/protocol",
+    "test:runner": "bun test tests/runner",
+    "test:drills": "bun test tests/drills",
     "test:e2e": "bun run clean && bun run build:web && bun run build:server && bun run test:e2e:run",
     "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify"
   }
@@ -1308,6 +1383,13 @@ export function createApp(deps: AppDependencies, options: AppOptions = {}): Hono
 ```
 
 Compose must require `SESSION_SECRET`, `PUBLIC_BASE_URL`, `WEBAUTHN_RP_ID`, `DEPLOYMENT_MASTER_KEY_FILE`, `BOOTSTRAP_SECRET_FILE`, and `BACKUP_DIR`; mount master/bootstrap secrets read-only outside `/data`, mount a separate backup volume, retain the read-only root, tmpfs, dropped capabilities, and no-new-privileges.
+
+The runtime image contains the compiled `collab` executable and launches `collab server`. Its
+healthcheck uses `/readyz`, not `/healthz`, so a process with failed migrations, invalid keys, or
+incomplete reconciliation is never advertised ready. The image contains no compiler, source tree,
+development dependencies, tests, lockfile, package-manager cache, host-native artifacts, or default
+secret. It runs as an unprivileged numeric user, uses a read-only root filesystem, writes only to the
+explicit data/backup volumes and bounded tmpfs, drops every capability, and requests no-new-privileges.
 
 ```yaml
 services:
@@ -1347,14 +1429,17 @@ volumes:
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test tests/integration/composition.test.ts && SESSION_SECRET=0123456789abcdef0123456789abcdef PUBLIC_BASE_URL=https://collab.test WEBAUTHN_RP_ID=collab.test DEPLOYMENT_MASTER_KEY_FILE=.env.example BOOTSTRAP_SECRET_FILE=.env.example BACKUP_DIR=/backups docker compose config --quiet`
+Run: `bun test tests/integration/composition.test.ts && bash tests/scripts/compose-config-with-temporary-secrets.sh`
 
-Expected: PASS; all feature routes precede bounded catch-alls, CLI/server commands are reachable, required secrets/config validate, and every non-browser suite is in `bun run test`.
+Expected: PASS; all feature routes precede bounded catch-alls, each route has the correct independent
+trust boundary, CLI/server/MCP-stdio commands are reachable, readiness and shutdown are bounded,
+required secret files/config validate without reusing `.env.example` as secret material, and every
+non-browser suite is in `bun run test`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/app.ts src/server/index.ts src/cli/command.ts src/cli/index.ts src/web/app.tsx src/shared/environment.ts package.json bun.lock Dockerfile compose.yaml tests/integration/composition.test.ts
+git add src/server src/cli src/web/app.tsx src/shared/environment.ts package.json bun.lock Dockerfile compose.yaml .github/workflows/ci.yml .env.example playwright.config.ts public-manifest.json tests/integration/composition.test.ts tests/scripts/compose-config-with-temporary-secrets.sh
 git commit -m "feat: compose foundation artifacts"
 ```
 
@@ -1364,26 +1449,52 @@ git commit -m "feat: compose foundation artifacts"
 
 **Files:**
 - Create: `tests/drills/{identity-replay,runner-security,storage-canary,offboarding-active-run}.test.ts`
+- Create: `tests/evidence/foundation-matrix.ts`
+- Create: `tests/unit/evidence/foundation-matrix.test.ts`
+- Create: `scripts/verify-evidence.ts`
 - Create: `docs/evidence/foundation/EVIDENCE-TEMPLATE.md`
+- Create: `docs/evidence/foundation/<build-id>.md`
 - Create: `docs/evidence/foundation/DOGFOOD-LEDGER.md`
+- Modify: `package.json`
+- Modify: `MANIFEST.sha256`
 - Modify: `tests/e2e/{setup-and-members,foundation-run}.spec.ts`
 
 **Interfaces:**
-- Consumes: packaged `collab-server`, compiled `collab`, all local fixtures.
-- Produces: build-specific local evidence with requirement IDs, commands, results, audit/event IDs, reviewer state, and explicit external evidence state.
+- Consumes: packaged `collab-server`, compiled `collab`, all local fixtures, and the canonical
+  Acceptance Matrix.
+- Produces: a machine-validated proof-obligation registry, one neutral template, one build-specific
+  local evidence record with exact artifact identity, and an honest external/timed evidence ledger.
 
 - [ ] **Step 1: Add a failing prohibited-storage canary drill**
 
 ```ts
 test("raw canaries never enter server stores, backups, or outboxes", async () => {
-  const f = await createStorageCanaryFixture("CANARY_RAW_PROMPT_7f0d", "CANARY_ABSOLUTE_PATH_8a2c");
-  await f.exerciseLaunchCheckpointEvidenceBackupReconnect();
-  for (const store of await f.prohibitedStores()) {
-    expect(store.bytes.includes("CANARY_RAW_PROMPT_7f0d")).toBe(false);
-    expect(store.bytes.includes("CANARY_ABSOLUTE_PATH_8a2c")).toBe(false);
+  const f = await createStorageCanaryFixture();
+  const canaries = await f.injectSeparateAllowedAndForbiddenChannels();
+  await f.exerciseLaunchCheckpointEvidenceBackupReconnectRestoreAndBrowserInspection();
+  const stores = await f.inspectEveryExpectedStore();
+  expect(stores.map((store) => store.id).sort()).toEqual(EXPECTED_PROHIBITED_STORE_IDS);
+  for (const store of stores) {
+    expect(store.readable).toBe(true);
+    for (const encodedCanary of forbiddenCanaryEncodings(canaries.forbidden)) {
+      expect(store.bytes.includes(encodedCanary)).toBe(false);
+    }
   }
+  expect(f.allowedStructuredInstruction()).toContain(canaries.allowedAuthoredInstruction);
 });
 ```
+
+Generate distinct runtime canaries for the allowed authored goal/instruction and for prohibited raw
+source or document bodies, flattened prompts, terminal stdout/stderr, interactive PTY input/output,
+environment secrets, connector credentials, private profile arguments, POSIX and Windows absolute
+paths, worktree contents, raw diffs, and attachment handles. Search raw, JSON-escaped, URL-encoded,
+and base64 forms. Hashes and approved structured authored instruction fields are not false positives.
+The expected inventory is closed: shared SQLite/WAL/SHM and logical tables, server logs, idempotency,
+audit/projection/outbox state, verified backup ciphertext, independently restored logical contents and
+staging files; runner SQLite/WAL/SHM, context cache, semantic outbox, reconciliation state, logs and
+encrypted diagnostic metadata/ciphertext; CLI captures; browser storage/caches/network captures; and
+generated Playwright artifacts. Missing, unreadable, silently skipped, or unexpected durable stores
+fail the drill.
 
 - [ ] **Step 2: Verify RED**
 
@@ -1391,35 +1502,88 @@ Run: `bun test tests/drills/identity-replay.test.ts tests/drills/runner-security
 
 Expected: FAIL on the first unimplemented drill fixture or prohibited persistence path.
 
-- [ ] **Step 3: Complete drills and create the exact evidence format**
+- [ ] **Step 3: Complete drills and create the exact evidence registry and formats**
 
 ```markdown
-# Foundation Evidence
+# Foundation Evidence Template
 
-- Build status: LOCAL_VERIFIED
-- External evidence status: IN_PROGRESS
-- Requirements covered locally: FND-001, FND-002, FND-003, FND-004, FND-005, FND-006, FND-007, FND-008, FND-009, FND-010, FND-011, FND-012, FND-013, FND-014, FND-015, FND-016, FND-017, FND-018
-- Timed requirement: FND-019 IN_PROGRESS
-- Required record fields: repository revision, build identifier, command or journey, result, audit or event identifiers, reviewer
+- Schema version: 1
+- Package status: NOT_RUN
+- Foundation status: NOT_STARTED
+- Canonical exit criterion: NOT_EVALUATED
+- Required per-command result: NOT_RUN | PASS | FAIL | BLOCKED_ENV
+- Required per-requirement status: NOT_STARTED | IN_PROGRESS_LOCAL | LOCAL_PROOF_COMPLETE | IN_PROGRESS_EXTERNAL | PASS | FAIL
+- Required artifact fields: tested repository commit, dirty-tree state, build identifier, Bun/platform/architecture, bun.lock digest, build-manifest digest, compiled collab digest, server artifact/image digest, start/end/duration
+- Required proof fields: requirement and obligation IDs, exact command, exit code, result, safe audit/event/run IDs or MISSING, human reviewer state, limitations, external/live status
 - Direct SQLite repair definition: any manual statement or file edit that changes authoritative database contents outside shipped migrations, restore, or supported commands
 ```
 
 ```ts
-export const localFoundationMatrix = Object.freeze({
-  "FND-001": ["setup-and-members.spec.ts"], "FND-002": ["identity-replay.test.ts", "setup-and-members.spec.ts"], "FND-003": ["cli-projects.test.ts"], "FND-004": ["registry.test.ts"], "FND-005": ["runtime.test.ts", "host.test.ts"], "FND-006": ["snapshots.test.ts"], "FND-007": ["execution-authority"], "FND-008": ["runner-loss.test.ts"], "FND-009": ["network-partition.test.ts"], "FND-010": ["worktrees.test.ts"], "FND-011": ["worktrees.test.ts"], "FND-012": ["runner-data-plane.test.ts", "storage-canary.test.ts"], "FND-013": ["backup-restore.test.ts"], "FND-014": ["surface-parity.test.ts"], "FND-015": ["registry.test.ts"], "FND-016": ["context.test.ts"], "FND-017": ["telemetry.test.ts"], "FND-018": ["local-diagnostics.test.ts"],
-});
+export const localFoundationMatrix = Object.freeze([
+  {
+    requirementId: "FND-001",
+    proofObligations: [
+      { id: "EMPTY_BOOTSTRAP_ONE_OWNER", evidenceKind: "BROWSER_E2E", testPath: "tests/e2e/setup-and-members.spec.ts", testName: "empty volume bootstrap creates exactly one team and owner" },
+      { id: "RESTORE_PRESERVES_SINGLETON", evidenceKind: "RESTORE_DRILL", testPath: "tests/drills/backup-restore.test.ts", testName: "isolated restore preserves one-team bootstrap invariant" },
+    ],
+    externalProof: [],
+    statusRule: "ALL_LOCAL",
+  },
+  // FND-002 through FND-018 enumerate every Acceptance Matrix behavior at exact test-name
+  // granularity. FND-005 remains IN_PROGRESS_EXTERNAL until its real two-machine runtime/host/mode
+  // matrix completes. FND-019 contains the seven-consecutive-day obligation and cannot pass here.
+]);
 ```
+
+`verify-evidence` parses canonical `FND-001` through `FND-019` from the Acceptance Matrix and rejects
+missing, duplicate, unknown, out-of-order, stale, directory-only, or nonexistent test references. It
+requires every Acceptance Matrix test level and exact proof behavior, derives statuses from individual
+command results, and rejects `PASS` for skipped, blocked, failed, live-pending, timed-pending, or
+unreviewed obligations. File existence never proves behavior. FND-005 includes local adapter/host
+conformance plus a separate real two-machine/runtime/host/mode obligation. FND-019 is a timed external
+obligation only.
+
+The build-specific record is `docs/evidence/foundation/<build-id>.md`, not the neutral template. It
+records every gate command separately with exit code and `PASS`, `FAIL`, `BLOCKED_ENV`, or `NOT_RUN`;
+safe evidence identifiers are `MISSING` when not emitted and reviewer is `UNREVIEWED` until an actual
+human review. Raw output, credentials, environment values, source/document bodies, flattened prompts,
+diffs, private paths/provider URLs, transcripts, and private runner/profile details are prohibited.
+The package may be `PACKAGE_LOCAL_VERIFIED` after all local/package/container checks pass while the
+Foundation phase remains `IN_PROGRESS_EXTERNAL` and its canonical exit remains `NOT_MET`.
+
+Avoid manifest self-reference. Generate a separate tested-build artifact manifest outside the source
+inventory and record its digest in the build evidence; then regenerate `MANIFEST.sha256`, which hashes
+the evidence document normally but not itself. The evidence record identifies the exact tested
+implementation commit and states when the later evidence commit was not itself that build.
+
+Initialize `DOGFOOD-LEDGER.md` with zero completed days, owners, and machines; empty build/run/
+incident/migration/restart/backup/restore rows; zero observed repairs so far rather than a period-wide
+proof; timezone and consecutive-day rule; no-backfill rule; the exact direct-repair definition; human
+reviewer `UNREVIEWED`; and this canonical criterion verbatim: "Exit when both owners can start headless
+and interactive Claude or Codex attempts on their own trusted machines from web and CLI; exact permit
+replay and stale-policy cases fail; a lost runner produces run `WAITING` plus attempt `LOST`; server
+backup and isolated restore drills pass; and one week of dogfood produces no need for direct database
+repair."
 
 - [ ] **Step 4: Run the complete local gate**
 
-Run: `bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bunx playwright install chromium && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && SESSION_SECRET=0123456789abcdef0123456789abcdef PUBLIC_BASE_URL=https://collab.test WEBAUTHN_RP_ID=collab.test DEPLOYMENT_MASTER_KEY_FILE=.env.example BOOTSTRAP_SECRET_FILE=.env.example BACKUP_DIR=/backups docker compose config --quiet && docker build --tag 2collab:verify .`
+Run each command separately and record each result: `bun ci`; `bun run format:check`; `bun run lint`;
+`bun run typecheck`; `bun run test`; `bun run build`; `bunx playwright install chromium`;
+`bun run test:e2e:run`; `bun run audit:public`; `bun run manifest:verify`; `bun run archive:verify`;
+`bash tests/scripts/compose-config-with-temporary-secrets.sh`; `docker build --tag 2collab:verify .`;
+the compiled `collab` smoke; packaged `collab server` listener/readiness/shutdown smoke; live hardened
+container readiness; authenticated backup create/verify; offline isolated restore verify; and
+`bun run evidence:verify`.
 
-Expected: every command exits 0. Environment failures are recorded separately and no unrun check is marked passed.
+Expected: every locally achievable command exits 0 and the build-specific record includes exact
+artifact identities. Environment failures are `BLOCKED_ENV`, code/test failures are `FAIL`, and no
+unrun or live/timed check is marked passed. FND-005/FND-019 and the overall Foundation exit remain
+external-in-progress even when the package is locally verified.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/drills tests/e2e docs/evidence/foundation
+git add tests/drills tests/e2e tests/evidence tests/unit/evidence scripts/verify-evidence.ts docs/evidence/foundation package.json MANIFEST.sha256
 git commit -m "test: prove foundation locally"
 ```
 
