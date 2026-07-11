@@ -219,6 +219,12 @@ function invalidateAuthority(
   }>,
 ): void {
   inImmediateTransaction(database, () => {
+    const hasTable = (name: string) =>
+      database
+        .query<{ name: string }, [string]>(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        )
+        .get(name) !== null;
     insertBackupRecord(database, input.manifest);
     database
       .query<void, [string, string, string, number, number, string, number, number]>(
@@ -307,6 +313,50 @@ function invalidateAuthority(
         "UPDATE connector_operation_intents SET state = 'REQUIRES_REAUTHORIZATION', updated_at = ? WHERE state IN ('PENDING', 'PROVIDER_CONFIRMED')",
       )
       .run(input.now);
+    if (hasTable("outline_member_oauth_grants")) {
+      database
+        .query(
+          `UPDATE encrypted_credentials SET revoked_at=coalesce(revoked_at,?),revision=revision+1,updated_at=?
+         WHERE id IN (SELECT credential_id FROM outline_member_oauth_grants
+                      UNION SELECT bot_credential_id FROM outline_connections
+                      UNION SELECT oauth_client_secret_credential_id FROM outline_connections WHERE oauth_client_secret_credential_id IS NOT NULL)`,
+        )
+        .run(input.now, input.now);
+      database
+        .query(
+          "UPDATE outline_member_oauth_grants SET refresh_status='REVOKED',revoked_at=coalesce(revoked_at,?),revision=revision+1,updated_at=?",
+        )
+        .run(input.now, input.now);
+      database
+        .query(
+          "UPDATE outline_oauth_transactions SET revoked_at=coalesce(revoked_at,?),revision=revision+1 WHERE consumed_at IS NULL",
+        )
+        .run(input.now);
+    }
+    if (hasTable("document_write_grants")) {
+      database
+        .query(
+          "UPDATE document_write_grants SET revoked_at=coalesce(revoked_at,?),revocation_cause='RESTORE',grant_revision=grant_revision+1",
+        )
+        .run(input.now);
+      database
+        .query(
+          "UPDATE additional_document_requests SET revoked_at=coalesce(revoked_at,?),revocation_cause='RESTORE',request_revision=request_revision+1",
+        )
+        .run(input.now);
+    }
+    if (hasTable("document_proposals")) {
+      database
+        .query(
+          "UPDATE document_proposals SET revoked_at=coalesce(revoked_at,?),revocation_cause='RESTORE'",
+        )
+        .run(input.now);
+      database
+        .query(
+          "UPDATE external_working_documents SET revoked_at=coalesce(revoked_at,?),revocation_cause='RESTORE',lifecycle_revision=lifecycle_revision+1",
+        )
+        .run(input.now);
+    }
     database
       .query(
         "UPDATE dispatch_permits SET state = 'REVOKED', revoked_at = coalesce(revoked_at, ?), revision = revision + 1 WHERE state = 'ISSUED'",

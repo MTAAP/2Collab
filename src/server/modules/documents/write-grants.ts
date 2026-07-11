@@ -25,6 +25,7 @@ export function authorizeDocumentGrant(
   if (grant.grantRevision !== input.grantRevision)
     return denied("DOCUMENT_GRANT_REVISION_STALE", "REFRESH");
   if (input.now >= grant.expiresAt) return denied("DOCUMENT_GRANT_EXPIRED");
+  if (!grant.operations.includes("EDIT_CONTENT")) return denied("DOCUMENT_GRANT_OPERATION_DENIED");
   const document = grant.documents.find((candidate) => candidate.documentId === input.documentId);
   if (!document) return denied("DOCUMENT_GRANT_SCOPE_DENIED");
   if (

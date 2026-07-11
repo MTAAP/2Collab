@@ -18,10 +18,9 @@ const authority: OutlineMemberMutationAuthorityPort = {
   async currentScope() {
     return { ok: true, value: scope };
   },
-  async authorize(input) {
-    return {
-      ok: true,
-      value: {
+  async mutate(outline, input) {
+    return outline.mutate(
+      {
         kind: "CONNECTOR_OPERATION",
         id: input.memberId,
         proof: "proof",
@@ -33,12 +32,9 @@ const authority: OutlineMemberMutationAuthorityPort = {
         actionDigest: input.command.actionDigest,
         expiresAt: Date.now() + 1_000,
       },
-    };
+      input.command,
+    );
   },
-  async confirm(observed) {
-    return { ok: true, value: observed };
-  },
-  async fail() {},
 };
 
 test("creates with the delegated member identity and an absent precondition", async () => {

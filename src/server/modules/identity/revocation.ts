@@ -34,7 +34,20 @@ type Dependencies = Readonly<{
   id: (prefix: string) => string;
   digest: (value: string) => Promise<Uint8Array>;
   executionAuthority: RevocationExecutionAuthority;
+  outlineProviderRevocation?: Readonly<{
+    revokeCredential(credentialId: string): Promise<Result<Readonly<{ revoked: true }>>>;
+  }>;
 }>;
+
+function tableExists(database: Database, name: string): boolean {
+  return (
+    database
+      .query<{ name: string }, [string]>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+      )
+      .get(name) !== null
+  );
+}
 
 function error(
   code: string,
@@ -121,6 +134,72 @@ function removeMemberTransaction(
         "UPDATE encrypted_credentials SET revoked_at = ?, revision = revision + 1, updated_at = ? WHERE owner_kind = 'MEMBER' AND owner_id = ? AND revoked_at IS NULL",
       )
       .run(now, now, command.memberId);
+    if (tableExists(database, "outline_member_oauth_grants")) {
+      const connectorIds = database
+        .query<{ connector_id: string }, [string]>(
+          "SELECT DISTINCT connector_id FROM outline_member_oauth_grants WHERE member_id=? AND revoked_at IS NULL",
+        )
+        .all(command.memberId)
+        .map((row) => row.connector_id);
+      database
+        .query(
+          `UPDATE outline_member_oauth_grants SET refresh_status='REVOKED', revoked_at=?,
+           revision=revision+1, updated_at=? WHERE member_id=? AND revoked_at IS NULL`,
+        )
+        .run(now, now, command.memberId);
+      database
+        .query(
+          "UPDATE outline_oauth_transactions SET revoked_at=?,revision=revision+1 WHERE member_id=? AND consumed_at IS NULL AND revoked_at IS NULL",
+        )
+        .run(now, command.memberId);
+      for (const connectorId of connectorIds) {
+        database
+          .query(
+            "UPDATE connector_epochs SET epoch=epoch+1,revision=revision+1 WHERE connector_id=?",
+          )
+          .run(connectorId);
+        database
+          .query(
+            "UPDATE connector_scopes SET connector_epoch=connector_epoch+1,revision=revision+1 WHERE connector_id=? AND revoked_at IS NULL",
+          )
+          .run(connectorId);
+        database
+          .query(
+            "UPDATE connector_operation_authorizations SET state='REVOKED' WHERE connector_id=? AND state='RESERVED'",
+          )
+          .run(connectorId);
+        database
+          .query(
+            "UPDATE connector_operation_intents SET state='REQUIRES_REAUTHORIZATION',updated_at=? WHERE connector_id=? AND state IN ('PENDING','PROVIDER_CONFIRMED')",
+          )
+          .run(now, connectorId);
+        if (tableExists(database, "document_write_grants")) {
+          database
+            .query(
+              "UPDATE document_write_grants SET revoked_at=?,revocation_cause='MEMBER',grant_revision=grant_revision+1 WHERE connector_id=? AND revoked_at IS NULL",
+            )
+            .run(now, connectorId);
+          database
+            .query(
+              `UPDATE additional_document_requests SET revoked_at=?,revocation_cause='MEMBER',request_revision=request_revision+1
+             WHERE grant_id IN (SELECT grant_id FROM document_write_grants WHERE connector_id=?) AND revoked_at IS NULL`,
+            )
+            .run(now, connectorId);
+        }
+        if (tableExists(database, "document_proposals")) {
+          database
+            .query(
+              "UPDATE document_proposals SET revoked_at=?,revocation_cause='MEMBER' WHERE connector_id=? AND revoked_at IS NULL",
+            )
+            .run(now, connectorId);
+          database
+            .query(
+              "UPDATE external_working_documents SET revoked_at=?,revocation_cause='MEMBER',lifecycle_revision=lifecycle_revision+1 WHERE connector_id=? AND revoked_at IS NULL",
+            )
+            .run(now, connectorId);
+        }
+      }
+    }
     const ownedRunners = database
       .query<{ id: string; runner_epoch: number }, [string]>(
         "SELECT id, runner_epoch FROM runners WHERE owner_member_id = ? AND revoked_at IS NULL",
@@ -189,6 +268,29 @@ function removeMemberTransaction(
 
 export function createMemberRevocationAuthority(dependencies: Dependencies) {
   const browserSessions = createBrowserSessionAuthority(dependencies);
+  const revokeOutlineProviderCredentials = async (memberId: string): Promise<boolean> => {
+    if (
+      !dependencies.outlineProviderRevocation ||
+      !tableExists(dependencies.database, "outline_member_oauth_grants")
+    )
+      return true;
+    const credentials = dependencies.database
+      .query<{ credential_id: string }, [string]>(
+        "SELECT credential_id FROM outline_member_oauth_grants WHERE member_id=? AND revoked_at IS NOT NULL",
+      )
+      .all(memberId);
+    for (const credential of credentials) {
+      try {
+        const revoked = await dependencies.outlineProviderRevocation.revokeCredential(
+          credential.credential_id,
+        );
+        if (!revoked.ok) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  };
   return {
     async remove(command: RemoveMember): Promise<Result<MemberRemoval>> {
       if (
@@ -219,7 +321,8 @@ export function createMemberRevocationAuthority(dependencies: Dependencies) {
               authorityEpoch: existing.member_authority_epoch,
             },
           });
-          if (retried.ok) {
+          const providerRevoked = await revokeOutlineProviderCredentials(command.memberId);
+          if (retried.ok && providerRevoked) {
             try {
               inImmediateTransaction(dependencies.database, () => {
                 dependencies.database
@@ -288,7 +391,8 @@ export function createMemberRevocationAuthority(dependencies: Dependencies) {
       } catch {
         dispatched = error("REVOCATION_DISPATCH_FAILED", "Revocation dispatch failed.");
       }
-      if (dispatched.ok) {
+      const providerRevoked = await revokeOutlineProviderCredentials(command.memberId);
+      if (dispatched.ok && providerRevoked) {
         try {
           inImmediateTransaction(dependencies.database, () => {
             dependencies.database

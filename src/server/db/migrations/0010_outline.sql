@@ -34,6 +34,7 @@ CREATE TABLE outline_member_oauth_grants (
 CREATE TABLE outline_oauth_transactions (
   id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
   connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
+  connector_epoch INTEGER NOT NULL CHECK(connector_epoch > 0),
   member_id TEXT NOT NULL REFERENCES members(id),
   session_id TEXT NOT NULL REFERENCES sessions(id),
   state_hash BLOB NOT NULL UNIQUE CHECK(length(state_hash) = 32),

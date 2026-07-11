@@ -29,19 +29,31 @@ function denied(code: string, message: string): Result<never> {
   return { ok: false, error: { code, message, retry: "EXPLICIT_RESUME" } };
 }
 
-export function createOutlineIdentityResolver(database: Database) {
+export function createOutlineIdentityResolver(
+  database: Database,
+  dependencies: Readonly<{ clock: () => number }> = { clock: () => Date.now() },
+) {
   return {
     resolve(request: OutlineIdentityRequest): Result<OutlineIdentity> {
       if (request.operation === "HUMAN_WRITE") {
         if (!request.memberId)
           return denied("OUTLINE_MEMBER_GRANT_REQUIRED", "A delegated member grant is required.");
         const row = database
-          .query<{ outline_user_id: string; revision: number }, [string, string]>(
-            `SELECT outline_user_id, revision FROM outline_member_oauth_grants
-             WHERE connector_id = ? AND member_id = ? AND refresh_status = 'READY'
-               AND revoked_at IS NULL`,
+          .query<{ outline_user_id: string; revision: number }, [string, string, number]>(
+            `SELECT grant.outline_user_id, grant.revision
+             FROM outline_member_oauth_grants AS grant
+             JOIN members AS member ON member.id = grant.member_id
+             JOIN encrypted_credentials AS credential ON credential.id = grant.credential_id
+             JOIN connector_epochs AS epoch ON epoch.connector_id = grant.connector_id
+             WHERE grant.connector_id = ? AND grant.member_id = ?
+               AND member.status = 'ACTIVE'
+               AND grant.refresh_status = 'READY' AND grant.revoked_at IS NULL
+               AND grant.access_expires_at > ?
+               AND credential.revoked_at IS NULL
+               AND credential.revision = grant.credential_revision
+               AND epoch.review_state = 'READY'`,
           )
-          .get(request.connectorId, request.memberId);
+          .get(request.connectorId, request.memberId, dependencies.clock());
         if (!row)
           return denied("OUTLINE_MEMBER_GRANT_REQUIRED", "A delegated member grant is required.");
         return {
@@ -57,7 +69,13 @@ export function createOutlineIdentityResolver(database: Database) {
       }
       const bot = database
         .query<{ bot_provider_user_id: string }, [string]>(
-          "SELECT bot_provider_user_id FROM outline_connections WHERE connector_id = ?",
+          `SELECT connection.bot_provider_user_id
+           FROM outline_connections AS connection
+           JOIN encrypted_credentials AS credential
+             ON credential.id = connection.bot_credential_id AND credential.revoked_at IS NULL
+           JOIN connector_epochs AS epoch
+             ON epoch.connector_id = connection.connector_id AND epoch.review_state = 'READY'
+           WHERE connection.connector_id = ?`,
         )
         .get(request.connectorId);
       if (!bot) return denied("OUTLINE_BOT_REQUIRED", "The Outline bot identity is unavailable.");

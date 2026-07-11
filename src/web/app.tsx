@@ -1,15 +1,24 @@
-import { BotIcon, PlayIcon, SettingsIcon, UsersIcon, WorkflowIcon } from "lucide-react";
+import {
+  BotIcon,
+  BookOpenIcon,
+  PlayIcon,
+  SettingsIcon,
+  UsersIcon,
+  WorkflowIcon,
+} from "lucide-react";
 import { MembersFeature } from "./features/members/members-feature.tsx";
 import { PresetsFeature } from "./features/presets/presets-feature.tsx";
 import { RunnersFeature } from "./features/runners/runners-feature.tsx";
 import { RunsFeature } from "./features/runs/runs-feature.tsx";
 import { InvitationExchange } from "./features/setup/invitation-exchange.tsx";
 import { SetupFeature } from "./features/setup/setup-feature.tsx";
+import { OutlineFeature } from "./features/outline/index.tsx";
 
 const navigation = [
   { href: "/runs", label: "Runs", icon: PlayIcon },
   { href: "/presets", label: "Presets", icon: WorkflowIcon },
   { href: "/runners", label: "Runners", icon: BotIcon },
+  { href: "/outline", label: "Outline", icon: BookOpenIcon },
   { href: "/settings/team", label: "Team & access", icon: UsersIcon },
 ] as const;
 
@@ -21,6 +30,8 @@ function AppShell() {
     <RunnersFeature />
   ) : path.startsWith("/presets") ? (
     <PresetsFeature />
+  ) : path.startsWith("/outline") ? (
+    <OutlineFeature />
   ) : (
     <RunsFeature />
   );
