@@ -65,19 +65,29 @@ function canonicalize(value: unknown, state: CanonicalState, depth: number): unk
   if (state.seen.has(value)) throw new Error("CANONICAL_CYCLE");
   state.seen.add(value);
   if (Array.isArray(value)) {
-    return value.map((entry) => canonicalize(entry, state, depth + 1));
+    if (value.length > MAX_CANONICAL_NODES - state.nodes) throw new Error("CANONICAL_LIMIT");
+    const normalized: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      normalized.push(canonicalize(value[index], state, depth + 1));
+    }
+    return normalized;
   }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
     throw new Error("CANONICAL_UNSUPPORTED");
   }
-  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
-    left.localeCompare(right),
-  );
-  const normalized: Record<string, unknown> = {};
-  for (const [key, entry] of entries) {
+  const record = value as Record<string, unknown>;
+  const keys: string[] = [];
+  for (const key in record) {
+    if (!Object.hasOwn(record, key)) continue;
+    if (keys.length >= MAX_CANONICAL_NODES - state.nodes) throw new Error("CANONICAL_LIMIT");
     addString(state, key);
-    normalized[key] = canonicalize(entry, state, depth + 1);
+    keys.push(key);
+  }
+  keys.sort((left, right) => left.localeCompare(right));
+  const normalized = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    normalized[key] = canonicalize(record[key], state, depth + 1);
   }
   return normalized;
 }
@@ -156,7 +166,7 @@ export class IdentityIdempotency {
     };
   }
 
-  replay<T>(ticket: IdempotencyTicket): Result<T> | undefined {
+  replay<T>(ticket: IdempotencyTicket, valueSchema?: z.ZodType<T>): Result<T> | undefined {
     const row = this.database
       .query<{ input_hash: string; result_json: string }, [string, string]>(
         "SELECT input_hash, result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
@@ -186,14 +196,22 @@ export class IdentityIdempotency {
           error: { code: stored.code, message: stored.message, retry: "NEVER" },
         };
       }
-      return stored.result as Result<T>;
+      if (!stored.result.ok) return stored.result;
+      if (!valueSchema) return this.invalidStorage();
+      const value = valueSchema.safeParse(stored.result.value);
+      if (!value.success) return this.invalidStorage();
+      return {
+        ok: true,
+        value: value.data,
+        ...(stored.result.auditId ? { auditId: stored.result.auditId } : {}),
+      };
     } catch {
       return this.invalidStorage();
     }
   }
 
   storeResult<T>(ticket: IdempotencyTicket, result: Result<T>): void {
-    this.insert(ticket, { kind: "RESULT", result: result as Result<unknown> });
+    this.insert(ticket, { kind: "RESULT", result });
   }
 
   storeSecretIssued(ticket: IdempotencyTicket, code: string, message: string): void {

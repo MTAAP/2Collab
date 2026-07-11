@@ -1,12 +1,16 @@
 import type { Database } from "bun:sqlite";
-import type {
-  AcceptInvitationWithVerifiedIdentity,
-  BeginPasskeyRegistration,
-  MemberActor,
-  MemberSessionIssue,
-  PasskeyCredential,
-  RegistrationPrincipal,
-  TeamInvitation,
+import {
+  PasskeyCredentialSchema,
+  PasskeyRevocationSchema,
+  TeamInvitationSchema,
+  type AcceptInvitationWithVerifiedIdentity,
+  type BeginPasskeyRegistration,
+  type MemberActor,
+  type MemberSessionIssue,
+  type PasskeyCredential,
+  type PasskeyRevocation,
+  type RegistrationPrincipal,
+  type TeamInvitation,
 } from "../../../shared/contracts/identity.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
@@ -26,6 +30,15 @@ const INVITATION_SESSION_LIFETIME = 15 * 60;
 const RECOVERY_SESSION_LIFETIME = 15 * 60;
 const BROWSER_SESSION_LIFETIME = 7 * 24 * 60 * 60;
 const RECOVERY_CODE_COUNT = 8;
+const PasskeyCredentialReplaySchema = PasskeyCredentialSchema.transform(
+  (value) => value as PasskeyCredential,
+);
+const PasskeyRevocationReplaySchema = PasskeyRevocationSchema.transform(
+  (value) => value as PasskeyRevocation,
+);
+const TeamInvitationReplaySchema = TeamInvitationSchema.transform(
+  (value) => value as TeamInvitation,
+);
 
 type ChallengeRow = Readonly<{
   id: string;
@@ -740,7 +753,10 @@ export function createIdentityAuthority(
         command.idempotencyKey,
         command,
       );
-      if (!ticket.ok) return ticket;
+      if (!ticket.ok) {
+        auditFailure("BOOTSTRAP", ticket.error.code);
+        return ticket;
+      }
       const replay = idempotency.replay<never>(ticket.value);
       if (replay) return replay;
       const status = challengeStatus(challenge(command.challengeId), "PASSKEY_REGISTRATION");
@@ -823,7 +839,11 @@ export function createIdentityAuthority(
 
     async finishPasskeyRegistration(command) {
       if (!validText(command.credentialName) || !validIdempotencyKey(command.idempotencyKey))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+        return reject(
+          "PASSKEY_REGISTRATION_FINISH",
+          "IDENTITY_INPUT_INVALID",
+          "Identity input is invalid.",
+        );
       const ticket = await idempotency.ticket(
         "PASSKEY_REGISTRATION_FINISH",
         command.principal.kind === "RECOVERY"
@@ -832,8 +852,11 @@ export function createIdentityAuthority(
         command.idempotencyKey,
         command,
       );
-      if (!ticket.ok) return ticket;
-      const replay = idempotency.replay<PasskeyCredential>(ticket.value);
+      if (!ticket.ok) {
+        auditFailure("PASSKEY_REGISTRATION_FINISH", ticket.error.code);
+        return ticket;
+      }
+      const replay = idempotency.replay(ticket.value, PasskeyCredentialReplaySchema);
       if (replay) return replay;
       const principal = await memberForRegistration(command.principal);
       if (!principal.ok || !principal.value.memberId)
@@ -849,7 +872,7 @@ export function createIdentityAuthority(
       }
       try {
         return auditedTransaction("PASSKEY_REGISTRATION_FINISH", () => {
-          const committedReplay = idempotency.replay<PasskeyCredential>(ticket.value);
+          const committedReplay = idempotency.replay(ticket.value, PasskeyCredentialReplaySchema);
           if (committedReplay) return committedReplay;
           if (!registrationAuthorityCurrent(principal.value))
             return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
@@ -1164,14 +1187,14 @@ export function createIdentityAuthority(
         command,
       );
       if (!ticket.ok) return ticket;
-      const replay = idempotency.replay<never>(ticket.value);
+      const replay = idempotency.replay(ticket.value, PasskeyRevocationReplaySchema);
       if (replay) return replay;
       const resolvedAuthority = await memberAuthority(command.actor);
       const authority = resolvedAuthority?.member;
       if (!authority) return error("SESSION_INVALID", "Member session is invalid.");
       try {
         return auditedTransaction("PASSKEY_REVOKE", () => {
-          const committedReplay = idempotency.replay<never>(ticket.value);
+          const committedReplay = idempotency.replay(ticket.value, PasskeyRevocationReplaySchema);
           if (committedReplay) return committedReplay;
           const currentAuthority = activeMember(command.actor, resolvedAuthority.proofHash);
           if (
@@ -1436,7 +1459,7 @@ export function createIdentityAuthority(
         command,
       );
       if (!ticket.ok) return ticket;
-      const replay = idempotency.replay<TeamInvitation>(ticket.value);
+      const replay = idempotency.replay(ticket.value, TeamInvitationReplaySchema);
       if (replay) return replay;
       const resolvedAuthority = await memberAuthority(command.actor);
       const authority = resolvedAuthority?.member;
@@ -1445,7 +1468,7 @@ export function createIdentityAuthority(
       const authorityProofHash = resolvedAuthority.proofHash;
       try {
         return auditedTransaction("INVITATION_REVOKE", () => {
-          const committedReplay = idempotency.replay<TeamInvitation>(ticket.value);
+          const committedReplay = idempotency.replay(ticket.value, TeamInvitationReplaySchema);
           if (committedReplay) return committedReplay;
           const currentAuthority = activeMember(command.actor, authorityProofHash);
           if (
@@ -1509,7 +1532,10 @@ export function createIdentityAuthority(
         command.idempotencyKey,
         command,
       );
-      if (!ticket.ok) return ticket;
+      if (!ticket.ok) {
+        auditFailure("INVITATION_ACCEPT", ticket.error.code);
+        return ticket;
+      }
       const replay = idempotency.replay<never>(ticket.value);
       if (replay) return replay;
       if (exchange.consumed_at !== null)
