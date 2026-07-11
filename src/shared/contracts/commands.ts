@@ -69,6 +69,11 @@ export type CommandBase = Readonly<{
   actor: AuthenticatedActor;
 }>;
 
+export type SemanticContinuity = Readonly<{
+  localSequence: number;
+  predecessorEventId?: string;
+}>;
+
 export type WorkflowAuthorityRef = Readonly<{
   workflowExecutionId: string;
   stepOccurrenceId: string;
@@ -169,6 +174,7 @@ export type AcceptAttemptEvent = CommandBase &
     attemptId: ExecutionAttemptId;
     expectedAttemptRevision: number;
     event: z.infer<typeof AttemptEventSchema>;
+    semanticContinuity?: SemanticContinuity;
   }>;
 
 export type RecordCheckpoint = CommandBase &
@@ -187,6 +193,7 @@ export type RecordCheckpoint = CommandBase &
     evidenceIds: readonly EvidenceId[];
     sourceRevisions: Readonly<Record<string, string>>;
     resumeGuidance: string;
+    semanticContinuity?: SemanticContinuity;
   }>;
 
 export type RecordEvidence = CommandBase &
@@ -196,6 +203,7 @@ export type RecordEvidence = CommandBase &
     expectedRunRevision: number;
     attemptId?: ExecutionAttemptId;
     evidence: EvidenceInput;
+    semanticContinuity?: SemanticContinuity;
   }>;
 
 type RecordRunResultBase = CommandBase &
@@ -204,6 +212,7 @@ type RecordRunResultBase = CommandBase &
     runId: AgentRunId;
     expectedRunRevision: number;
     attemptId: ExecutionAttemptId;
+    semanticContinuity?: SemanticContinuity;
   }>;
 
 export type RecordRunResult = RecordRunResultBase &
@@ -607,12 +616,20 @@ const RevisionedRunSchema = {
   expectedRunRevision: RevisionSchema,
 };
 
+export const SemanticContinuitySchema = z
+  .object({
+    localSequence: z.number().int().positive(),
+    predecessorEventId: IdentifierSchema.optional(),
+  })
+  .strict();
+
 export const AcceptAttemptEventPayloadSchema = z
   .object({
     ...RevisionedRunSchema,
     attemptId: IdentifierSchema,
     expectedAttemptRevision: RevisionSchema,
     event: AttemptEventSchema,
+    semanticContinuity: SemanticContinuitySchema.optional(),
   })
   .strict();
 
@@ -649,6 +666,7 @@ export const RecordCheckpointPayloadSchema = z
       .record(z.string().min(1).max(256), z.string().min(1).max(128))
       .refine((revisions) => Object.keys(revisions).length <= 128),
     resumeGuidance: z.string().min(1).max(2_048),
+    semanticContinuity: SemanticContinuitySchema.optional(),
   })
   .strict();
 
@@ -657,6 +675,7 @@ export const RecordEvidencePayloadSchema = z
     ...RevisionedRunSchema,
     attemptId: IdentifierSchema.optional(),
     evidence: EvidenceInputSchema,
+    semanticContinuity: SemanticContinuitySchema.optional(),
   })
   .strict();
 
@@ -665,6 +684,7 @@ const RunResultPayloadBase = {
   attemptId: IdentifierSchema,
   summary: z.string().min(1).max(2_048),
   evidenceIds: EvidenceIdsSchema,
+  semanticContinuity: SemanticContinuitySchema.optional(),
 };
 export const RunResultReasonSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/);
 export const RunResultRequestedActionSchema = z.enum([

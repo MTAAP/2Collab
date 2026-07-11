@@ -26,8 +26,13 @@ class FakeOutboundStore implements RunnerOutboundStore {
     return [...this.entries.values()];
   }
 
-  put(event: DurableRunnerEvent): void {
-    this.entries.set(event.eventId, event);
+  put(event: DurableRunnerEvent): DurableRunnerEvent {
+    const persisted = this.entries.get(event.eventId) ?? {
+      ...event,
+      localSequence: this.entries.size + 1,
+    };
+    this.entries.set(event.eventId, persisted);
+    return persisted;
   }
 
   remove(messageId: string): void {
@@ -417,7 +422,12 @@ describe("runner WSS client", () => {
     scheduled.shift()?.();
     const firstWire = sockets[0].sent.slice(1).map((entry) => JSON.parse(entry));
     expect(firstWire).toMatchObject([
-      { messageId: "runner_message_1", sequence: 1, body: { eventId: "event_1" } },
+      {
+        messageId: "runner_message_1",
+        sequence: 1,
+        semanticContinuity: { localSequence: 1 },
+        body: { eventId: "event_1" },
+      },
       { messageId: "runner_message_2", sequence: 2, body: { kind: "HEARTBEAT" } },
     ]);
 
@@ -492,7 +502,7 @@ describe("runner WSS client", () => {
     expect(store.entries.size).toBe(1);
   });
 
-  test("retains authority requests until the correlated response effect and ACK complete", async () => {
+  test("keeps authority requests live-only until the correlated response effect and ACK complete", async () => {
     const socket = new FakeSocket();
     const store = new FakeOutboundStore();
     let releaseResponse: (() => void) | undefined;
@@ -566,7 +576,8 @@ describe("runner WSS client", () => {
       }),
     );
     await settle();
-    expect(store.entries.size).toBe(1);
+    expect(store.entries.size).toBe(0);
+    expect(JSON.stringify([...store.entries.values()])).not.toContain("permit_1");
     releaseResponse?.();
     await settle();
     await settle();

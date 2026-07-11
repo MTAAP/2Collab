@@ -15,6 +15,7 @@ import {
 } from "../../modules/execution-authority/execution-authority.ts";
 import type { RunnerKeyProofPort, RunnerRequestProofPort } from "../../modules/runners/contract.ts";
 import { createRunnerServices } from "../../modules/runners/runner-registry.ts";
+import { createRunnerEventDeduplicator } from "../../modules/runs/event-deduplication.ts";
 import { createDurableRunnerDispatch } from "./durable-dispatch.ts";
 import { createRunnerExecutionAuthorityAdapter } from "./execution-authority.ts";
 import { LiveOutputHub } from "./live-output.ts";
@@ -125,9 +126,9 @@ export async function createProductionServer(environment: ServerEnvironment, app
         }
         return { accepted: true };
       },
-      acceptSemantic: (body, principal, connectionId) =>
+      acceptSemantic: (body, principal, connectionId, continuity) =>
         semantic
-          ? semantic(body, principal, connectionId)
+          ? semantic(body, principal, connectionId, continuity)
           : Promise.resolve({
               ok: false,
               error: {
@@ -158,6 +159,11 @@ export async function createProductionServer(environment: ServerEnvironment, app
     runConfiguration: infrastructure.runConfiguration,
     permitCodec: infrastructure.permitCodec,
     runnerControl: dispatch.control,
+    semanticEvents: createRunnerEventDeduplicator({
+      database,
+      clock: now,
+      id: (kind) => id(kind),
+    }),
   });
   semantic = createRunnerExecutionAuthorityAdapter(authority).accept;
   await dispatch.prime();

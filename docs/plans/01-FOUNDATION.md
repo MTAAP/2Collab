@@ -202,7 +202,8 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 
 **Files:**
 
-- Create `src/server/db/migrations/0005_foundation_operations.sql` and verifier.
+- Consume immutable `src/server/db/migrations/0005_foundation_operations.sql` and verifier; do not edit either file.
+- Create `src/runner/db/migrations/0006_continuity_cache.sql`; runner migrations 0001 through 0005 remain immutable.
 - Create `src/runner/{cache,outbox,offline-policy}.ts`.
 - Create `src/server/modules/runs/{event-deduplication,reconciliation}.ts`.
 - Create `tests/drills/network-partition.test.ts`, `tests/drills/cancellation.test.ts`, `tests/drills/runner-loss.test.ts`.

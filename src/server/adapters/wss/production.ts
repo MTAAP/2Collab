@@ -33,6 +33,7 @@ export type ProductionRunnerPorts = Readonly<{
     body: SemanticBody,
     principal: VerifiedRunnerPrincipal,
     connectionId: string,
+    semanticContinuity: RunnerEnvelope["semanticContinuity"],
   ) => Promise<Result<RunnerSemanticAcceptance>>;
   acceptOutput: (body: OutputBody, principal: VerifiedRunnerPrincipal) => Routed;
   acceptGateEvent: (
@@ -124,7 +125,8 @@ export function createProductionRunnerServer(
           if (!committed.accepted) return committed;
           return channel.acknowledge(principal.runnerId, deliveryId, semanticDigest);
         },
-        acceptSemantic: (body, actor) => input.ports.acceptSemantic(body, actor, connectionId),
+        acceptSemantic: (body, actor, continuity) =>
+          input.ports.acceptSemantic(body, actor, connectionId, continuity),
         acceptOutput: (body) => input.ports.acceptOutput(body, principal),
         acceptGateEvent: (body, actor) => input.ports.acceptGateEvent(body, actor),
       }),

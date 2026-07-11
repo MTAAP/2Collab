@@ -1,104 +1,65 @@
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
-import { RunnerMessageBodySchema } from "../../shared/contracts/protocol.ts";
+import { createRunnerSemanticOutbox } from "../outbox.ts";
 import type { DurableRunnerEvent, RunnerOutboundStore } from "./wss-client.ts";
 
-type Row = Readonly<{
-  event_id: string;
-  body_digest: string;
-  body_json: string;
-  byte_count: number;
-}>;
+function runId(event: DurableRunnerEvent): string | undefined {
+  const body = event.body;
+  return "payload" in body && "runId" in body.payload && typeof body.payload.runId === "string"
+    ? body.payload.runId
+    : undefined;
+}
 
 export function createSqliteRunnerOutboundStore(
   database: Database,
   now: () => number = () => Math.floor(Date.now() / 1_000),
 ): RunnerOutboundStore {
-  const load = (): readonly DurableRunnerEvent[] =>
-    database
-      .query<Row, []>(
-        `SELECT event_id, body_digest, body_json, byte_count
-         FROM local_semantic_outbox
-         ORDER BY created_at, event_id`,
-      )
-      .all()
-      .map((row) => {
-        let candidate: unknown;
-        try {
-          candidate = JSON.parse(row.body_json);
-        } catch {
-          throw new Error("RUNNER_OUTBOUND_STORE_CORRUPT");
-        }
-        const body = RunnerMessageBodySchema.safeParse(candidate);
-        const actualBytes = Buffer.byteLength(row.body_json, "utf8");
-        const actualDigest = createHash("sha256").update(row.body_json, "utf8").digest("hex");
-        if (
-          !body.success ||
-          body.data.kind === "HEARTBEAT" ||
-          body.data.kind === "HEADLESS_OUTPUT_CHUNK" ||
-          body.data.eventId !== row.event_id ||
-          row.body_digest !== actualDigest ||
-          row.byte_count !== actualBytes
-        ) {
-          throw new Error("RUNNER_OUTBOUND_STORE_CORRUPT");
-        }
-        return { eventId: row.event_id, digest: row.body_digest, body: body.data };
-      });
-
+  const outbox = createRunnerSemanticOutbox(database, now);
+  const restored = outbox.requeueInFlight();
+  if (!restored.ok) throw new Error("RUNNER_OUTBOUND_STORE_CORRUPT");
   return {
-    load,
+    load: () =>
+      outbox.ready().map((event) => ({
+        eventId: event.eventId,
+        digest: event.digest,
+        body: event.body,
+        localSequence: event.localSequence,
+        ...(event.predecessorEventId ? { predecessorEventId: event.predecessorEventId } : {}),
+      })),
 
-    put(event: DurableRunnerEvent): void {
-      const body = RunnerMessageBodySchema.safeParse(event.body);
-      const bodyJson = JSON.stringify(event.body);
-      const byteCount = Buffer.byteLength(bodyJson, "utf8");
-      const digest = createHash("sha256").update(bodyJson, "utf8").digest("hex");
-      if (
-        !body.success ||
-        body.data.kind === "HEARTBEAT" ||
-        body.data.kind === "HEADLESS_OUTPUT_CHUNK" ||
-        body.data.eventId !== event.eventId ||
-        digest !== event.digest ||
-        byteCount < 1 ||
-        byteCount > 65_536
-      ) {
-        throw new Error("RUNNER_OUTBOUND_EVENT_INVALID");
-      }
-      const prior = database
-        .query<Row, [string]>(
-          `SELECT event_id, body_digest, body_json, byte_count
-           FROM local_semantic_outbox WHERE event_id = ?`,
-        )
-        .get(event.eventId);
-      if (prior) {
-        if (prior.body_digest !== digest || prior.body_json !== bodyJson) {
-          throw new Error("RUNNER_EVENT_ID_CONFLICT");
-        }
-        return;
-      }
-      const bounds = database
-        .query<{ item_count: number; byte_count: number }, []>(
-          `SELECT count(*) AS item_count, coalesce(sum(byte_count), 0) AS byte_count
-           FROM local_semantic_outbox`,
-        )
-        .get();
-      if (
-        (bounds?.item_count ?? 0) >= 1_024 ||
-        (bounds?.byte_count ?? 0) + byteCount > 1024 * 1024
-      ) {
-        throw new Error("RUNNER_OUTBOUND_BACKPRESSURE");
-      }
-      database
-        .query(
-          `INSERT INTO local_semantic_outbox(
-             event_id, body_digest, body_json, byte_count, created_at
-           ) VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(event.eventId, digest, bodyJson, byteCount, Math.floor(now()));
+    put(event) {
+      const persisted = outbox.enqueue({
+        eventId: event.eventId,
+        ...(runId(event) ? { runId: runId(event) } : {}),
+        body: event.body,
+      });
+      if (!persisted.ok) throw new Error(persisted.error.code);
+      if (persisted.value.digest !== event.digest) throw new Error("RUNNER_EVENT_ID_CONFLICT");
+      return {
+        eventId: persisted.value.eventId,
+        digest: persisted.value.digest,
+        body: persisted.value.body,
+        localSequence: persisted.value.localSequence,
+        ...(persisted.value.predecessorEventId
+          ? { predecessorEventId: persisted.value.predecessorEventId }
+          : {}),
+      };
     },
 
-    remove(eventId: string): void {
-      database.query("DELETE FROM local_semantic_outbox WHERE event_id = ?").run(eventId);
+    markInFlight(eventId): void {
+      const result = outbox.markInFlight(eventId);
+      if (!result.ok && result.error.code !== "RUNNER_OUTBOX_STATE_CONFLICT") {
+        throw new Error(result.error.code);
+      }
+    },
+
+    remove(eventId): void {
+      const result = outbox.acknowledge(eventId, "APPLIED");
+      if (!result.ok) throw new Error(result.error.code);
+    },
+
+    reject(eventId): void {
+      const result = outbox.acknowledge(eventId, "REJECTED", "SERVER_REJECTED");
+      if (!result.ok) throw new Error(result.error.code);
     },
   };
 }

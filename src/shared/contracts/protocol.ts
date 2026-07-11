@@ -8,6 +8,7 @@ import {
   RecordRunResultPayloadSchema,
   ReleaseAuthoritySessionPayloadSchema,
   RenewAuthoritySessionPayloadSchema,
+  SemanticContinuitySchema,
 } from "./commands.ts";
 import { ReferenceFirstBootstrapEnvelopeSchema } from "./context.ts";
 import { CommitShaSchema, IdentifierSchema, InstantSchema, Sha256Schema } from "./ids.ts";
@@ -313,7 +314,11 @@ const EnvelopeBase = {
 } as const;
 
 export const RunnerEnvelopeSchema = z
-  .object({ ...EnvelopeBase, body: RunnerMessageBodySchema })
+  .object({
+    ...EnvelopeBase,
+    body: RunnerMessageBodySchema,
+    semanticContinuity: SemanticContinuitySchema.optional(),
+  })
   .strict();
 export const ServerEnvelopeSchema = z
   .object({ ...EnvelopeBase, body: ServerMessageBodySchema })

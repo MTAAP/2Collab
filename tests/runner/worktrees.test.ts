@@ -1291,50 +1291,84 @@ test("retained evidence is bounded, truncated, repository-relative, and secret-m
   f.database.close();
 });
 
-test("runner migration upgrades v4 to v5 and rejects gaps, future versions, and corruption", async () => {
+test("runner migration upgrades immutable v5 to v6 and rejects gaps, future versions, and corruption", async () => {
   const migrationDirectory = join(process.cwd(), "src", "runner", "db", "migrations");
   const migrations = await Promise.all(
-    [1, 2, 3, 4].map(async (version) =>
+    [1, 2, 3, 4, 5].map(async (version) =>
       readFile(
         join(
           migrationDirectory,
           `${String(version).padStart(4, "0")}_${
-            ["profiles_processes", "failed_starts", "start_fence", "semantic_outbox"][version - 1]
+            [
+              "profiles_processes",
+              "failed_starts",
+              "start_fence",
+              "semantic_outbox",
+              "run_worktrees",
+            ][version - 1]
           }.sql`,
         ),
         "utf8",
       ),
     ),
   );
-  const v4 = () => {
+  const v5 = () => {
     const database = new Database(":memory:", { strict: true });
     database.exec("PRAGMA foreign_keys = ON");
     for (const migration of migrations) database.exec(migration);
     return database;
   };
 
-  const upgraded = v4();
+  const upgraded = v5();
+  const authorityRequest = JSON.stringify({
+    kind: "AUTHORITY_RENEWAL_REQUEST",
+    eventId: "authority_1",
+    payload: {
+      runId: "run_1",
+      attemptId: "attempt_1",
+      authoritySessionId: "session_1",
+      authoritySessionFence: 1,
+    },
+  });
+  upgraded
+    .query(
+      `INSERT INTO local_semantic_outbox(
+         event_id, body_digest, body_json, byte_count, created_at
+       ) VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "authority_1",
+      new Bun.CryptoHasher("sha256").update(authorityRequest).digest("hex"),
+      authorityRequest,
+      Buffer.byteLength(authorityRequest),
+      1_000,
+    );
   migrateRunnerDatabase(upgraded, false);
   expect(
     upgraded
       .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
       .all()
       .map((row) => row.version),
-  ).toEqual([1, 2, 3, 4, 5]);
+  ).toEqual([1, 2, 3, 4, 5, 6]);
   expect(
     upgraded.query<{ strict: number }, []>("PRAGMA table_list('local_run_worktrees')").get()
       ?.strict,
   ).toBe(1);
+  expect(
+    upgraded
+      .query<{ count: number }, []>("SELECT count(*) AS count FROM local_semantic_outbox")
+      .get()?.count,
+  ).toBe(0);
   upgraded.exec("DROP TABLE local_run_worktrees");
   expect(() => migrateRunnerDatabase(upgraded, false)).toThrow("RUNNER_STATE_CORRUPT");
   upgraded.close();
 
-  const future = v4();
-  future.query("UPDATE schema_migrations SET version = 6 WHERE version = 4").run();
+  const future = v5();
+  future.query("UPDATE schema_migrations SET version = 7 WHERE version = 5").run();
   expect(() => migrateRunnerDatabase(future, false)).toThrow("RUNNER_STATE_CORRUPT");
   future.close();
 
-  const gap = v4();
+  const gap = v5();
   gap.query("DELETE FROM schema_migrations WHERE version = 3").run();
   expect(() => migrateRunnerDatabase(gap, false)).toThrow("RUNNER_STATE_CORRUPT");
   gap.close();

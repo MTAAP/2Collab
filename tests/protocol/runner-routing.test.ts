@@ -12,7 +12,10 @@ const principal = {
   accessExpiresAt: 2_000,
 } as unknown as VerifiedRunnerPrincipal;
 
-function envelope(body: RunnerEnvelope["body"]): RunnerEnvelope {
+function envelope(
+  body: RunnerEnvelope["body"],
+  semanticContinuity?: RunnerEnvelope["semanticContinuity"],
+): RunnerEnvelope {
   return {
     protocolVersion: "1.0",
     messageId: `message_${body.kind}`,
@@ -20,6 +23,7 @@ function envelope(body: RunnerEnvelope["body"]): RunnerEnvelope {
     issuedAt: 1_000,
     expiresAt: 1_010,
     body,
+    ...(semanticContinuity ? { semanticContinuity } : {}),
   };
 }
 
@@ -64,17 +68,20 @@ describe("runner inbound semantic routing", () => {
     ).toEqual({ accepted: true });
     expect(
       await router.route(
-        envelope({
-          kind: "ATTEMPT_EVENT",
-          eventId: "event_attempt_1",
-          payload: {
-            runId: "run_1",
-            expectedRunRevision: 1,
-            attemptId: "attempt_1",
-            expectedAttemptRevision: 1,
-            event: { kind: "PROCESS_STARTED", observedAt: 1_000 },
+        envelope(
+          {
+            kind: "ATTEMPT_EVENT",
+            eventId: "event_attempt_1",
+            payload: {
+              runId: "run_1",
+              expectedRunRevision: 1,
+              attemptId: "attempt_1",
+              expectedAttemptRevision: 1,
+              event: { kind: "PROCESS_STARTED", observedAt: 1_000 },
+            },
           },
-        }),
+          { localSequence: 1 },
+        ),
       ),
     ).toEqual({ accepted: true, disposition: "APPLIED" });
     expect(

@@ -107,7 +107,12 @@ function createCore(dependencies: CoreDependencies) {
     return {
       key: `${principal.runnerId}:${body.eventId}`,
       eventId: body.eventId,
-      digest: createHash("sha256").update(JSON.stringify(body), "utf8").digest("hex"),
+      digest: createHash("sha256")
+        .update(
+          JSON.stringify({ body, semanticContinuity: envelope.semanticContinuity ?? null }),
+          "utf8",
+        )
+        .digest("hex"),
     };
   };
 

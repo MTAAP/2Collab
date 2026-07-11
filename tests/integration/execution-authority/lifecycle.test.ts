@@ -13,6 +13,7 @@ import {
   prepareRunConfigurationSnapshot,
   resolveEffectiveRunConfiguration,
 } from "../../../src/server/modules/presets/configuration-resolver.ts";
+import { createRunnerEventDeduplicator } from "../../../src/server/modules/runs/event-deduplication.ts";
 import type { CollabCommand } from "../../../src/shared/contracts/commands.ts";
 
 const BASE_COMMIT = "a".repeat(40);
@@ -260,6 +261,11 @@ function fixture() {
   seed(database);
   let now = 100;
   const ids = new Map<string, number>();
+  const nextId = (prefix: string) => {
+    const next = (ids.get(prefix) ?? 0) + 1;
+    ids.set(prefix, next);
+    return `${prefix}_${next}`;
+  };
   const delivered: Array<{ outboxId: string; permit: string }> = [];
   const refreshed: CollabCommand[] = [];
   let previewRefreshes = 0;
@@ -290,11 +296,12 @@ function fixture() {
   const dependencies: AuthorityDependencies = {
     database,
     clock: () => now,
-    id(prefix) {
-      const next = (ids.get(prefix) ?? 0) + 1;
-      ids.set(prefix, next);
-      return `${prefix}_${next}`;
-    },
+    id: nextId,
+    semanticEvents: createRunnerEventDeduplicator({
+      database,
+      clock: () => now,
+      id: (kind) => nextId(kind),
+    }),
     authorityFacts: {
       async preview() {
         previewRefreshes += 1;
@@ -1505,6 +1512,45 @@ describe("deep execution authority", () => {
         },
       });
       expect(regressed).toMatchObject({ ok: false, error: { code: "OUTBOX_STATE_STALE" } });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("runner semantic acceptance commits lifecycle, dedup, audit, and ACK intent atomically", async () => {
+    const f = fixture();
+    try {
+      const launched = await f.authority.execute(launch());
+      if (!launched.ok) throw new Error(launched.error.code);
+      const command = {
+        kind: "ACCEPT_ATTEMPT_EVENT" as const,
+        idempotencyKey: "semantic_event_1" as never,
+        actor: runnerActor(),
+        runId: launched.value.run.id,
+        expectedRunRevision: 1,
+        attemptId: launched.value.attempt.id,
+        expectedAttemptRevision: 1,
+        event: { kind: "ACKNOWLEDGED" as const, observedAt: 101 },
+        semanticContinuity: { localSequence: 1 },
+      };
+      expect(await f.authority.execute(command)).toMatchObject({ ok: true });
+      expect(await f.authority.execute(command)).toMatchObject({ ok: true });
+      expect(
+        f.database
+          .query<{ events: number; acknowledgements: number; lifecycle: number }, []>(
+            `SELECT
+               (SELECT count(*) FROM accepted_runner_events) AS events,
+               (SELECT count(*) FROM accepted_event_ack_outbox) AS acknowledgements,
+               (SELECT count(*) FROM attempt_lifecycle_events) AS lifecycle`,
+          )
+          .get(),
+      ).toEqual({ events: 1, acknowledgements: 1, lifecycle: 1 });
+      expect(
+        await f.authority.execute({
+          ...command,
+          event: { kind: "ACKNOWLEDGED" as const, observedAt: 102 },
+        }),
+      ).toMatchObject({ ok: false, error: { code: "RUNNER_EVENT_ID_CONFLICT" } });
     } finally {
       f.close();
     }

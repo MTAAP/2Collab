@@ -1396,10 +1396,10 @@ git commit -m "feat: expose equivalent foundation surfaces"
 **Requirements:** `FND-009`, remaining `FND-008`, `ORP-10`; supplies the durable fault proof deferred by Tasks 7 and 10.
 
 **Files:**
-- Create: `src/server/db/migrations/0005_foundation_operations.sql`
-- Create: `src/server/db/migrations/0005_foundation_operations.verify.ts`
+- Consume unchanged: `src/server/db/migrations/0005_foundation_operations.sql`
+- Consume unchanged: `src/server/db/migrations/0005_foundation_operations.verify.ts`
 - Create: `src/runner/{cache,outbox,offline-policy}.ts`
-- Create: `src/runner/db/migrations/0002_continuity.sql`
+- Create: `src/runner/db/migrations/0006_continuity_cache.sql`
 - Modify: `src/runner/db/migrate.ts`
 - Create: `src/server/modules/runs/{event-deduplication,reconciliation}.ts`
 - Modify: `src/shared/contracts/{protocol,commands,runs}.ts`
@@ -1434,9 +1434,9 @@ Expected: FAIL because local continuity and reconciliation modules are missing.
 
 - [ ] **Step 3: Add operation persistence and offline policy**
 
-Server migration 0005 creates durable semantic-event acceptance and closed revocation/operation intent state. Accepted events key on authenticated runner plus stable semantic event ID, not connection message ID, and persist run/attempt, schema/event kind, positive local sequence/predecessor, canonical input hash, committed result reference/disposition, and accepted time. The dedup row, lifecycle/evidence/checkpoint/result effect, audit, and acknowledgement intent commit together. Same ID/same hash replays the result; changed hash conflicts. Closed operation kinds use kind-specific validated fields/digests and never arbitrary payload JSON or the WSS dispatch outbox. Backup metadata belongs to Task 15, not this migration.
+Immutable server migration 0005 already creates durable semantic-event acceptance and closed revocation/operation intent state; Task 14 consumes that schema and never edits it. Accepted events key on authenticated runner plus stable semantic event ID, not connection message ID, and persist run/attempt, schema/event kind, positive local sequence/predecessor, canonical input hash, committed result reference/disposition, and accepted time. The dedup row, lifecycle/evidence/checkpoint/result effect, audit, and acknowledgement intent commit together. Same ID/same hash replays the result; changed hash conflicts. Closed operation kinds use kind-specific validated fields/digests and never arbitrary payload JSON or the WSS dispatch outbox. Backup metadata belongs to Task 15, not this migration.
 
-Runner-local migration 0002 adds bounded cache entries and a closed semantic event outbox to `~/.collab/runner.db`. Events retain stable ID/hash/sequence across restart and connection changes, use `PENDING/IN_FLIGHT/ACKNOWLEDGED/PERMANENTLY_REJECTED`, reserve capacity for terminal/checkpoint facts, and never contain raw output, prompts, bodies, diffs, transcripts, credentials, environment, attachment handles, or absolute paths. Cache rows are read-only authority aids with freshness/provenance and the Product Spec byte/item/age limits; they never store permits or create authority.
+Runner-local migrations 0001 through 0005 are immutable. New migration 0006 adds bounded cache entries and upgrades the existing v4 semantic outbox to a closed causal event outbox in `~/.collab/runner.db`. Events retain stable ID/hash/per-run sequence across restart and connection changes, use `PENDING/IN_FLIGHT/ACKNOWLEDGED/PERMANENTLY_REJECTED`, reserve capacity for terminal/checkpoint facts, and never contain raw output, prompts, source bodies, diffs, transcripts, credentials, environment, attachment handles, absolute paths, permits, or authority requests. Cache rows are read-only authority aids with freshness/provenance and the Product Spec byte/item/age limits; they never store permits or create authority.
 
 ```ts
 export function decideOffline(input: OfflineDecisionInput): OfflineDecision {
@@ -1460,7 +1460,7 @@ Expected: PASS; disconnected runners cannot renew/acquire authority or claim mut
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/shared/contracts/protocol.ts src/shared/contracts/commands.ts src/shared/contracts/runs.ts src/server/db/migrations/0005_foundation_operations.sql src/server/db/migrations/0005_foundation_operations.verify.ts src/runner/db src/runner/cache.ts src/runner/outbox.ts src/runner/offline-policy.ts src/server/modules/runs/event-deduplication.ts src/server/modules/runs/reconciliation.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts
+git add src/shared/contracts/protocol.ts src/shared/contracts/commands.ts src/shared/contracts/runs.ts src/runner/db/migrations/0006_continuity_cache.sql src/runner/db/migrate.ts src/runner/cache.ts src/runner/outbox.ts src/runner/offline-policy.ts src/server/modules/runs/event-deduplication.ts src/server/modules/runs/reconciliation.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts
 git commit -m "feat: add bounded offline continuity"
 ```
 

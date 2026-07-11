@@ -21,12 +21,16 @@ export type DurableRunnerEvent = Readonly<{
   eventId: string;
   digest: string;
   body: DurableBody;
+  localSequence?: number;
+  predecessorEventId?: string;
 }>;
 
 export interface RunnerOutboundStore {
   load(): readonly DurableRunnerEvent[];
-  put(event: DurableRunnerEvent): void;
+  put(event: DurableRunnerEvent): DurableRunnerEvent | undefined;
+  markInFlight?(eventId: string): void;
   remove(eventId: string): void;
+  reject?(eventId: string): void;
 }
 
 export type RunnerClientSocket = EventTarget &
@@ -67,6 +71,7 @@ type Outbound = Readonly<{
   bytes: number;
   durable: boolean;
   digest?: string;
+  semanticContinuity?: Readonly<{ localSequence: number; predecessorEventId?: string }>;
 }>;
 
 function outboundFailure<T>(code: string, message: string): Result<T> {
@@ -181,8 +186,20 @@ export function createRunnerWssClient(dependencies: Dependencies) {
   const bodyDigest = (body: RunnerEnvelope["body"]): string =>
     createHash("sha256").update(JSON.stringify(body), "utf8").digest("hex");
 
-  const durableEventId = (body: RunnerEnvelope["body"]): string | null =>
+  const semanticEventId = (body: RunnerEnvelope["body"]): string | null =>
     body.kind === "HEARTBEAT" || body.kind === "HEADLESS_OUTPUT_CHUNK" ? null : body.eventId;
+
+  const durableEventId = (body: RunnerEnvelope["body"]): string | null =>
+    [
+      "OPERATION_ACKNOWLEDGEMENT",
+      "ATTEMPT_EVENT",
+      "CHECKPOINT",
+      "EVIDENCE",
+      "RUN_RESULT",
+      "GATE_EVENT",
+    ].includes(body.kind)
+      ? semanticEventId(body)
+      : null;
 
   for (const event of outboundStore.load()) {
     const parsed = RunnerMessageBodySchema.safeParse(event.body);
@@ -194,7 +211,20 @@ export function createRunnerWssClient(dependencies: Dependencies) {
       throw new Error("RUNNER_OUTBOUND_STORE_CORRUPT");
     }
     const bytes = Buffer.byteLength(JSON.stringify(parsed.data), "utf8") + 256;
-    outbound.push({ body: parsed.data, bytes, durable: true, digest: event.digest });
+    outbound.push({
+      body: parsed.data,
+      bytes,
+      durable: true,
+      digest: event.digest,
+      ...(event.localSequence
+        ? {
+            semanticContinuity: {
+              localSequence: event.localSequence,
+              ...(event.predecessorEventId ? { predecessorEventId: event.predecessorEventId } : {}),
+            },
+          }
+        : {}),
+    });
     outboundBytes += bytes;
   }
   if (outbound.length > maximumOutboundItems || outboundBytes > maximumOutboundBytes) {
@@ -235,25 +265,25 @@ export function createRunnerWssClient(dependencies: Dependencies) {
   };
 
   const retainedEvent = (eventId: string): Outbound | undefined =>
-    inFlight.get(eventId) ?? outbound.find((entry) => durableEventId(entry.body) === eventId);
+    inFlight.get(eventId) ?? outbound.find((entry) => semanticEventId(entry.body) === eventId);
 
   const eventForRequest = (requestId: string): string | undefined => {
     const entry = [...inFlight.values(), ...outbound].find(
       (candidate) => "requestId" in candidate.body && candidate.body.requestId === requestId,
     );
-    return entry ? (durableEventId(entry.body) ?? undefined) : undefined;
+    return entry ? (semanticEventId(entry.body) ?? undefined) : undefined;
   };
 
   const completeEvent = (eventId: string): void => {
     const retained = retainedEvent(eventId);
     if (!retained) return;
     inFlight.delete(eventId);
-    const ready = outbound.findIndex((entry) => durableEventId(entry.body) === eventId);
+    const ready = outbound.findIndex((entry) => semanticEventId(entry.body) === eventId);
     if (ready >= 0) outbound.splice(ready, 1);
     outboundBytes -= retained.bytes;
     processedResponses.delete(eventId);
     pendingAcknowledgements.delete(eventId);
-    outboundStore.remove(eventId);
+    if (retained.durable) outboundStore.remove(eventId);
   };
 
   const acceptEnvelope = (candidate: unknown, wire: string): void => {
@@ -309,6 +339,16 @@ export function createRunnerWssClient(dependencies: Dependencies) {
             pendingAcknowledgements.add(eventId);
             return;
           }
+          if (envelope.data.body.disposition === "REJECTED" && retained.durable) {
+            outboundStore.reject?.(eventId);
+            inFlight.delete(eventId);
+            const ready = outbound.findIndex((entry) => semanticEventId(entry.body) === eventId);
+            if (ready >= 0) outbound.splice(ready, 1);
+            outboundBytes -= retained.bytes;
+            processedResponses.delete(eventId);
+            pendingAcknowledgements.delete(eventId);
+            return;
+          }
           completeEvent(eventId);
         }
       })
@@ -338,6 +378,7 @@ export function createRunnerWssClient(dependencies: Dependencies) {
         issuedAt,
         expiresAt: issuedAt + 30,
         body: entry.body,
+        ...(entry.semanticContinuity ? { semanticContinuity: entry.semanticContinuity } : {}),
       };
       if (!RunnerEnvelopeSchema.safeParse(envelope).success) {
         fail(1002, "PROTOCOL_ERROR");
@@ -351,8 +392,11 @@ export function createRunnerWssClient(dependencies: Dependencies) {
       }
       outbound.shift();
       const eventId = durableEventId(entry.body);
-      if (eventId) inFlight.set(eventId, entry);
-      else outboundBytes -= entry.bytes;
+      const semanticId = eventId ?? semanticEventId(entry.body);
+      if (semanticId) {
+        inFlight.set(semanticId, entry);
+        if (eventId) outboundStore.markInFlight?.(eventId);
+      } else outboundBytes -= entry.bytes;
       sent += 1;
     }
     requestDrain();
@@ -489,11 +533,13 @@ export function createRunnerWssClient(dependencies: Dependencies) {
         return outboundFailure("RUNNER_OUTBOUND_INVALID", "Runner outbound message is invalid.");
       }
       const bytes = Buffer.byteLength(JSON.stringify(parsed.data), "utf8") + 256;
-      const eventId = durableEventId(parsed.data);
+      const eventId = semanticEventId(parsed.data);
+      const durableId = durableEventId(parsed.data);
       const digest = bodyDigest(parsed.data);
       if (eventId) {
         const prior =
-          inFlight.get(eventId) ?? outbound.find((entry) => durableEventId(entry.body) === eventId);
+          inFlight.get(eventId) ??
+          outbound.find((entry) => semanticEventId(entry.body) === eventId);
         if (prior) {
           if (prior.digest !== digest) {
             return outboundFailure(
@@ -514,15 +560,22 @@ export function createRunnerWssClient(dependencies: Dependencies) {
           "Runner outbound backpressure limit was reached.",
         );
       }
-      const entry: Outbound = {
-        body: parsed.data,
-        bytes,
-        durable: eventId !== null,
-        ...(eventId ? { digest } : {}),
-      };
-      if (eventId) {
+      let semanticContinuity: Outbound["semanticContinuity"];
+      if (durableId) {
         try {
-          outboundStore.put({ eventId, digest, body: parsed.data as DurableBody });
+          const persisted = outboundStore.put({
+            eventId: durableId,
+            digest,
+            body: parsed.data as DurableBody,
+          });
+          if (persisted?.localSequence) {
+            semanticContinuity = {
+              localSequence: persisted.localSequence,
+              ...(persisted.predecessorEventId
+                ? { predecessorEventId: persisted.predecessorEventId }
+                : {}),
+            };
+          }
         } catch (error) {
           const code =
             error instanceof Error && error.message === "RUNNER_EVENT_ID_CONFLICT"
@@ -536,6 +589,13 @@ export function createRunnerWssClient(dependencies: Dependencies) {
           );
         }
       }
+      const entry: Outbound = {
+        body: parsed.data,
+        bytes,
+        durable: durableId !== null,
+        ...(eventId ? { digest } : {}),
+        ...(semanticContinuity ? { semanticContinuity } : {}),
+      };
       outbound.push(entry);
       outboundBytes += bytes;
       flushOutbound();

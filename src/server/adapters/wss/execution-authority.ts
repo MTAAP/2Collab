@@ -37,6 +37,7 @@ export function createRunnerExecutionAuthorityAdapter(authority: ExecutionAuthor
       body: RunnerSemanticBody,
       principal: VerifiedRunnerPrincipal,
       connectionId: string,
+      semanticContinuity?: RunnerEnvelope["semanticContinuity"],
     ) {
       const base = {
         idempotencyKey: body.eventId,
@@ -73,7 +74,12 @@ export function createRunnerExecutionAuthorityAdapter(authority: ExecutionAuthor
           candidate = { ...base, kind: "AUTHORIZE_OPERATION", ...body.payload };
           break;
         case "ATTEMPT_EVENT":
-          candidate = { ...base, kind: "ACCEPT_ATTEMPT_EVENT", ...body.payload };
+          candidate = {
+            ...base,
+            kind: "ACCEPT_ATTEMPT_EVENT",
+            ...body.payload,
+            ...(semanticContinuity ? { semanticContinuity } : {}),
+          };
           break;
         case "CHECKPOINT":
           candidate = {
@@ -81,13 +87,24 @@ export function createRunnerExecutionAuthorityAdapter(authority: ExecutionAuthor
             kind: "RECORD_CHECKPOINT",
             ...body.payload,
             runnerId: principal.runnerId,
+            ...(semanticContinuity ? { semanticContinuity } : {}),
           };
           break;
         case "EVIDENCE":
-          candidate = { ...base, kind: "RECORD_EVIDENCE", ...body.payload };
+          candidate = {
+            ...base,
+            kind: "RECORD_EVIDENCE",
+            ...body.payload,
+            ...(semanticContinuity ? { semanticContinuity } : {}),
+          };
           break;
         case "RUN_RESULT":
-          candidate = { ...base, kind: "RECORD_RUN_RESULT", ...body.payload };
+          candidate = {
+            ...base,
+            kind: "RECORD_RUN_RESULT",
+            ...body.payload,
+            ...(semanticContinuity ? { semanticContinuity } : {}),
+          };
           break;
       }
       const command = CollabCommandSchema.safeParse(candidate);

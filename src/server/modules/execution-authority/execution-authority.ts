@@ -25,6 +25,11 @@ import { inImmediateTransaction } from "../../db/transaction.ts";
 import { linkSourceReferences } from "../coordination-records/source-links.ts";
 import type { PreparedRunConfigurationSnapshot } from "../presets/configuration-resolver.ts";
 import { createCheckpoint } from "../runs/checkpoints.ts";
+import type {
+  createRunnerEventDeduplicator,
+  RunnerEventAcceptanceInput,
+  RunnerEventApplied,
+} from "../runs/event-deduplication.ts";
 import { createEvidence } from "../runs/evidence.ts";
 import { transitionAttempt, transitionRun } from "../runs/lifecycle.ts";
 import { evaluateRunResult } from "../runs/results.ts";
@@ -96,6 +101,7 @@ export type AuthorityDependencies = Readonly<{
   runConfiguration: RunConfigurationResolutionPort;
   permitCodec: PermitCodec;
   runnerControl: RunnerControlPort;
+  semanticEvents?: Pick<ReturnType<typeof createRunnerEventDeduplicator>, "prepare" | "commit">;
 }>;
 
 type StoredIdempotency = Readonly<{ input_hash: string; result_json: string }>;
@@ -114,6 +120,68 @@ function canonicalCommand(command: CollabCommand): string {
     copy.permit = digestHex(command.permit);
   }
   return JSON.stringify(copy);
+}
+
+type SemanticCommand = Extract<
+  CollabCommand,
+  {
+    kind: "ACCEPT_ATTEMPT_EVENT" | "RECORD_CHECKPOINT" | "RECORD_EVIDENCE" | "RECORD_RUN_RESULT";
+  }
+>;
+
+function prepareSemanticEvent(
+  dependencies: AuthorityDependencies,
+  command: SemanticCommand,
+  inputHash: string,
+):
+  | Result<
+      Readonly<{
+        state: "NEW" | "DUPLICATE";
+        input: RunnerEventAcceptanceInput;
+      }>
+    >
+  | undefined {
+  const continuity = command.semanticContinuity;
+  if (!continuity) return undefined;
+  if (command.actor.kind !== "RUNNER") {
+    return error("RUNNER_ACTOR_MISMATCH", "Runner actor does not own this event.");
+  }
+  if (!dependencies.semanticEvents) {
+    return error(
+      "RUNNER_EVENT_ACCEPTANCE_UNAVAILABLE",
+      "Runner semantic event acceptance is unavailable.",
+      "REFRESH",
+    );
+  }
+  const input: RunnerEventAcceptanceInput = {
+    runnerId: command.actor.runnerId,
+    eventId: command.idempotencyKey,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    eventKind:
+      command.kind === "ACCEPT_ATTEMPT_EVENT"
+        ? "ATTEMPT_EVENT"
+        : command.kind === "RECORD_CHECKPOINT"
+          ? "CHECKPOINT"
+          : command.kind === "RECORD_EVIDENCE"
+            ? "EVIDENCE"
+            : "RUN_RESULT",
+    localSequence: continuity.localSequence,
+    ...(continuity.predecessorEventId ? { predecessorEventId: continuity.predecessorEventId } : {}),
+    inputHash,
+  };
+  const prepared = dependencies.semanticEvents.prepare(input);
+  return prepared.ok ? { ok: true, value: { state: prepared.value.state, input } } : prepared;
+}
+
+function commitSemanticEvent(
+  dependencies: AuthorityDependencies,
+  prepared: ReturnType<typeof prepareSemanticEvent>,
+  applied: RunnerEventApplied,
+): void {
+  if (prepared?.ok && prepared.value.state === "NEW") {
+    dependencies.semanticEvents?.commit(prepared.value.input, applied);
+  }
 }
 
 function storedResult(
@@ -1682,8 +1750,13 @@ function executeAttemptEvent(
 ): Result<CommandResult> {
   const now = dependencies.clock();
   return inImmediateTransaction(dependencies.database, () => {
+    const semantic = prepareSemanticEvent(dependencies, command, inputHash);
+    if (semantic && !semantic.ok) return semantic;
     const replay = storedResult(dependencies.database, command, inputHash);
     if (replay) return replay;
+    if (semantic?.ok && semantic.value.state === "DUPLICATE") {
+      return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    }
     const principal = requireActivePrincipal(dependencies.database, command.actor);
     if (!principal.ok) return principal;
     const currentAttempt = attemptView(dependencies.database, command.attemptId);
@@ -1835,6 +1908,10 @@ function executeAttemptEvent(
     const result: CommandResult = { kind: "ACCEPT_ATTEMPT_EVENT", run, attempt };
     audit(dependencies, command, command.attemptId, { eventKind: command.event.kind, state: next });
     persistIdempotency(dependencies.database, command, inputHash, result, now);
+    commitSemanticEvent(dependencies, semantic, {
+      resultReference: attempt.id,
+      disposition: "APPLIED",
+    });
     return { ok: true, value: result };
   });
 }
@@ -1983,8 +2060,13 @@ function executeCheckpoint(
 ): Result<CommandResult> {
   const now = dependencies.clock();
   return inImmediateTransaction(dependencies.database, () => {
+    const semantic = prepareSemanticEvent(dependencies, command, inputHash);
+    if (semantic && !semantic.ok) return semantic;
     const replay = storedResult(dependencies.database, command, inputHash);
     if (replay) return replay;
+    if (semantic?.ok && semantic.value.state === "DUPLICATE") {
+      return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    }
     const currentRun = runView(dependencies.database, command.runId);
     const currentAttempt = attemptView(dependencies.database, command.attemptId);
     if (!currentRun || !currentAttempt || currentAttempt.runId !== command.runId) {
@@ -2116,6 +2198,10 @@ function executeCheckpoint(
       requestedAction: command.requestedAction,
     });
     persistIdempotency(dependencies.database, command, inputHash, result, now);
+    commitSemanticEvent(dependencies, semantic, {
+      resultReference: checkpointId,
+      disposition: "APPLIED",
+    });
     return { ok: true, value: result };
   });
 }
@@ -2127,8 +2213,13 @@ function executeEvidence(
 ): Result<CommandResult> {
   const now = dependencies.clock();
   return inImmediateTransaction(dependencies.database, () => {
+    const semantic = prepareSemanticEvent(dependencies, command, inputHash);
+    if (semantic && !semantic.ok) return semantic;
     const replay = storedResult(dependencies.database, command, inputHash);
     if (replay) return replay;
+    if (semantic?.ok && semantic.value.state === "DUPLICATE") {
+      return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    }
     const run = runView(dependencies.database, command.runId);
     if (!run) return error("RUN_NOT_FOUND", "Agent Run was not found.");
     if (run.revision !== command.expectedRunRevision) {
@@ -2306,6 +2397,10 @@ function executeEvidence(
     const result: CommandResult = { kind: "RECORD_EVIDENCE", evidence: record.value };
     audit(dependencies, command, command.runId, { evidenceKind: command.evidence.kind });
     persistIdempotency(dependencies.database, command, inputHash, result, now);
+    commitSemanticEvent(dependencies, semantic, {
+      resultReference: evidenceId,
+      disposition: "APPLIED",
+    });
     return { ok: true, value: result };
   });
 }
@@ -2317,8 +2412,13 @@ function executeRunResult(
 ): Result<CommandResult> {
   const now = dependencies.clock();
   return inImmediateTransaction(dependencies.database, () => {
+    const semantic = prepareSemanticEvent(dependencies, command, inputHash);
+    if (semantic && !semantic.ok) return semantic;
     const replay = storedResult(dependencies.database, command, inputHash);
     if (replay) return replay;
+    if (semantic?.ok && semantic.value.state === "DUPLICATE") {
+      return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    }
     const currentRun = runView(dependencies.database, command.runId);
     const attempt = attemptView(dependencies.database, command.attemptId);
     if (!currentRun || !attempt || attempt.runId !== command.runId) {
@@ -2426,6 +2526,10 @@ function executeRunResult(
     const result: CommandResult = { kind: "RECORD_RUN_RESULT", run };
     audit(dependencies, command, command.runId, { resultKind: command.result });
     persistIdempotency(dependencies.database, command, inputHash, result, now);
+    commitSemanticEvent(dependencies, semantic, {
+      resultReference: resultId,
+      disposition: "APPLIED",
+    });
     return { ok: true, value: result };
   });
 }

@@ -25,6 +25,7 @@ type Dependencies = Readonly<{
       }>
     >,
     actor: VerifiedRunnerPrincipal,
+    semanticContinuity: RunnerEnvelope["semanticContinuity"],
   ) => Promise<Result<RunnerSemanticAcceptance>>;
   acceptOutput: (
     body: Extract<RunnerEnvelope["body"], Readonly<{ kind: "HEADLESS_OUTPUT_CHUNK" }>>,
@@ -72,7 +73,19 @@ export function createRunnerInboundRouter(dependencies: Dependencies) {
       if (body.kind === "GATE_EVENT") {
         return fromResult(await dependencies.acceptGateEvent(body, dependencies.principal));
       }
-      return fromSemanticResult(await dependencies.acceptSemantic(body, dependencies.principal));
+      if (
+        ["ATTEMPT_EVENT", "CHECKPOINT", "EVIDENCE", "RUN_RESULT"].includes(body.kind) &&
+        !parsed.data.semanticContinuity
+      ) {
+        return { accepted: false, code: "RUNNER_SEMANTIC_CONTINUITY_REQUIRED" };
+      }
+      return fromSemanticResult(
+        await dependencies.acceptSemantic(
+          body,
+          dependencies.principal,
+          parsed.data.semanticContinuity,
+        ),
+      );
     },
   };
 }

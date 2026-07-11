@@ -31,13 +31,15 @@ test("runner semantic outbox persists stable events and rejects conflicting repl
     },
   } as const;
   const digest = createHash("sha256").update(JSON.stringify(body), "utf8").digest("hex");
-  store.put({ eventId: body.eventId, digest, body });
+  expect(store.put({ eventId: body.eventId, digest, body })).toMatchObject({
+    localSequence: 1,
+  });
   store.put({ eventId: body.eventId, digest, body });
   database.close();
 
   database = openRunnerDatabase(path);
   store = createSqliteRunnerOutboundStore(database, () => 1_001);
-  expect(store.load()).toEqual([{ eventId: "event_1", digest, body }]);
+  expect(store.load()).toEqual([{ eventId: "event_1", digest, body, localSequence: 1 }]);
   const changedBody = {
     ...body,
     payload: {
