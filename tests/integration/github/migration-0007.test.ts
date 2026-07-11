@@ -7,14 +7,14 @@ describe("GitHub schema migration 0007", () => {
   test("migrates empty databases to the claimed strict schema", () => {
     const database = new Database(":memory:", { strict: true });
     migrate(database);
-    expect(LATEST_SCHEMA_VERSION).toBe(12);
+    expect(LATEST_SCHEMA_VERSION).toBe(15);
     expect(
       database
         .query<{ version: number }, []>(
           "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1",
         )
         .get(),
-    ).toEqual({ version: 12 });
+    ).toEqual({ version: 15 });
     expect(() => verifyGitHubSchema(database)).not.toThrow();
     database.close();
   });

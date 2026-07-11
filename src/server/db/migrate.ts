@@ -30,9 +30,17 @@ import outlineProposalsMigration from "./migrations/0012_outline_proposals.sql" 
   type: "text",
 };
 import { verifyOutlineProposalSchema } from "./migrations/0012_outline_proposals.verify.ts";
+import workflowsMigration from "./migrations/0013_workflows.sql" with { type: "text" };
+import { verifyWorkflowsSchema } from "./migrations/0013_workflows.verify.ts";
+import workflowExecutionMigration from "./migrations/0014_workflow_execution.sql" with {
+  type: "text",
+};
+import { verifyWorkflowExecutionSchema } from "./migrations/0014_workflow_execution.verify.ts";
+import gatesTelemetryMigration from "./migrations/0015_gates_telemetry.sql" with { type: "text" };
+import { verifyGatesTelemetrySchema } from "./migrations/0015_gates_telemetry.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-export const LATEST_SCHEMA_VERSION = 12;
+export const LATEST_SCHEMA_VERSION = 15;
 const MIGRATION_SOURCES = [
   foundationMigration,
   projectsMigration,
@@ -46,6 +54,9 @@ const MIGRATION_SOURCES = [
   outlineMigration,
   outlineGrantsMigration,
   outlineProposalsMigration,
+  workflowsMigration,
+  workflowExecutionMigration,
+  gatesTelemetryMigration,
 ] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
@@ -151,6 +162,9 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 10) verifyOutlineSchema(database);
   if (version >= 11) verifyOutlineGrantSchema(database);
   if (version >= 12) verifyOutlineProposalSchema(database);
+  if (version >= 13) verifyWorkflowsSchema(database);
+  if (version >= 14) verifyWorkflowExecutionSchema(database);
+  if (version >= 15) verifyGatesTelemetrySchema(database);
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -278,6 +292,18 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 11) {
       database.exec(outlineProposalsMigration);
+      currentVersion = 12;
+    }
+    if (currentVersion === 12) {
+      database.exec(workflowsMigration);
+      currentVersion = 13;
+    }
+    if (currentVersion === 13) {
+      database.exec(workflowExecutionMigration);
+      currentVersion = 14;
+    }
+    if (currentVersion === 14) {
+      database.exec(gatesTelemetryMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);
