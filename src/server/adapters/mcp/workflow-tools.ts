@@ -5,11 +5,11 @@ import {
   WorkflowDefinitionSchema,
 } from "../../../shared/contracts/workflow.ts";
 import type { WorkflowAuthoringOperations } from "../../modules/workflows/authoring.ts";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
 
 const InputSchema = z
   .object({
     idempotencyKey: z.string().min(1).max(128),
-    actorMemberId: z.string().min(1).max(128),
     draftId: z.string().min(1).max(128),
     templateKey: z.string().min(1).max(128),
     expectedRevision: z.number().int().nonnegative(),
@@ -23,6 +23,7 @@ const OutputSchema = z
 
 export function registerWorkflowTools(
   server: McpServer,
+  actor: MemberActor,
   operations: WorkflowAuthoringOperations,
 ): void {
   server.registerTool(
@@ -35,7 +36,7 @@ export function registerWorkflowTools(
       outputSchema: OutputSchema,
     },
     async (command) => {
-      const result = await operations.save(command);
+      const result = await operations.save({ ...command, actorMemberId: actor.memberId });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
         structuredContent: result,

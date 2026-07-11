@@ -79,6 +79,14 @@ function createTestDependencies(): FoundationHttpDependencies {
 }
 
 describe("composition", () => {
+  test("an incomplete composition is not ready and root responses carry security policy", async () => {
+    const app = createApp();
+    expect((await app.request("/readyz")).status).toBe(503);
+    const health = await app.request("/healthz");
+    expect(health.headers.get("cache-control")).toBe("no-store");
+    expect(health.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
   test("composition injects state and package test includes every suite", async () => {
     const app = createApp(createTestDependencies());
     expect((await app.request("/healthz")).status).toBe(200);

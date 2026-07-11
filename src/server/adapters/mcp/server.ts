@@ -7,6 +7,10 @@ import { bindGitHubMutationClient, registerGitHubTools } from "./github-tools.ts
 import type { GitHubMutation, GitHubProjection } from "../../../shared/contracts/github.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import type { ExactRevisionMutation, Observed } from "../../modules/connectors/contract.ts";
+import type { WorkflowAuthoringOperations } from "../../modules/workflows/authoring.ts";
+import type { TemplateBindingOperations } from "../../modules/templates/bindings.ts";
+import { registerWorkflowTools } from "./workflow-tools.ts";
+import { registerTemplateTools } from "./template-tools.ts";
 
 export function createPublicMcpServer(dependencies: {
   actor: MemberActor;
@@ -21,6 +25,8 @@ export function createPublicMcpServer(dependencies: {
       command: ExactRevisionMutation<GitHubMutation>,
     ): Promise<Result<Observed<GitHubProjection>>>;
   }>;
+  workflows?: WorkflowAuthoringOperations;
+  templates?: TemplateBindingOperations;
 }): McpServer {
   const server = new McpServer({ name: "2collab", version: "0.1.0" });
   registerPublicRunTools(server, {
@@ -44,5 +50,9 @@ export function createPublicMcpServer(dependencies: {
       ),
     );
   }
+  if (dependencies.workflows)
+    registerWorkflowTools(server, dependencies.actor, dependencies.workflows);
+  if (dependencies.templates)
+    registerTemplateTools(server, dependencies.actor, dependencies.templates);
   return server;
 }

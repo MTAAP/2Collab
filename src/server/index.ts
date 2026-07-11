@@ -1,7 +1,7 @@
 import { readServerEnvironment } from "../shared/environment.ts";
 import { createProductionServer } from "./adapters/wss/production-bootstrap.ts";
 import { createApp } from "./app.ts";
-import { createServerDependencies } from "./dependencies.ts";
+import { createProductionComposition } from "./dependencies.ts";
 import { assertNoIncompleteRestore } from "./operations/restore.ts";
 
 const environment = readServerEnvironment(Bun.env);
@@ -26,7 +26,7 @@ const server = compositionModule
       await import(compositionModule);
       return createProductionServer(environment, app);
     })()
-  : await createServerDependencies(environment, {
+  : await createProductionComposition(environment, {
       docsRoot: "./docs",
       webRoot: environment.mode === "production" ? "./dist/web" : undefined,
     });

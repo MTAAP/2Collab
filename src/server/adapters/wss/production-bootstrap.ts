@@ -63,15 +63,22 @@ function requireInfrastructure(): ProductionRunnerInfrastructure {
   return value;
 }
 
-export async function createProductionServer(environment: ServerEnvironment, app: Hono) {
-  const infrastructure = requireInfrastructure();
+export async function createProductionServer(
+  environment: ServerEnvironment,
+  app: Hono,
+  options: Readonly<{
+    database?: ReturnType<typeof openDatabase>;
+    infrastructure?: ProductionRunnerInfrastructure;
+  }> = {},
+) {
+  const infrastructure = options.infrastructure ?? requireInfrastructure();
   const id =
     infrastructure.id ?? ((prefix: string) => `${prefix}_${randomBytes(24).toString("base64url")}`);
   const now = () => Math.floor(Date.now() / 1_000);
   const directory = resolve(environment.dataDir);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const database = openDatabase(join(directory, "collab.sqlite"));
-  migrate(database);
+  const database = options.database ?? openDatabase(join(directory, "collab.sqlite"));
+  if (!options.database) migrate(database);
   const runners = createRunnerServices({
     database,
     clock: now,
