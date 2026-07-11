@@ -76,8 +76,16 @@ export const ServerWelcomeSchema = z
         maximumFrameBytes: z.literal(65_536),
         runnerFramesPerSecond: z.literal(100),
         runnerBurst: z.literal(200),
+        runFramesPerSecond: z.literal(50),
+        runBurst: z.literal(100),
+        sendQueueItems: z.literal(1_024),
+        sendQueueBytes: z.literal(1024 * 1024),
         heartbeatSeconds: z.literal(10),
         offlineSeconds: z.literal(30),
+        operationAckSeconds: z.literal(10),
+        outputChunkBytes: z.literal(16 * 1024),
+        reconnectBufferBytes: z.literal(1024 * 1024),
+        reconnectBackoffSeconds: z.literal(30),
       })
       .strict(),
   })

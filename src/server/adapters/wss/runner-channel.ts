@@ -1,5 +1,7 @@
 import type { ServerEnvelope } from "../../../shared/contracts/protocol.ts";
 import { ServerEnvelopeSchema } from "../../../shared/contracts/protocol.ts";
+import type { LiveOutputHub } from "./live-output.ts";
+import { BoundedSendQueue } from "./rate-limits.ts";
 import {
   RunnerConnectionRegistry,
   type RunnerTransportDisposition,
@@ -25,16 +27,30 @@ type Dependencies = Readonly<{
   messageId: () => string;
   loadCommitted: (outboxIds: readonly string[]) => readonly CommittedRunnerOperation[];
   protocolVersion?: string;
+  maximumSendQueueItems?: number;
+  maximumSendQueueBytes?: number;
+  liveOutput?: LiveOutputHub;
+  scheduleTimeout?: (callback: () => void, milliseconds: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
+  onAcknowledgementTimeout?: (deliveryId: string, reason: "TIMEOUT" | "QUIESCED") => void;
 }>;
+
+type QueuedEnvelope = Readonly<{ envelope: ServerEnvelope; operation: CommittedRunnerOperation }>;
 
 type AttachedConnection = Readonly<{
   connectionId: string;
   fence: number;
-  send: (envelope: ServerEnvelope) => void;
+  send: (envelope: ServerEnvelope) => unknown;
   sequence: { value: number };
+  queue: BoundedSendQueue<QueuedEnvelope>;
 }>;
 
-type Pending = Readonly<{ operation: CommittedRunnerOperation }>;
+type Pending = {
+  operation: CommittedRunnerOperation;
+  acknowledgeBy?: number;
+  timeoutReported?: true;
+  timer?: unknown;
+};
 
 export interface RunnerControlPort {
   dispatchCommitted(outboxIds: readonly string[]): Promise<readonly DeliveryReceipt[]>;
@@ -51,6 +67,68 @@ export function createRunnerChannel(dependencies: Dependencies) {
   const pending = new Map<string, Pending>();
   const protocolVersion = dependencies.protocolVersion ?? "1.0";
   let quiesced = false;
+
+  const scheduleTimeout =
+    dependencies.scheduleTimeout ??
+    ((callback: () => void, milliseconds: number) => {
+      const handle = setTimeout(callback, milliseconds);
+      handle.unref?.();
+      return handle;
+    });
+  const clearScheduled =
+    dependencies.clearTimeout ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+
+  const reportTimeout = (deliveryId: string, entry: Pending, reason: "TIMEOUT" | "QUIESCED") => {
+    if (entry.timeoutReported === true) return false;
+    entry.timeoutReported = true;
+    dependencies.onAcknowledgementTimeout?.(deliveryId, reason);
+    return true;
+  };
+
+  const markSent = (operation: CommittedRunnerOperation): void => {
+    const prior = pending.get(operation.deliveryId);
+    if (prior?.timer !== undefined) clearScheduled(prior.timer);
+    const acknowledgeBy = Math.min(operation.expiresAt, dependencies.now() + 10);
+    const entry: Pending = {
+      operation,
+      acknowledgeBy,
+    };
+    entry.timer = scheduleTimeout(
+      () => {
+        const current = pending.get(operation.deliveryId);
+        if (
+          current === entry &&
+          current.acknowledgeBy !== undefined &&
+          current.acknowledgeBy <= dependencies.now()
+        ) {
+          reportTimeout(operation.deliveryId, current, "TIMEOUT");
+        }
+      },
+      Math.max(0, acknowledgeBy - dependencies.now()) * 1_000,
+    );
+    pending.set(operation.deliveryId, entry);
+  };
+
+  const sendOrQueue = (
+    operation: CommittedRunnerOperation,
+    envelope: ServerEnvelope,
+    connection: AttachedConnection,
+  ): boolean => {
+    try {
+      if (connection.send(envelope) !== false) {
+        markSent(operation);
+        return true;
+      }
+    } catch {
+      // A failed socket write remains a durable pending operation.
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+    const critical = ["CANCEL_ATTEMPT", "CANCEL_GATE_EVALUATION"].includes(envelope.body.kind);
+    connection.queue.enqueue({ envelope, operation }, bytes, critical ? "CRITICAL" : "NORMAL");
+    pending.set(operation.deliveryId, { operation });
+    return false;
+  };
 
   const transmit = (
     operation: CommittedRunnerOperation,
@@ -71,24 +149,24 @@ export function createRunnerChannel(dependencies: Dependencies) {
       };
     }
     connection.sequence.value += 1;
+    const issuedAt = dependencies.now();
     const envelope: ServerEnvelope = {
       protocolVersion,
       messageId: dependencies.messageId(),
       sequence: connection.sequence.value,
-      issuedAt: dependencies.now(),
-      expiresAt: operation.expiresAt,
+      issuedAt,
+      expiresAt: Math.min(operation.expiresAt, issuedAt + 5 * 60),
       body: operation.body,
     };
     if (!ServerEnvelopeSchema.safeParse(envelope).success) {
       throw new Error("COMMITTED_RUNNER_OPERATION_INVALID");
     }
     try {
-      connection.send(envelope);
-      pending.set(operation.deliveryId, { operation });
+      const sent = sendOrQueue(operation, envelope, connection);
       return {
         outboxId: operation.outboxId,
         deliveryId: operation.deliveryId,
-        state: "SOCKET_SENT",
+        state: sent ? "SOCKET_SENT" : "UNREACHABLE",
       };
     } catch {
       pending.set(operation.deliveryId, { operation });
@@ -101,9 +179,14 @@ export function createRunnerChannel(dependencies: Dependencies) {
   };
 
   return {
-    attach(runnerId: string, send: (envelope: ServerEnvelope) => void) {
+    attach(
+      runnerId: string,
+      send: (envelope: ServerEnvelope) => unknown,
+      close: (reason: "FENCED" | "REVOKED" | "QUIESCE") => void = () => undefined,
+    ) {
       let registered: Readonly<{ connectionId: string; fence: number }> | undefined;
-      registered = registry.register(runnerId, () => {
+      registered = registry.register(runnerId, (reason) => {
+        close(reason);
         const current = connections.get(runnerId);
         if (current && current.connectionId === registered?.connectionId) {
           connections.delete(runnerId);
@@ -113,9 +196,17 @@ export function createRunnerChannel(dependencies: Dependencies) {
         ...registered,
         send,
         sequence: { value: 0 },
+        queue: new BoundedSendQueue({
+          maximumItems: dependencies.maximumSendQueueItems ?? 1_024,
+          maximumBytes: dependencies.maximumSendQueueBytes ?? 1024 * 1024,
+        }),
       };
       connections.set(runnerId, connection);
       return registered;
+    },
+
+    isCurrent(runnerId: string, connectionId: string, fence: number): boolean {
+      return registry.isCurrent(runnerId, connectionId, fence);
     },
 
     detach(runnerId: string, connectionId: string, fence: number): boolean {
@@ -178,12 +269,52 @@ export function createRunnerChannel(dependencies: Dependencies) {
       if (entry.operation.semanticDigest !== semanticDigest) {
         return { accepted: false as const, code: "DELIVERY_DIGEST_CONFLICT" };
       }
+      if (entry.timer !== undefined) clearScheduled(entry.timer);
       pending.delete(deliveryId);
       return { accepted: true as const, outboxId: entry.operation.outboxId };
     },
 
     pendingDeliveryIds(): readonly string[] {
       return [...pending.keys()].sort();
+    },
+
+    queuedEnvelopeCount(runnerId: string): number {
+      return connections.get(runnerId)?.queue.size ?? 0;
+    },
+
+    flush(runnerId: string): number {
+      const connection = connections.get(runnerId);
+      if (!connection) return 0;
+      let sent = 0;
+      while (connection.queue.size > 0) {
+        const entry = connection.queue.peek();
+        if (!entry) break;
+        try {
+          if (connection.send(entry.envelope) === false) break;
+        } catch {
+          break;
+        }
+        connection.queue.dequeue();
+        markSent(entry.operation);
+        sent += 1;
+      }
+      return sent;
+    },
+
+    sweepAcknowledgementTimeouts(): readonly string[] {
+      const now = dependencies.now();
+      const timedOut: string[] = [];
+      for (const [deliveryId, entry] of pending) {
+        if (
+          entry.acknowledgeBy !== undefined &&
+          entry.acknowledgeBy <= now &&
+          entry.timeoutReported !== true
+        ) {
+          if (entry.timer !== undefined) clearScheduled(entry.timer);
+          if (reportTimeout(deliveryId, entry, "TIMEOUT")) timedOut.push(deliveryId);
+        }
+      }
+      return timedOut.sort();
     },
 
     async applyCommittedDisposition(runnerId: string, disposition: RunnerTransportDisposition) {
@@ -195,7 +326,13 @@ export function createRunnerChannel(dependencies: Dependencies) {
     async quiesce(_deadline: number) {
       quiesced = true;
       const result = await registry.quiesce();
+      for (const connection of connections.values()) connection.queue.clear();
       connections.clear();
+      for (const [deliveryId, entry] of pending) {
+        if (entry.timer !== undefined) clearScheduled(entry.timer);
+        reportTimeout(deliveryId, entry, "QUIESCED");
+      }
+      dependencies.liveOutput?.clearAll();
       return { closed: result.closed, pending: pending.size };
     },
   } satisfies RunnerControlPort & Record<string, unknown>;

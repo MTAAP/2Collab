@@ -42,4 +42,36 @@ describe("runner transport limits", () => {
       ),
     ).toEqual({ accepted: false, code: "RUNNER_RATE_LIMITED", close: true });
   });
+
+  test("enforces the per-run bucket independently from the runner bucket", () => {
+    const channel = createInMemoryRunnerChannel({ active: true, now: () => 1_000 });
+    for (let sequence = 1; sequence <= 100; sequence += 1) {
+      expect(
+        channel.receiveText(
+          JSON.stringify({
+            ...validRunnerHeartbeat({ messageId: `run_message_${sequence}`, sequence }),
+            body: {
+              kind: "ATTEMPT_EVENT",
+              attemptId: "attempt_1",
+              event: "PROCESS_STARTED",
+              observedAt: 1_000,
+            },
+          }),
+        ),
+      ).toEqual({ accepted: true });
+    }
+    expect(
+      channel.receiveText(
+        JSON.stringify({
+          ...validRunnerHeartbeat({ messageId: "run_message_101", sequence: 101 }),
+          body: {
+            kind: "ATTEMPT_EVENT",
+            attemptId: "attempt_1",
+            event: "PROCESS_STARTED",
+            observedAt: 1_000,
+          },
+        }),
+      ),
+    ).toEqual({ accepted: false, code: "RUN_RATE_LIMITED", close: true });
+  });
 });

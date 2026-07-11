@@ -3,7 +3,7 @@ import { LiveOutputHub } from "../../src/server/adapters/wss/live-output.ts";
 
 describe("ephemeral runner output", () => {
   test("accepts only active headless work and marks sequence gaps and duplicates", () => {
-    const hub = new LiveOutputHub({ maximumProcessBytes: 128, maximumTargetBytes: 96 });
+    const hub = new LiveOutputHub({ maximumProcessBytes: 2_048, maximumTargetBytes: 1_024 });
     hub.activate("ATTEMPT", "attempt_1", "HEADLESS");
     expect(hub.accept("ATTEMPT", "attempt_1", "STDOUT", 1, "hello", 1, false)).toEqual({
       accepted: true,
@@ -33,7 +33,7 @@ describe("ephemeral runner output", () => {
   });
 
   test("uses UTF-8 byte limits, redacts credential patterns, evicts oldest, and clears terminal work", () => {
-    const hub = new LiveOutputHub({ maximumProcessBytes: 64, maximumTargetBytes: 48 });
+    const hub = new LiveOutputHub({ maximumProcessBytes: 1_024, maximumTargetBytes: 512 });
     hub.activate("ATTEMPT", "attempt_1", "HEADLESS");
     expect(hub.accept("ATTEMPT", "attempt_1", "STDERR", 1, "é".repeat(8_193), 1, false)).toEqual({
       accepted: false,
@@ -50,5 +50,22 @@ describe("ephemeral runner output", () => {
     expect(hub.inspect("ATTEMPT", "attempt_1").some((chunk) => chunk.evictedBefore)).toBeTrue();
     hub.clear("ATTEMPT", "attempt_1");
     expect(hub.inspect("ATTEMPT", "attempt_1")).toEqual([]);
+  });
+
+  test("bounds empty chunks and replay metadata under the same retained-memory ceiling", () => {
+    const hub = new LiveOutputHub({ maximumProcessBytes: 1_200, maximumTargetBytes: 900 });
+    hub.activate("ATTEMPT", "attempt_1", "HEADLESS");
+    for (let sequence = 1; sequence <= 50_000; sequence += 1) {
+      expect(
+        hub.accept("ATTEMPT", "attempt_1", "STDOUT", sequence, "", 1, false).accepted,
+      ).toBeTrue();
+    }
+    const retained = hub.inspect("ATTEMPT", "attempt_1");
+    expect(retained.length).toBeLessThanOrEqual(3);
+    expect(retained[0]?.evictedBefore).toBeTrue();
+    expect(hub.accept("ATTEMPT", "attempt_1", "STDOUT", 1, "", 1, false)).toEqual({
+      accepted: false,
+      code: "OUTPUT_SEQUENCE_REGRESSION",
+    });
   });
 });

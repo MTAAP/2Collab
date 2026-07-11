@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createInMemoryRunnerChannel } from "../fixtures/runner-channel.ts";
+import { validRunnerHeartbeat } from "../fixtures/runner-channel.ts";
 
 describe("runner handshake", () => {
   test("requires one bounded hello before application traffic", () => {
@@ -26,7 +27,21 @@ describe("runner handshake", () => {
         kind: "SERVER_WELCOME",
         selectedVersion: "2.0",
         fence: 1,
-        limits: expect.objectContaining({ maximumFrameBytes: 65_536 }),
+        limits: {
+          maximumFrameBytes: 65_536,
+          runnerFramesPerSecond: 100,
+          runnerBurst: 200,
+          runFramesPerSecond: 50,
+          runBurst: 100,
+          sendQueueItems: 1_024,
+          sendQueueBytes: 1024 * 1024,
+          heartbeatSeconds: 10,
+          offlineSeconds: 30,
+          operationAckSeconds: 10,
+          outputChunkBytes: 16 * 1024,
+          reconnectBufferBytes: 1024 * 1024,
+          reconnectBackoffSeconds: 30,
+        },
       }),
     });
     expect(channel.receiveText(hello)).toEqual({
@@ -66,5 +81,43 @@ describe("runner handshake", () => {
         }),
       ),
     ).toEqual({ accepted: false, code: "PROTOCOL_VERSION_UNSUPPORTED", close: true });
+  });
+
+  test("enforces the hello and application-heartbeat deadlines at exact boundaries", () => {
+    let now = 1_000;
+    const hello = createInMemoryRunnerChannel({ now: () => now });
+    now = 1_009;
+    expect(hello.checkTimeout()).toBeNull();
+    now = 1_010;
+    expect(hello.checkTimeout()).toEqual({
+      accepted: false,
+      code: "CLIENT_HELLO_TIMEOUT",
+      close: true,
+    });
+
+    now = 2_000;
+    const active = createInMemoryRunnerChannel({ active: true, now: () => now });
+    now = 2_029;
+    expect(active.checkTimeout()).toBeNull();
+    expect(
+      active.receiveText(
+        JSON.stringify(
+          validRunnerHeartbeat({
+            messageId: "heartbeat_1",
+            sequence: 1,
+            issuedAt: 2_029,
+            expiresAt: 2_039,
+          }),
+        ),
+      ),
+    ).toEqual({ accepted: true });
+    now = 2_058;
+    expect(active.checkTimeout()).toBeNull();
+    now = 2_059;
+    expect(active.checkTimeout()).toEqual({
+      accepted: false,
+      code: "RUNNER_HEARTBEAT_TIMEOUT",
+      close: true,
+    });
   });
 });

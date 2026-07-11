@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createRunnerChannel } from "../../src/server/adapters/wss/runner-channel.ts";
 import type { ServerEnvelope } from "../../src/shared/contracts/protocol.ts";
+import { LiveOutputHub } from "../../src/server/adapters/wss/live-output.ts";
 
 const operation = {
   outboxId: "outbox_1",
@@ -31,7 +32,12 @@ describe("durable runner delivery", () => {
       { outboxId: "outbox_1", deliveryId: "delivery_1", state: "SOCKET_SENT" },
     ]);
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ messageId: "message_1", sequence: 1, body: operation.body });
+    expect(sent[0]).toMatchObject({
+      messageId: "message_1",
+      sequence: 1,
+      expiresAt: 1_300,
+      body: operation.body,
+    });
     expect(channel.pendingDeliveryIds()).toEqual(["delivery_1"]);
 
     channel.detach("runner_1", first.connectionId, first.fence);
@@ -74,5 +80,87 @@ describe("durable runner delivery", () => {
     expect(await channel.dispatchCommitted(["outbox_1"])).toEqual([
       { outboxId: "outbox_1", deliveryId: "delivery_1", state: "QUIESCED" },
     ]);
+  });
+
+  test("bounds slow-consumer sends and leaves acknowledgement timeouts retryable", async () => {
+    let now = 1_000;
+    const operations = [1, 2, 3].map((index) => ({
+      ...operation,
+      outboxId: `outbox_${index}`,
+      deliveryId: `delivery_${index}`,
+      body: {
+        ...operation.body,
+        deliveryId: `delivery_${index}`,
+      },
+    }));
+    const channel = createRunnerChannel({
+      now: () => now,
+      messageId: () => "message_1",
+      loadCommitted: (ids) => operations.filter((entry) => ids.includes(entry.outboxId)),
+      maximumSendQueueItems: 2,
+      maximumSendQueueBytes: 65_536,
+    });
+    channel.attach("runner_1", () => false);
+    expect(await channel.dispatchCommitted(["outbox_1", "outbox_2", "outbox_3"])).toEqual([
+      { outboxId: "outbox_1", deliveryId: "delivery_1", state: "UNREACHABLE" },
+      { outboxId: "outbox_2", deliveryId: "delivery_2", state: "UNREACHABLE" },
+      { outboxId: "outbox_3", deliveryId: "delivery_3", state: "UNREACHABLE" },
+    ]);
+    expect(channel.queuedEnvelopeCount("runner_1")).toBe(2);
+
+    expect(channel.sweepAcknowledgementTimeouts()).toEqual([]);
+    expect(channel.pendingDeliveryIds()).toEqual(["delivery_1", "delivery_2", "delivery_3"]);
+
+    const acknowledged = createRunnerChannel({
+      now: () => now,
+      messageId: () => "message_ack",
+      loadCommitted: () => operations.slice(0, 1),
+    });
+    acknowledged.attach("runner_1", () => true);
+    expect(await acknowledged.dispatchCommitted(["outbox_1"])).toMatchObject([
+      { state: "SOCKET_SENT" },
+    ]);
+    now = 1_009;
+    expect(acknowledged.sweepAcknowledgementTimeouts()).toEqual([]);
+    now = 1_010;
+    expect(acknowledged.sweepAcknowledgementTimeouts()).toEqual(["delivery_1"]);
+    expect(acknowledged.pendingDeliveryIds()).toEqual(["delivery_1"]);
+    expect(acknowledged.sweepAcknowledgementTimeouts()).toEqual([]);
+  });
+
+  test("schedules semantic acknowledgement expiry and quiesces timers, queues, and live output", async () => {
+    let now = 1_000;
+    let scheduled: (() => void) | undefined;
+    const cancelled: unknown[] = [];
+    const dispositions: Array<readonly [string, string]> = [];
+    const output = new LiveOutputHub();
+    output.activate("ATTEMPT", "attempt_1", "HEADLESS");
+    output.accept("ATTEMPT", "attempt_1", "STDOUT", 1, "safe", 1, false);
+    const channel = createRunnerChannel({
+      now: () => now,
+      messageId: () => "message_1",
+      loadCommitted: () => [operation],
+      liveOutput: output,
+      scheduleTimeout(callback, milliseconds) {
+        expect(milliseconds).toBe(10_000);
+        scheduled = callback;
+        return "timer_1";
+      },
+      clearTimeout(handle) {
+        cancelled.push(handle);
+      },
+      onAcknowledgementTimeout(deliveryId, reason) {
+        dispositions.push([deliveryId, reason]);
+      },
+    });
+    channel.attach("runner_1", () => true);
+    expect(await channel.dispatchCommitted(["outbox_1"])).toMatchObject([{ state: "SOCKET_SENT" }]);
+    now = 1_010;
+    scheduled?.();
+    expect(dispositions).toEqual([["delivery_1", "TIMEOUT"]]);
+    expect(channel.pendingDeliveryIds()).toEqual(["delivery_1"]);
+    expect(await channel.quiesce(1_010)).toEqual({ closed: 1, pending: 1 });
+    expect(cancelled).toEqual(["timer_1"]);
+    expect(output.inspect("ATTEMPT", "attempt_1")).toEqual([]);
   });
 });

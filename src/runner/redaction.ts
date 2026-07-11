@@ -73,15 +73,19 @@ export class SplitSafeRedactor {
   push(stream: Stream, text: string): string {
     if (Buffer.byteLength(text, "utf8") > 16 * 1024) throw new Error("REDACTION_CHUNK_TOO_LARGE");
     const state = this.#state(stream);
-    const sanitized = this.#removePrivateKeys(state, state.pending + text);
-    const [emit, pending] = splitWithByteHoldback(sanitized, this.#holdbackBytes);
+    const wasPrivate = state.privateKey;
+    const priorPending = state.pending;
+    const sanitized = this.#removePrivateKeys(state, wasPrivate ? text : priorPending + text);
+    if (state.privateKey && wasPrivate) return "";
+    const material = wasPrivate ? priorPending + sanitized : sanitized;
+    const [emit, pending] = splitWithByteHoldback(material, this.#holdbackBytes);
     state.pending = pending;
     return redactKnownSecrets(emit);
   }
 
   flush(stream: Stream): string {
     const state = this.#state(stream);
-    const safe = state.privateKey ? "" : redactKnownSecrets(state.pending);
+    const safe = redactKnownSecrets(state.pending);
     state.pending = "";
     state.privateKey = false;
     return safe;

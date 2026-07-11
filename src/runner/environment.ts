@@ -44,6 +44,19 @@ export function createRunnerEnvironmentBuilder(dependencies: Dependencies) {
   }
 
   return {
+    validate(environment: Readonly<Record<string, string>>): boolean {
+      const permittedNames = new Set([...Object.keys(dependencies.base), ...allowed]);
+      return (
+        Object.keys(environment).length <= permittedNames.size &&
+        Object.entries(environment).every(
+          ([name, value]) => permittedNames.has(name) && safeValue(value),
+        ) &&
+        Object.entries(dependencies.base).every(
+          ([name, value]) => value === undefined || environment[name] === value,
+        )
+      );
+    },
+
     build(profile: CustomLaunchProfile): Result<Readonly<Record<string, string>>> {
       const environment: Record<string, string> = { ...dependencies.base };
       const names = new Set<string>();

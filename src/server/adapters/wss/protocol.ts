@@ -8,7 +8,8 @@ import {
 import { TokenBucket } from "./rate-limits.ts";
 
 export const MAXIMUM_RUNNER_FRAME_BYTES = 65_536;
-export const MAXIMUM_FUTURE_SKEW_SECONDS = 5 * 60;
+export const MAXIMUM_FUTURE_SKEW_SECONDS = 30;
+export const MAXIMUM_RUNNER_ENVELOPE_LIFETIME_SECONDS = 5 * 60;
 
 export type ServerWelcome = Readonly<{
   kind: "SERVER_WELCOME";
@@ -19,8 +20,16 @@ export type ServerWelcome = Readonly<{
     maximumFrameBytes: number;
     runnerFramesPerSecond: number;
     runnerBurst: number;
+    runFramesPerSecond: number;
+    runBurst: number;
+    sendQueueItems: number;
+    sendQueueBytes: number;
     heartbeatSeconds: number;
     offlineSeconds: number;
+    operationAckSeconds: number;
+    outputChunkBytes: number;
+    reconnectBufferBytes: number;
+    reconnectBackoffSeconds: number;
   }>;
 }>;
 
@@ -84,9 +93,12 @@ export class InMemoryRunnerProtocolChannel {
   readonly #fence: number;
   readonly #seen = new Map<string, Readonly<{ sequence: number; digest: string }>>();
   readonly #runnerBucket: TokenBucket;
+  readonly #runBuckets = new Map<string, TokenBucket>();
+  readonly #openedAt: number;
   #active: boolean;
   #selectedVersion: string | null;
   #lastSequence = 0;
+  #lastHeartbeatAt: number;
 
   constructor(options: ChannelOptions = {}) {
     this.#supportedVersions = options.supportedVersions ?? ["1.0"];
@@ -94,6 +106,8 @@ export class InMemoryRunnerProtocolChannel {
     this.#connectionId = options.connectionId ?? defaultConnectionId;
     this.#fence = options.fence ?? 1;
     this.#runnerBucket = new TokenBucket({ ratePerSecond: 100, burst: 200, now: this.#now });
+    this.#openedAt = this.#now();
+    this.#lastHeartbeatAt = this.#openedAt;
     this.#active = options.active ?? false;
     this.#selectedVersion = this.#active ? (this.#supportedVersions[0] ?? null) : null;
   }
@@ -121,6 +135,15 @@ export class InMemoryRunnerProtocolChannel {
     const bytes = new TextEncoder().encode(text);
     if (bytes.byteLength > MAXIMUM_RUNNER_FRAME_BYTES) return reject("FRAME_TOO_LARGE");
     return this.#receiveDecoded(text, bytes);
+  }
+
+  checkTimeout(): RunnerReceiveResult | null {
+    const now = this.#now();
+    if (!this.#active && now - this.#openedAt >= 10) return reject("CLIENT_HELLO_TIMEOUT");
+    if (this.#active && now - this.#lastHeartbeatAt >= 30) {
+      return reject("RUNNER_HEARTBEAT_TIMEOUT");
+    }
+    return null;
   }
 
   #receiveDecoded(text: string, bytes: Uint8Array): RunnerReceiveResult {
@@ -156,6 +179,7 @@ export class InMemoryRunnerProtocolChannel {
     if (!selectedVersion) return reject("PROTOCOL_VERSION_UNSUPPORTED");
     this.#active = true;
     this.#selectedVersion = selectedVersion;
+    this.#lastHeartbeatAt = this.#now();
     return {
       accepted: true,
       welcome: {
@@ -167,8 +191,16 @@ export class InMemoryRunnerProtocolChannel {
           maximumFrameBytes: MAXIMUM_RUNNER_FRAME_BYTES,
           runnerFramesPerSecond: 100,
           runnerBurst: 200,
+          runFramesPerSecond: 50,
+          runBurst: 100,
+          sendQueueItems: 1_024,
+          sendQueueBytes: 1024 * 1024,
           heartbeatSeconds: 10,
           offlineSeconds: 30,
+          operationAckSeconds: 10,
+          outputChunkBytes: 16 * 1024,
+          reconnectBufferBytes: 1024 * 1024,
+          reconnectBackoffSeconds: 30,
         },
       },
     };
@@ -201,11 +233,21 @@ export class InMemoryRunnerProtocolChannel {
     if (!parsed.success || parsed.data.protocolVersion !== this.#selectedVersion) {
       return reject("FRAME_INVALID");
     }
+    const runScope = this.#runScope(parsed.data.body);
+    if (runScope) {
+      let bucket = this.#runBuckets.get(runScope);
+      if (!bucket) {
+        bucket = new TokenBucket({ ratePerSecond: 50, burst: 100, now: this.#now });
+        this.#runBuckets.set(runScope, bucket);
+      }
+      if (!bucket.consume()) return reject("RUN_RATE_LIMITED");
+    }
     const now = this.#now();
     if (
       parsed.data.issuedAt > now + MAXIMUM_FUTURE_SKEW_SECONDS ||
       parsed.data.expiresAt <= now ||
-      parsed.data.expiresAt <= parsed.data.issuedAt
+      parsed.data.expiresAt <= parsed.data.issuedAt ||
+      parsed.data.expiresAt - parsed.data.issuedAt > MAXIMUM_RUNNER_ENVELOPE_LIFETIME_SECONDS
     ) {
       return reject("FRAME_TIME_INVALID");
     }
@@ -214,7 +256,19 @@ export class InMemoryRunnerProtocolChannel {
       sequence: parsed.data.sequence,
       digest: frameDigest,
     });
+    if (parsed.data.body.kind === "HEARTBEAT") this.#lastHeartbeatAt = now;
     return { accepted: true };
+  }
+
+  #runScope(body: (typeof RunnerEnvelopeSchema)["_output"]["body"]): string | null {
+    if ("attemptId" in body) return `ATTEMPT:${body.attemptId}`;
+    if ("gateEvaluationId" in body) return `GATE:${body.gateEvaluationId}`;
+    if (body.kind === "HEADLESS_OUTPUT_CHUNK") {
+      return body.target.kind === "ATTEMPT"
+        ? `ATTEMPT:${body.target.attemptId}`
+        : `GATE:${body.target.gateEvaluationId}`;
+    }
+    return null;
   }
 }
 

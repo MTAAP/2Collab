@@ -60,16 +60,34 @@ describe("runner wire codec", () => {
       code: "FRAME_TOO_LARGE",
       close: true,
     });
-    expect(channel.receiveText(JSON.stringify({ ...frame, issuedAt: 1_301 }))).toEqual({
+    expect(
+      createInMemoryRunnerChannel({ active: true, now: () => 1_000 }).receiveText(
+        JSON.stringify({ ...frame, issuedAt: 1_030, expiresAt: 1_031 }),
+      ),
+    ).toEqual({ accepted: true });
+    expect(
+      createInMemoryRunnerChannel({ active: true, now: () => 1_000 }).receiveText(
+        JSON.stringify({ ...frame, issuedAt: 1_031, expiresAt: 1_032 }),
+      ),
+    ).toEqual({
       accepted: false,
       code: "FRAME_TIME_INVALID",
       close: true,
     });
-    expect(channel.receiveText(JSON.stringify({ ...frame, expiresAt: 1_000 }))).toEqual({
+    expect(
+      createInMemoryRunnerChannel({ active: true, now: () => 1_000 }).receiveText(
+        JSON.stringify({ ...frame, expiresAt: 1_000 }),
+      ),
+    ).toEqual({
       accepted: false,
       code: "FRAME_TIME_INVALID",
       close: true,
     });
+    expect(
+      createInMemoryRunnerChannel({ active: true, now: () => 1_000 }).receiveText(
+        JSON.stringify({ ...frame, issuedAt: 1_000, expiresAt: 1_301 }),
+      ),
+    ).toEqual({ accepted: false, code: "FRAME_TIME_INVALID", close: true });
   });
 
   test("keeps both wire directions closed and denies local execution configuration", () => {

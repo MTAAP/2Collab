@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ClientHelloSchema,
   ServerEnvelopeSchema,
@@ -23,7 +24,12 @@ type Dependencies = Readonly<{
   ) => RunnerClientSocket;
   supportedRanges: ClientHello["ranges"];
   onEnvelope: (envelope: ServerEnvelope) => Promise<void>;
+  now?: () => number;
 }>;
+
+const MAXIMUM_FUTURE_SKEW_SECONDS = 30;
+const MAXIMUM_SERVER_ENVELOPE_LIFETIME_SECONDS = 5 * 60;
+const MAXIMUM_REPLAY_ENTRIES = 32_768;
 
 function defaultSocketFactory(
   url: string,
@@ -70,15 +76,61 @@ function boundedAccess(issue: AccessIssue): boolean {
 export function createRunnerWssClient(dependencies: Dependencies) {
   const reconnect = new RunnerReconnectState();
   const socketFactory = dependencies.socketFactory ?? defaultSocketFactory;
+  const now = dependencies.now ?? (() => Date.now() / 1_000);
   const hello = ClientHelloSchema.parse({
     kind: "CLIENT_HELLO",
     ranges: dependencies.supportedRanges,
   });
   let socket: RunnerClientSocket | null = null;
   let selectedVersion: string | null = null;
+  let lastSequence = 0;
+  let failed = false;
+  let effects = Promise.resolve();
+  const seen = new Map<string, Readonly<{ sequence: number; digest: string }>>();
 
   const fail = (code: number, reason: string): void => {
+    failed = true;
     socket?.close(code, reason);
+  };
+
+  const acceptEnvelope = (candidate: unknown, wire: string): void => {
+    if (failed) return;
+    const envelope = ServerEnvelopeSchema.safeParse(candidate);
+    if (!envelope.success || envelope.data.protocolVersion !== selectedVersion) {
+      fail(1002, "PROTOCOL_ERROR");
+      return;
+    }
+    const currentTime = now();
+    if (
+      envelope.data.issuedAt > currentTime + MAXIMUM_FUTURE_SKEW_SECONDS ||
+      envelope.data.expiresAt <= currentTime ||
+      envelope.data.expiresAt <= envelope.data.issuedAt ||
+      envelope.data.expiresAt - envelope.data.issuedAt > MAXIMUM_SERVER_ENVELOPE_LIFETIME_SECONDS
+    ) {
+      fail(1002, "PROTOCOL_ERROR");
+      return;
+    }
+    const wireDigest = createHash("sha256").update(wire, "utf8").digest("hex");
+    const prior = seen.get(envelope.data.messageId);
+    if (prior) {
+      if (prior.sequence !== envelope.data.sequence || prior.digest !== wireDigest) {
+        fail(1002, "PROTOCOL_ERROR");
+      }
+      return;
+    }
+    if (envelope.data.sequence <= lastSequence) {
+      fail(1002, "PROTOCOL_ERROR");
+      return;
+    }
+    lastSequence = envelope.data.sequence;
+    seen.set(envelope.data.messageId, { sequence: envelope.data.sequence, digest: wireDigest });
+    if (seen.size > MAXIMUM_REPLAY_ENTRIES) {
+      const oldest = seen.keys().next().value;
+      if (oldest !== undefined) seen.delete(oldest);
+    }
+    effects = effects
+      .then(() => dependencies.onEnvelope(envelope.data))
+      .catch(() => fail(1011, "INTERNAL_ERROR"));
   };
 
   return {
@@ -98,6 +150,11 @@ export function createRunnerWssClient(dependencies: Dependencies) {
           "dpop-nonce": issue.nonce,
         },
       });
+      failed = false;
+      selectedVersion = null;
+      lastSequence = 0;
+      effects = Promise.resolve();
+      seen.clear();
       socket.addEventListener("open", () => {
         reconnect.negotiating();
         socket?.send(JSON.stringify(hello));
@@ -134,23 +191,18 @@ export function createRunnerWssClient(dependencies: Dependencies) {
             return;
           }
           selectedVersion = welcome.data.selectedVersion;
-          reconnect.active(Date.now() / 1_000);
+          reconnect.active(now());
           return;
         }
         if (reconnect.state !== "ACTIVE") {
           fail(1002, "PROTOCOL_ERROR");
           return;
         }
-        const envelope = ServerEnvelopeSchema.safeParse(raw);
-        if (!envelope.success || envelope.data.protocolVersion !== selectedVersion) {
-          fail(1002, "PROTOCOL_ERROR");
-          return;
-        }
-        void dependencies.onEnvelope(envelope.data);
+        acceptEnvelope(raw, data);
       });
       socket.addEventListener("close", () => {
         if (reconnect.state !== "STOPPED") {
-          reconnect.disconnected("NETWORK", Date.now() / 1_000);
+          reconnect.disconnected("NETWORK", now());
         }
       });
     },

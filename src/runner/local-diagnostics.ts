@@ -83,6 +83,20 @@ export function createLocalDiagnostics(dependencies: Dependencies) {
       .query<Row, [string]>("SELECT * FROM local_diagnostic_tails WHERE correlation_id = ?")
       .get(correlationId);
 
+  const purgeExpiredRow = (row: Row): boolean => {
+    if (dependencies.clock() < row.expires_at) return false;
+    try {
+      dependencies.database
+        .query(
+          "DELETE FROM local_diagnostic_tails WHERE correlation_id = ? AND revision = ? AND expires_at <= ?",
+        )
+        .run(row.correlation_id, row.revision, dependencies.clock());
+    } catch {
+      // Expiry is authoritative even when best-effort payload removal cannot complete.
+    }
+    return true;
+  };
+
   return {
     enable(
       correlationId: string,
@@ -139,7 +153,7 @@ export function createLocalDiagnostics(dependencies: Dependencies) {
     append(correlationId: string, text: string): Result<Metadata> {
       const row = read(correlationId);
       if (!row) return failure("DIAGNOSTIC_NOT_FOUND", "Diagnostic collection was not found.");
-      if (dependencies.clock() >= row.expires_at) {
+      if (purgeExpiredRow(row)) {
         return failure("DIAGNOSTIC_EXPIRED", "Diagnostic collection expired.");
       }
       const incoming = Buffer.from(text, "utf8");
@@ -175,6 +189,9 @@ export function createLocalDiagnostics(dependencies: Dependencies) {
 
     metadata(correlationId: string): Result<Metadata> {
       const row = read(correlationId);
+      if (row && purgeExpiredRow(row)) {
+        return failure("DIAGNOSTIC_EXPIRED", "Diagnostic collection expired.");
+      }
       return row
         ? { ok: true, value: metadata(row) }
         : failure("DIAGNOSTIC_NOT_FOUND", "Diagnostic collection was not found.");
@@ -193,11 +210,41 @@ export function createLocalDiagnostics(dependencies: Dependencies) {
       if (!(await dependencies.reauthenticate(ownerMemberId, proof))) {
         return failure("DIAGNOSTIC_REAUTH_REQUIRED", "Fresh owner authentication is required.");
       }
-      if (dependencies.clock() >= row.expires_at) {
+      if (purgeExpiredRow(row)) {
         return failure("DIAGNOSTIC_EXPIRED", "Diagnostic collection expired.");
       }
       try {
         return { ok: true, value: decrypt(row).toString("utf8") };
+      } catch {
+        return failure("DIAGNOSTIC_STORAGE_FAILED", "Diagnostic storage failed.");
+      }
+    },
+
+    async disable(
+      correlationId: string,
+      ownerMemberId: string,
+      proof: string,
+    ): Promise<Result<Readonly<{ disabled: true }>>> {
+      const row = read(correlationId);
+      if (!row) return failure("DIAGNOSTIC_NOT_FOUND", "Diagnostic collection was not found.");
+      if (row.owner_member_id !== ownerMemberId) {
+        return failure("DIAGNOSTIC_OWNER_REQUIRED", "Diagnostic owner authorization is required.");
+      }
+      if (!(await dependencies.reauthenticate(ownerMemberId, proof))) {
+        return failure("DIAGNOSTIC_REAUTH_REQUIRED", "Fresh owner authentication is required.");
+      }
+      if (purgeExpiredRow(row)) {
+        return failure("DIAGNOSTIC_EXPIRED", "Diagnostic collection expired.");
+      }
+      try {
+        const deleted = dependencies.database
+          .query(
+            "DELETE FROM local_diagnostic_tails WHERE correlation_id = ? AND owner_member_id = ? AND revision = ?",
+          )
+          .run(correlationId, ownerMemberId, row.revision);
+        return deleted.changes === 1
+          ? { ok: true, value: { disabled: true } }
+          : failure("DIAGNOSTIC_STATE_CHANGED", "Diagnostic collection changed.");
       } catch {
         return failure("DIAGNOSTIC_STORAGE_FAILED", "Diagnostic storage failed.");
       }

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 type TargetKind = "ATTEMPT" | "GATE";
 type Stream = "STDOUT" | "STDERR";
 type Interaction = "HEADLESS" | "INTERACTIVE";
+const RETAINED_CHUNK_METADATA_BYTES = 160;
+const RETAINED_REPLAY_METADATA_BYTES = 96;
 
 export type LiveOutputChunk = Readonly<{
   stream: Stream;
@@ -14,7 +16,8 @@ export type LiveOutputChunk = Readonly<{
   evictedBefore: boolean;
 }>;
 
-type StoredChunk = LiveOutputChunk & Readonly<{ bytes: number; digest: string; ordinal: number }>;
+type StoredChunk = LiveOutputChunk &
+  Readonly<{ bytes: number; retainedBytes: number; digest: string; ordinal: number }>;
 type Target = {
   interaction: Interaction;
   chunks: StoredChunk[];
@@ -112,6 +115,7 @@ export class LiveOutputHub {
     }
     const gap = previousSequence !== undefined && sequence > previousSequence + 1;
     const bytes = Buffer.byteLength(safeText, "utf8");
+    const retainedBytes = bytes + RETAINED_CHUNK_METADATA_BYTES + RETAINED_REPLAY_METADATA_BYTES;
     const chunk: StoredChunk = {
       stream,
       sequence,
@@ -121,14 +125,15 @@ export class LiveOutputHub {
       gap,
       evictedBefore: false,
       bytes,
+      retainedBytes,
       digest: chunkDigest,
       ordinal: ++this.#ordinal,
     };
     target.chunks.push(chunk);
     target.seen.set(replayKey, chunkDigest);
     target.lastSequences.set(stream, sequence);
-    target.bytes += bytes;
-    this.#bytes += bytes;
+    target.bytes += retainedBytes;
+    this.#bytes += retainedBytes;
     this.#evict();
     return { accepted: true, gap, truncated };
   }
@@ -157,15 +162,22 @@ export class LiveOutputHub {
   #evictChunk(target: Target, index: number): void {
     const [removed] = target.chunks.splice(index, 1);
     if (!removed) return;
-    target.bytes -= removed.bytes;
-    this.#bytes -= removed.bytes;
+    target.bytes -= removed.retainedBytes;
+    this.#bytes -= removed.retainedBytes;
+    target.seen.delete(`${removed.stream}:${removed.sequence}`);
     const first = target.chunks[0];
     if (first) target.chunks[0] = { ...first, evictedBefore: true };
   }
 
   inspect(kind: TargetKind, id: string): readonly LiveOutputChunk[] {
     return (this.#targets.get(targetKey(kind, id))?.chunks ?? []).map(
-      ({ bytes: _bytes, digest: _digest, ordinal: _ordinal, ...chunk }) => chunk,
+      ({
+        bytes: _bytes,
+        retainedBytes: _retainedBytes,
+        digest: _digest,
+        ordinal: _ordinal,
+        ...chunk
+      }) => chunk,
     );
   }
 

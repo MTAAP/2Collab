@@ -86,12 +86,13 @@ describe("runner-local state", () => {
     f.database.close();
   });
 
-  test("reserves exact assignments idempotently and never duplicates a started process", async () => {
+  test("resumes exact unstarted assignments and records terminal failed starts", async () => {
     const f = await fixture();
+    let reservation = 0;
     const processes = createLocalProcessRegistry(
       f.database,
       () => 1_000,
-      () => "reservation_1",
+      () => `reservation_${++reservation}`,
     );
     expect(processes.reserve("attempt_1", "a".repeat(64))).toEqual({
       ok: true,
@@ -99,15 +100,45 @@ describe("runner-local state", () => {
     });
     expect(processes.reserve("attempt_1", "a".repeat(64))).toEqual({
       ok: true,
-      value: { reservationId: "reservation_1", disposition: "RECONCILE" },
+      value: { reservationId: "reservation_1", disposition: "RESUME" },
     });
     expect(processes.reserve("attempt_1", "b".repeat(64))).toMatchObject({
       ok: false,
       error: { code: "PROCESS_ASSIGNMENT_CONFLICT" },
     });
+    expect(processes.release({ reservationId: "reservation_1", disposition: "RESUME" })).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(processes.reserve("attempt_1", "a".repeat(64))).toEqual({
+      ok: true,
+      value: { reservationId: "reservation_2", disposition: "NEW" },
+    });
+    expect(
+      processes.recordFailed(
+        { reservationId: "reservation_2", disposition: "NEW" },
+        "HOST_START_FAILED",
+      ),
+    ).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    expect(processes.inspect("attempt_1")).toMatchObject({
+      ok: true,
+      value: { state: "FAILED_TO_START", opaqueProcessId: null },
+    });
+    expect(processes.reserve("attempt_1", "a".repeat(64))).toEqual({
+      ok: true,
+      value: { reservationId: "reservation_2", disposition: "RECONCILE" },
+    });
+
+    expect(processes.reserve("attempt_2", "c".repeat(64))).toMatchObject({
+      ok: true,
+      value: { reservationId: "reservation_3", disposition: "NEW" },
+    });
     expect(
       processes.recordStarted(
-        { reservationId: "reservation_1", disposition: "NEW" },
+        { reservationId: "reservation_3", disposition: "NEW" },
         {
           host: "NATIVE",
           opaqueProcessId: "process_1",
@@ -116,7 +147,7 @@ describe("runner-local state", () => {
         },
       ),
     ).toEqual({ ok: true, value: undefined });
-    expect(processes.inspect("attempt_1")).toMatchObject({
+    expect(processes.inspect("attempt_2")).toMatchObject({
       ok: true,
       value: { state: "STARTED", opaqueProcessId: "process_1" },
     });
@@ -129,7 +160,7 @@ describe("runner-local state", () => {
     await chmod(f.path, 0o666);
     const reopened = openRunnerDatabase(f.path);
     expect((await stat(f.path)).mode & 0o777).toBe(0o600);
-    reopened.query("UPDATE schema_migrations SET version = 9").run();
+    reopened.query("UPDATE schema_migrations SET version = 9 WHERE version = 1").run();
     reopened.close();
     expect(() => openRunnerDatabase(f.path)).toThrow("RUNNER_STATE_CORRUPT");
   });

@@ -89,11 +89,57 @@ describe("encrypted local diagnostics", () => {
       ok: false,
       error: { code: "DIAGNOSTIC_EXPIRED" },
     });
-    expect(f.diagnostics.purgeExpired()).toEqual({ purged: 1 });
+    expect(f.diagnostics.purgeExpired()).toEqual({ purged: 0 });
     expect(f.diagnostics.metadata("interactive_1")).toMatchObject({
       ok: false,
       error: { code: "DIAGNOSTIC_NOT_FOUND" },
     });
+    f.database.close();
+  });
+
+  test("expires metadata at the exact boundary and best-effort purges the encrypted tail", async () => {
+    const f = await fixture();
+    expect(f.diagnostics.enable("correlation_expired", "member_1", "HEADLESS")).toMatchObject({
+      ok: true,
+    });
+    expect(f.diagnostics.append("correlation_expired", "private-tail")).toMatchObject({ ok: true });
+    f.setNow(87_400);
+    expect(f.diagnostics.metadata("correlation_expired")).toMatchObject({
+      ok: false,
+      error: { code: "DIAGNOSTIC_EXPIRED" },
+    });
+    expect(
+      f.database
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM local_diagnostic_tails")
+        .get(),
+    ).toEqual({ count: 0 });
+    f.database.close();
+  });
+
+  test("requires the owner to reauthenticate before disabling future capture", async () => {
+    const f = await fixture();
+    expect(f.diagnostics.enable("correlation_disable", "member_1", "HEADLESS")).toMatchObject({
+      ok: true,
+    });
+    expect(
+      await f.diagnostics.disable("correlation_disable", "member_2", "fresh-passkey"),
+    ).toMatchObject({ ok: false, error: { code: "DIAGNOSTIC_OWNER_REQUIRED" } });
+    expect(await f.diagnostics.disable("correlation_disable", "member_1", "stale")).toMatchObject({
+      ok: false,
+      error: { code: "DIAGNOSTIC_REAUTH_REQUIRED" },
+    });
+    expect(await f.diagnostics.disable("correlation_disable", "member_1", "fresh-passkey")).toEqual(
+      { ok: true, value: { disabled: true } },
+    );
+    expect(f.diagnostics.append("correlation_disable", "must-not-capture")).toMatchObject({
+      ok: false,
+      error: { code: "DIAGNOSTIC_NOT_FOUND" },
+    });
+    expect(
+      f.database
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM local_diagnostic_tails")
+        .get(),
+    ).toEqual({ count: 0 });
     f.database.close();
   });
 });

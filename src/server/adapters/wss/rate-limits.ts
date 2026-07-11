@@ -78,6 +78,10 @@ export class BoundedSendQueue<T> {
     return entry.value;
   }
 
+  peek(): T | undefined {
+    return this.#entries[0]?.value;
+  }
+
   clear(): void {
     this.#entries.length = 0;
     this.#bytes = 0;
