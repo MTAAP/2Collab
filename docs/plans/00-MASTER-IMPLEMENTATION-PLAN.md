@@ -83,14 +83,14 @@ export interface ExecutionAuthority {
 
 // src/server/modules/connectors/contract.ts
 export interface SourceConnector<TReference, TProjection, TMutation> {
-  inspect(reference: TReference): Promise<Result<Observed<TProjection>>>;
-  mutate(command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
-  reconcile(scope: ConnectorScope): AsyncIterable<ReconciliationEvent<TProjection>>;
+  inspect(scope: ConnectorScope, reference: TReference): Promise<Result<Observed<TProjection>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
+  scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<TProjection>>>;
 }
 export interface ContextConnector<TReference, TDocument, TMutation> {
-  search(query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
-  read(reference: TReference): Promise<Result<Observed<TDocument>>>;
-  mutate(command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TDocument>>>;
+  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
+  read(scope: ConnectorScope, reference: TReference): Promise<Result<Observed<TDocument>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TDocument>>>;
 }
 
 // src/server/modules/workflows/contract.ts
@@ -108,10 +108,10 @@ The full authority command types live in `src/shared/contracts/execution-authori
 
 | Phase | Migration files | Owned schema groups |
 |---|---|---|
-| Foundation | `src/server/db/migrations/0001_foundation.sql` through `0004_foundation_operations.sql` | deployment, members, credentials, sessions, projects, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
-| GitHub | `src/server/db/migrations/0005_github.sql` through `0007_github_attention.sql` | connector installations/scopes, source projections, canonical records, source links, mutation provenance, collision summaries, inbox |
-| Outline | `src/server/db/migrations/0008_outline.sql` through `0010_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
-| Automation | `src/server/db/migrations/0011_workflows.sql` through `0013_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
+| Foundation | `src/server/db/migrations/0001_foundation.sql` through `0005_foundation_operations.sql` | deployment, members, credentials, sessions, upgrade-safe Projects/base branches, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
+| GitHub | `src/server/db/migrations/0006_github.sql` through `0008_github_attention.sql` | connector installations/scopes, source projections, canonical aliases/source links, mutation provenance, collision summaries, inbox |
+| Outline | `src/server/db/migrations/0009_outline.sql` through `0011_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
+| Automation | `src/server/db/migrations/0012_workflows.sql` through `0014_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
 
 Every migration has an adjacent `*.verify.ts` integration test that opens the previous schema fixture, migrates forward, verifies invariants, and proves backup/restore compatibility. Destructive rollback is never improvised; rollback means restore the pre-migration authenticated backup and run the recorded schema compatibility check.
 

@@ -31,9 +31,9 @@
 | Area | Files |
 |---|---|
 | Shared contracts | `src/shared/contracts/{result,ids,actors,commands,execution-authority,runs,identity,projects,runners,protocol,presets,context,telemetry}.ts` |
-| Database | `src/server/db/{connection,transaction,migrate}.ts`, `src/server/db/migrations/0001_foundation.sql`, `0001_foundation.verify.ts`, `0002_runners.sql`, `0002_runners.verify.ts`, `0003_runs_authority.sql`, `0003_runs_authority.verify.ts`, `0004_foundation_operations.sql`, `0004_foundation_operations.verify.ts` |
+| Database | `src/server/db/{connection,transaction,migrate}.ts`, `src/server/db/migrations/0001_foundation.sql`, `0001_foundation.verify.ts`, `0002_projects.sql`, `0002_projects.verify.ts`, `0003_runners.sql`, `0003_runners.verify.ts`, `0004_runs_authority.sql`, `0004_runs_authority.verify.ts`, `0005_foundation_operations.sql`, `0005_foundation_operations.verify.ts` |
 | Identity | `src/server/modules/identity/{contract,identity-authority,passkeys,invitations,recovery,revocation,sessions,csrf,devices,oidc,auth-proxy,provider-links}.ts` |
-| Connector foundation | `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts` |
+| Connector foundation | `src/server/modules/connectors/{contract,connector-authority,credentials,epochs,scope-policy}.ts` |
 | Projects | `src/server/modules/projects/{contract,project-registry}.ts`, `src/runner/repository/{config,discovery,global-registry}.ts` |
 | Runners | `src/server/modules/runners/{contract,runner-registry,exposures}.ts`, `src/server/adapters/wss/{protocol,runner-channel,revocations}.ts`, `src/runner/{daemon,supervisor,local-diagnostics}.ts` |
 | Runner adapters | `src/runner/adapters/runtime/{contract,claude,codex}.ts`, `src/runner/adapters/host/{contract,native,orca}.ts`, `src/runner/adapters/enforcement/{contract,trusted-host}.ts` |
@@ -386,15 +386,17 @@ export type ExactRevisionMutation<T> = Readonly<{
   connectorId: ConnectorId;
   connectorEpoch: number;
   idempotencyKey: string;
-  expectedRevision: string;
-  expectedComparableDigest: Sha256;
+  precondition:
+    | Readonly<{ kind: "ABSENT" }>
+    | Readonly<{ kind: "EXACT_REVISION"; sourceRevision: string; comparableDigest: Sha256 }>
+    | Readonly<{ kind: "EXPECTED_MEMBERSHIP"; sourceRevision: string; comparableDigest: Sha256; memberKey: string; present: boolean }>;
   actionDigest: Sha256;
   mutation: T;
 }>;
 export interface SourceConnector<R, P, M> {
   inspect(scope: ConnectorScope, reference: R): Promise<Result<Observed<P>>>;
   mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<M>): Promise<Result<Observed<P>>>;
-  reconcile(scope: ConnectorScope, event: ReconciliationEvent<R>): Promise<Result<Observed<P>>>;
+  scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<P>>>;
 }
 ```
 
@@ -406,6 +408,19 @@ does not need an `AuthoritySession`. An attempt-originated write first consumes 
 receive an opaque short-lived `ConnectorOperationAuthorization`; they never decide actor authority,
 persist idempotency/audit/projections, or mutate epochs.
 
+Provider-first writes are crash-safe before any provider phase exists. Schema v1 includes a generic
+STRICT `connector_operation_intents` table with operation/idempotency identity, canonical input hash,
+non-secret action marker, actor/authorization binding digest, project/connector/current epoch, typed
+precondition/action digest, `PENDING|PROVIDER_CONFIRMED|COMMITTED|REQUIRES_REAUTHORIZATION|FAILED_PERMANENT`,
+bounded attempt count/times, and optional confirmed provider reference/revision/provenance. The
+authority transaction persists `PENDING` before returning authorization; the provider call occurs
+outside SQLite; confirmation atomically records normalized provider identity/provenance, projection,
+audit, and idempotency result. Lost-response recovery searches only by deterministic marker or exact
+provider membership/object ID, never body text. A stale/revoked intent becomes
+`REQUIRES_REAUTHORIZATION` and never auto-resumes. Same key/input replays; changed input conflicts;
+ambiguous marker recovery fails visibly. Tests cover restart before/after provider application, local
+confirmation rollback, revocation before recovery, and marker collision using a generic fake connector.
+
 Foundation also owns a run-independent source reconciliation command. It binds exact project,
 connector, epoch, source reference, provider revision/comparable digest, freshness, provenance, and
 idempotency key; it does not forge a run ID or reuse run-scoped `RECONCILE_OBSERVATION`. Webhook,
@@ -414,8 +429,9 @@ projection application path.
 
 Every connector schema is strict and bounded. `Observed<T>` separates source revision/provider time,
 comparable-field digest, local projection revision, server observation time, freshness, scope, and
-provenance. `ExactRevisionMutation<T>` carries expected revision plus prior comparable digest and one
-outer action digest. Connector scopes are explicit project/connector/epoch allowlists. Same
+provenance. `ExactRevisionMutation<T>` carries one typed `ABSENT`, `EXACT_REVISION`, or
+`EXPECTED_MEMBERSHIP` precondition plus one outer action digest. Connector scopes are explicit
+project/connector/epoch allowlists. Same
 idempotency key and canonical input replays; changed input conflicts. No connector contract admits
 raw provider payloads, bodies, credentials, URLs/GraphQL documents, or provider error text.
 
@@ -460,17 +476,26 @@ git commit -m "feat: secure provider and device identity"
 **Requirements:** persistence/discovery portion of `FND-003`, `ORP-09`; `FND-003` remains `IN_PROGRESS` until Task 13 proves web/CLI parity.
 
 **Files:**
+- Modify: `src/shared/contracts/projects.ts`
 - Create: `src/server/modules/projects/{contract,project-registry}.ts`
+- Create: `src/server/db/migrations/0002_projects.sql`
+- Create: `src/server/db/migrations/0002_projects.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/runner/repository/{config,discovery,global-registry}.ts`
+- Create: `src/runner/repository/migrations/0001_global_registry.sql`
+- Create: `src/cli/ports/projects-api.ts`
 - Create: `src/cli/commands/{init,list,projects,status}.ts`
-- Modify: `src/server/db/migrations/0001_foundation.sql`
-- Modify: `src/server/db/migrations/0001_foundation.verify.ts`
+- Modify: `src/cli/command.ts`
 - Test: `tests/unit/projects/discovery.test.ts`
+- Test: `tests/integration/projects/global-registry.test.ts`
 - Test: `tests/integration/{projects,cli-projects}.test.ts`
 
 **Interfaces:**
-- Consumes: `ProjectRegistry`, project schemas, member/device actor.
-- Produces: `.collab/config.toml` parser, upward discovery, `~/.collab/global.db`, path-local project resolution.
+- Consumes: server `ProjectRegistry`, injected authenticated `ProjectsApi`, project schemas,
+  member/device actor, injected Git/filesystem/clock adapters.
+- Produces: owner-created server Projects with authoritative base branch, exact
+  `.collab/config.toml` parsing, repository-root discovery, independently migrated
+  `~/.collab/global.db`, and path-local project resolution without crossing the artifact boundary.
 
 - [ ] **Step 1: Write failing discovery tests**
 
@@ -500,24 +525,78 @@ export const ProjectConfigSchema = z.object({
   base_branch: GitRefSchema,
 }).strict();
 export interface ProjectRegistry {
-  register(command: RegisterProject): Promise<Result<Project>>;
+  create(command: CreateProject): Promise<Result<Project>>;
   inspect(query: InspectProject): Promise<Result<Project>>;
   list(query: ListProjects): Promise<Result<readonly Project[]>>;
 }
 ```
 
-`CanonicalServerOriginSchema` parses URL components and accepts only an HTTPS origin or exact-host `http://localhost[:port]`, with no credentials, path, query, or fragment; it returns one no-trailing-slash canonical origin. `collab init` links an existing Project and never creates one. The versioned local SQLite registry uses `(server_origin, project_id)` identity, a unique canonical preferred path, explicit moved-checkout replacement, and corruption failure. Upward discovery bounds file size, rejects symlink escapes, and keeps every absolute path inside runner/CLI adapters. `projects.name` receives the same 120-character database bound as its shared schema.
+`Project` and every Project view include server-authoritative `baseBranch: GitRef`; project creation is
+OWNER-only, server-generates `projectId`, and derives the deployment's singleton `teamId`. Callers
+cannot choose team routing or project IDs. `collab init` authenticates through the exact-origin-bound
+`ProjectsApi`, inspects an existing Project, and writes its returned team/base branch; it never creates
+a Project or infers `main`, current branch, or remote default.
+
+Migration `0002_projects` is upgrade-safe and precedes every runner migration. It rebuilds the v1
+`projects` table as STRICT with bounded opaque ID/team/name/base-branch/revision/time constraints and a
+foreign key to the singleton deployment team. Because no supported v1 API can create Projects before
+this task, migration requires the old table to be empty and fails visibly if an unexpected row lacks a
+canonical base branch; it never invents one. Update the contiguous migrator and verify empty-to-v2,
+v1-to-v2, idempotency, rollback, history/integrity, and claimed-schema checks.
+
+`CanonicalServerOriginSchema` parses URL components and accepts only HTTPS or exact
+`http://localhost[:port]`, with no credentials, non-root path, query, or fragment, returning a
+no-trailing-slash origin. The TOML file is valid bounded UTF-8 (16 KiB maximum) with exactly four
+root string keys; reject duplicates, dotted/nested/array keys, controls/NUL, unknown/missing keys,
+invalid opaque IDs, unsafe origins, and invalid Git refs.
+
+Discovery uses shell-free Git argv to resolve the nearest canonical worktree root and requires
+`.collab/config.toml` at that exact root. It never crosses the nearest Git repository boundary or lets
+a nested repository inherit outer config. Realpath the start/root; reject non-directory starts,
+missing repositories, unreadable/non-regular files, symlinked `.collab` directories or config files,
+and file-identity swaps between lstat/open/read/revalidation. Every filesystem action is injected and
+TOCTOU mismatch returns `PROJECT_CONFIG_UNSAFE`.
+
+The CLI-owned local database uses an independent migration module (never server DB imports), directory
+mode 0700 and regular non-symlinked database mode 0600, strict SQLite, WAL, foreign keys, bounded busy
+timeout, contiguous history, schema verification, and immediate write transactions. Its STRICT
+`project_checkouts` table keys `(server_origin, project_id)`, makes canonical `preferred_checkout`
+globally unique, and stores team ID, base branch, config SHA-256, registered/last-access times. Corrupt,
+truncated, drifted, or newer schemas fail without deletion/recreation. Stable errors distinguish busy,
+corrupt, unsupported version, ambiguity, unsafe config, and mapping conflict.
+
+Init ordering is recoverable across two stores: inspect state; authenticate/validate remote facts;
+acquire repository-local lock; recheck; restrictive same-directory temp write + fsync + atomic rename;
+then immediate registry transaction. A crash after rename is repaired by identical retry. Identical
+config preserves bytes/mtime; differing config is never overwritten. `--replace-local-mapping`
+changes only the preferred path for the same revalidated origin/project and never promotes linked or
+transient Agent Run worktrees implicitly. Concurrent identical links are idempotent; conflicting links
+have one winner.
+
+The local `collab` artifact depends only on `ProjectsApi`, `LocalProjectRegistry`, and local adapters;
+it never imports `ProjectRegistry`. Remote calls contain safe project identity and actor proof, never
+checkout paths, and credential/redirect selection is bound to the config's exact canonical origin.
+Same project ID across multiple origins is valid; an origin-less lookup with multiple matches returns
+`PROJECT_AMBIGUOUS` and requires `--server`, never last-accessed selection.
+
+`collab list` and in-repository `collab status` discover the current project and return the shared
+`ProjectView` plus `RUN_STATE_UNAVAILABLE` until Task 9. `collab projects` and `collab status --all`
+work outside repositories across the global registry and report stale/unreachable origins honestly;
+outside `status` without `--all` returns a bounded not-in-project hint. Task 13 must use the same
+`ProjectView` schema to prove Web/CLI parity.
 
 - [ ] **Step 4: Verify GREEN**
 
 Run: `bun test tests/unit/projects tests/integration/projects.test.ts tests/integration/cli-projects.test.ts`
 
-Expected: PASS; inside/outside repository resolution returns the same project ID and no absolute path reaches the server fixture.
+Expected: PASS; parser/origin/Git-ref rejection, nested-repository and symlink/swap safety, local DB
+migration/corruption/concurrency, init crash repair, multi-origin ambiguity, owner-only server creation,
+inside/outside resolution, unavailable run state, and absolute-path privacy are all covered.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/modules/projects src/runner/repository src/cli/commands tests/unit/projects tests/integration/projects.test.ts tests/integration/cli-projects.test.ts
+git add src/shared/contracts/projects.ts src/server/modules/projects src/server/db/migrations/0002_projects.sql src/server/db/migrations/0002_projects.verify.ts src/server/db/migrate.ts src/runner/repository src/cli/ports/projects-api.ts src/cli/commands src/cli/command.ts tests/unit/projects tests/integration/projects tests/integration/projects.test.ts tests/integration/cli-projects.test.ts
 git commit -m "feat: add project discovery and registry"
 ```
 
@@ -526,8 +605,8 @@ git commit -m "feat: add project discovery and registry"
 **Requirements:** registry portion of `FND-004` and `FND-015`, runner prerequisite for `FND-007`; surface and authority proofs remain `IN_PROGRESS` until Tasks 10 and 13.
 
 **Files:**
-- Create: `src/server/db/migrations/0002_runners.sql`
-- Create: `src/server/db/migrations/0002_runners.verify.ts`
+- Create: `src/server/db/migrations/0003_runners.sql`
+- Create: `src/server/db/migrations/0003_runners.verify.ts`
 - Create: `src/server/modules/runners/{contract,runner-registry,exposures}.ts`
 - Modify: `src/shared/contracts/runners.ts`
 - Modify: `src/server/db/{migrate}.ts`
@@ -559,7 +638,7 @@ Expected: FAIL because runner schema and registry are missing.
 
 - [ ] **Step 3: Add runner persistence and registry interface**
 
-Migration 0002 creates strict, revisioned `runners`, `runner_credentials`, `runner_pairings`, `runner_mappings`, `safe_profile_versions`, `runner_exposure_acknowledgements`, `runner_exposures`, and `runner_revocation_outbox` tables. It enforces immutable owner and acknowledgement rows, hash-only one-time pairing, key-thumbprint-bound runner credentials, `OWNER_ONLY` default, positive runner/policy epochs, bounded concurrency, active mapping uniqueness, exact mapping/profile/policy/security-digest exposure tuples, and nonnegative lifecycle times. It stores server-received heartbeat time but no caller-supplied `ONLINE` status, local path, command, environment, credential cleartext, or connector state.
+Migration 0003 creates strict, revisioned `runners`, `runner_credentials`, `runner_pairings`, `runner_mappings`, `safe_profile_versions`, `runner_exposure_acknowledgements`, `runner_exposures`, and `runner_revocation_outbox` tables. It enforces immutable owner and acknowledgement rows, hash-only one-time pairing, key-thumbprint-bound runner credentials, `OWNER_ONLY` default, positive runner/policy epochs, bounded concurrency, active mapping uniqueness, exact mapping/profile/policy/security-digest exposure tuples, and nonnegative lifecycle times. It stores server-received heartbeat time but no caller-supplied `ONLINE` status, local path, command, environment, credential cleartext, or connector state.
 
 ```ts
 export interface RunnerRegistry {
@@ -577,18 +656,18 @@ export interface RunnerRegistry {
 }
 ```
 
-Pairing is layered on a current DPoP-bound CLI device session but returns a distinct runner credential and immutable runner owner; a device credential never authenticates WSS as a runner. Registry methods expose exact facts and mutations, not dispatch authorization: `ExecutionAuthority` alone decides whether a dispatcher may launch. Persistence includes runner credentials/key thumbprints, safe profile advertisements, bounded concurrency, append-only acknowledgement content digests, exact exposure tuple revisions, and durable revocation intents. Status is derived from server-received heartbeat time rather than trusted client status. Adding migration 0002 must prove empty-to-v2 and v1-to-v2 upgrades, idempotency, history integrity, and migration rollback. Source-free mappings remain connector-neutral and contain opaque local mapping identifiers only.
+Pairing is layered on a current DPoP-bound CLI device session but returns a distinct runner credential and immutable runner owner; a device credential never authenticates WSS as a runner. Registry methods expose exact facts and mutations, not dispatch authorization: `ExecutionAuthority` alone decides whether a dispatcher may launch. Persistence includes runner credentials/key thumbprints, safe profile advertisements, bounded concurrency, append-only acknowledgement content digests, exact exposure tuple revisions, and durable revocation intents. Status is derived from server-received heartbeat time rather than trusted client status. Adding migration 0003 must prove empty-to-v3 and v2-to-v3 upgrades, idempotency, history integrity, and migration rollback. Source-free mappings remain connector-neutral and contain opaque local mapping identifiers only.
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test src/server/db/migrations/0002_runners.verify.ts tests/integration/runners/registry.test.ts`
+Run: `bun test src/server/db/migrations/0003_runners.verify.ts tests/integration/runners/registry.test.ts`
 
 Expected: PASS; pairing replay, stale credentials, immutable ownership, exact exposure facts, acknowledgement refresh, and revocation are enforced without duplicating dispatch policy.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0002_runners.sql src/server/db/migrations/0002_runners.verify.ts src/server/modules/runners tests/integration/runners
+git add src/server/db/migrations/0003_runners.sql src/server/db/migrations/0003_runners.verify.ts src/server/modules/runners tests/integration/runners
 git commit -m "feat: add secure runner registry"
 ```
 
@@ -752,8 +831,8 @@ git commit -m "feat: add trusted runner adapters"
 **Requirements:** persistence prerequisite for `FND-006` through `FND-011`, `FND-016`, and `FND-017`; no behavioral requirement is marked complete by schema alone.
 
 **Files:**
-- Create: `src/server/db/migrations/0003_runs_authority.sql`
-- Create: `src/server/db/migrations/0003_runs_authority.verify.ts`
+- Create: `src/server/db/migrations/0004_runs_authority.sql`
+- Create: `src/server/db/migrations/0004_runs_authority.verify.ts`
 - Create: `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts`
 - Create: `src/server/modules/execution-authority/{contract,persistence}.ts`
 - Modify: `src/shared/contracts/{runs,execution-authority}.ts`
@@ -786,7 +865,7 @@ Expected: FAIL because schema version 3 and authority implementation are missing
 
 - [ ] **Step 3: Add the authoritative schema**
 
-Migration 0003 is the complete durable execution/configuration foundation for Tasks 10–12. It creates strict tables for:
+Migration 0004 is the complete durable execution/configuration foundation for Tasks 10–12. It creates strict tables for:
 
 - Coordination Records and canonical source references keyed by `(project_id, connector_id, source_item_id)` with project-consistent foreign keys;
 - Agent Runs, predecessor/follow-up edges, run-owned opaque worktree identity, immutable effective configuration, dispatcher, bounds, waiting/terminal reasons, and exact repository/branch provenance;
@@ -802,14 +881,14 @@ Every mutable revision, epoch, ordinal, and fence is positive; lifecycle time re
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test src/server/db/migrations/0003_runs_authority.verify.ts tests/integration/runs/source-free-creation.test.ts`
+Run: `bun test src/server/db/migrations/0004_runs_authority.verify.ts tests/integration/runs/source-free-creation.test.ts`
 
 Expected: PASS; empty `sourceRefs` creates one minimal Coordination Record and complete launch graph, every injected failure rolls the whole transaction back, upgrades preserve v1/v2 data, and no clear capability or prohibited content reaches storage.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0003_runs_authority.sql src/server/db/migrations/0003_runs_authority.verify.ts src/server/db/migrate.ts src/shared/contracts/runs.ts src/shared/contracts/execution-authority.ts src/server/modules/coordination-records src/server/modules/execution-authority/contract.ts src/server/modules/execution-authority/persistence.ts tests/integration/runs/source-free-creation.test.ts
+git add src/server/db/migrations/0004_runs_authority.sql src/server/db/migrations/0004_runs_authority.verify.ts src/server/db/migrate.ts src/shared/contracts/runs.ts src/shared/contracts/execution-authority.ts src/server/modules/coordination-records src/server/modules/execution-authority/contract.ts src/server/modules/execution-authority/persistence.ts tests/integration/runs/source-free-creation.test.ts
 git commit -m "feat: add coordination and run schema"
 ```
 
@@ -1146,8 +1225,8 @@ git commit -m "feat: expose equivalent foundation surfaces"
 **Requirements:** `FND-009`, remaining `FND-008`, `ORP-10`; supplies the durable fault proof deferred by Tasks 7 and 10.
 
 **Files:**
-- Create: `src/server/db/migrations/0004_foundation_operations.sql`
-- Create: `src/server/db/migrations/0004_foundation_operations.verify.ts`
+- Create: `src/server/db/migrations/0005_foundation_operations.sql`
+- Create: `src/server/db/migrations/0005_foundation_operations.verify.ts`
 - Create: `src/runner/{cache,outbox,offline-policy}.ts`
 - Create: `src/runner/db/migrations/0002_continuity.sql`
 - Modify: `src/runner/db/migrate.ts`
@@ -1184,7 +1263,7 @@ Expected: FAIL because local continuity and reconciliation modules are missing.
 
 - [ ] **Step 3: Add operation persistence and offline policy**
 
-Server migration 0004 creates durable semantic-event acceptance and closed revocation/operation intent state. Accepted events key on authenticated runner plus stable semantic event ID, not connection message ID, and persist run/attempt, schema/event kind, positive local sequence/predecessor, canonical input hash, committed result reference/disposition, and accepted time. The dedup row, lifecycle/evidence/checkpoint/result effect, audit, and acknowledgement intent commit together. Same ID/same hash replays the result; changed hash conflicts. Closed operation kinds use kind-specific validated fields/digests and never arbitrary payload JSON or the WSS dispatch outbox. Backup metadata belongs to Task 15, not this migration.
+Server migration 0005 creates durable semantic-event acceptance and closed revocation/operation intent state. Accepted events key on authenticated runner plus stable semantic event ID, not connection message ID, and persist run/attempt, schema/event kind, positive local sequence/predecessor, canonical input hash, committed result reference/disposition, and accepted time. The dedup row, lifecycle/evidence/checkpoint/result effect, audit, and acknowledgement intent commit together. Same ID/same hash replays the result; changed hash conflicts. Closed operation kinds use kind-specific validated fields/digests and never arbitrary payload JSON or the WSS dispatch outbox. Backup metadata belongs to Task 15, not this migration.
 
 Runner-local migration 0002 adds bounded cache entries and a closed semantic event outbox to `~/.collab/runner.db`. Events retain stable ID/hash/sequence across restart and connection changes, use `PENDING/IN_FLIGHT/ACKNOWLEDGED/PERMANENTLY_REJECTED`, reserve capacity for terminal/checkpoint facts, and never contain raw output, prompts, bodies, diffs, transcripts, credentials, environment, attachment handles, or absolute paths. Cache rows are read-only authority aids with freshness/provenance and the Product Spec byte/item/age limits; they never store permits or create authority.
 
@@ -1203,14 +1282,14 @@ Reconnect order is authenticate/negotiate, fence the old connection, fetch curre
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test src/server/db/migrations/0004_foundation_operations.verify.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts`
+Run: `bun test src/server/db/migrations/0005_foundation_operations.verify.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts`
 
 Expected: PASS; disconnected runners cannot renew/acquire authority or claim mutations, duplicates commit once, cancellation disposition is honest, and lost attempts become immutable `LOST` with run `WAITING`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/shared/contracts/protocol.ts src/shared/contracts/commands.ts src/shared/contracts/runs.ts src/server/db/migrations/0004_foundation_operations.sql src/server/db/migrations/0004_foundation_operations.verify.ts src/runner/db src/runner/cache.ts src/runner/outbox.ts src/runner/offline-policy.ts src/server/modules/runs/event-deduplication.ts src/server/modules/runs/reconciliation.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts
+git add src/shared/contracts/protocol.ts src/shared/contracts/commands.ts src/shared/contracts/runs.ts src/server/db/migrations/0005_foundation_operations.sql src/server/db/migrations/0005_foundation_operations.verify.ts src/runner/db src/runner/cache.ts src/runner/outbox.ts src/runner/offline-policy.ts src/server/modules/runs/event-deduplication.ts src/server/modules/runs/reconciliation.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts
 git commit -m "feat: add bounded offline continuity"
 ```
 
@@ -1222,13 +1301,14 @@ git commit -m "feat: add bounded offline continuity"
 - Create: `src/server/operations/{backup,restore,key-rotation}.ts`
 - Create: `src/server/commands/{backup,restore,key-rotation,auth-recover}.ts`
 - Create: `src/server/command.ts`
-- Modify: `src/server/db/migrations/0004_foundation_operations.sql`
-- Modify: `src/server/db/migrations/0004_foundation_operations.verify.ts`
+- Modify: `src/server/db/migrations/0005_foundation_operations.sql`
+- Modify: `src/server/db/migrations/0005_foundation_operations.verify.ts`
 - Modify: `src/shared/environment.ts`
 - Test: `tests/drills/backup-restore.test.ts`
 
 **Interfaces:**
-- Consumes: schema version 4, deployment master key outside data/backup paths, identity/runner/connector epochs.
+- Consumes: the injected contiguous migration catalog/current schema version and digest, deployment
+  master key outside data/backup paths, identity/runner/connector epochs.
 - Produces: authenticated encrypted backup manifest, offline restore, key rotation, server command dispatcher handlers.
 
 - [ ] **Step 1: Write failing restore safety test**
@@ -1263,7 +1343,7 @@ export type BackupManifest = Readonly<{
   deploymentFingerprint: string;
   sourceAuthorityIncarnation: string;
   productVersion: string;
-  schemaVersion: 4;
+  schemaVersion: number;
   migrationDigest: string;
   algorithm: "AES_256_GCM_CHUNKED_V1";
   keyId: string;
@@ -1279,19 +1359,26 @@ export async function restoreBackup(input: RestoreInput): Promise<Result<Restore
   if (!offline.ok) return offline;
   const verified = await authenticateAndDecrypt(input.backup, input.masterKey);
   if (!verified.ok) return verified;
-  if (verified.value.manifest.schemaVersion !== 4) return err("BACKUP_SCHEMA_MISMATCH", "Backup schema is incompatible.", "NEVER");
+  if (!input.migrations.supportsRestoreFrom(verified.value.manifest.schemaVersion)) return err("BACKUP_SCHEMA_MISMATCH", "Backup schema is incompatible.", "NEVER");
   const staged = await stageAndValidateDatabase(offline.value, verified.value.databaseBytes);
+  await input.migrations.migrateAndVerifyStaging(staged, verified.value.manifest.migrationDigest);
   await invalidateAuthorityAndInstallFreshIncarnation(staged);
   await requireConnectorReview(staged);
   await auditAndRevalidateStaging(staged, verified.value.manifest);
   await promoteStagedDatabaseAtomically(offline.value, staged);
-  return ok({ schemaVersion: 4, connectorReview: "REQUIRED" });
+  return ok({ schemaVersion: input.migrations.currentVersion, connectorReview: "REQUIRED" });
 }
 ```
 
+Backup/restore never hard-codes the Foundation terminal version. The injected signed migration catalog
+owns current version, ordered digests, supported older restore range, staged forward migration, and
+claimed-schema verifier. Every later migration's adjacent verifier must prove both previous-to-current
+upgrade and authenticated backup restore through isolated staging; a future/unknown/gapped/digest-
+mismatched backup fails before promotion. Readiness uses the same catalog version/digest.
+
 The `collab-server` command root has mutually exclusive listener and offline-operation modes; restore cannot be authorized by a caller-supplied boolean and never constructs network/external workers. Backups use a SQLite-consistent snapshot, restrictive temp files, fsync+atomic rename, independently reopen/decrypt/integrity-verify before success, and retain the previous verified backup on failure. The strict canonical authenticated manifest and chunked AES-256-GCM/HKDF key hierarchy follow the Product Spec. Master key comes from a secret file outside data/backup paths.
 
-Migration 0004 adds deployment authority incarnation/restore marker, versioned wrapped credential-class keys, constrained credential algorithm/key-version metadata, resumable rotation state, and safe backup/retention audit metadata. Restore invalidates every session/challenge/pairing/capability/permit/authority/lease/operation proof, advances epochs, holds queued external writes, and preserves immutable history before staging promotion. Credential-class rotation rewrites only its class and activates after full verification; master-key rotation rewraps data keys and accounts for retained backups. Retention is finite but never deletes the sole verified usable backup.
+Migration 0005 adds deployment authority incarnation/restore marker, versioned wrapped credential-class keys, constrained credential algorithm/key-version metadata, resumable rotation state, and safe backup/retention audit metadata. Restore invalidates every session/challenge/pairing/capability/permit/authority/lease/operation proof, advances epochs, holds queued external writes, and preserves immutable history before staging promotion. Credential-class rotation rewrites only its class and activates after full verification; master-key rotation rewraps data keys and accounts for retained backups. Retention is finite but never deletes the sole verified usable backup.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -1302,7 +1389,7 @@ Expected: PASS for authentication tag, manifest digest, wrong/missing key, schem
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/shared/environment.ts src/server/db/migrations/0004_foundation_operations.sql src/server/db/migrations/0004_foundation_operations.verify.ts src/server/operations src/server/commands src/server/command.ts tests/drills/backup-restore.test.ts
+git add src/shared/environment.ts src/server/db/migrations/0005_foundation_operations.sql src/server/db/migrations/0005_foundation_operations.verify.ts src/server/operations src/server/commands src/server/command.ts tests/drills/backup-restore.test.ts
 git commit -m "feat: add authenticated recovery operations"
 ```
 
@@ -1819,5 +1906,5 @@ git commit -m "docs: record foundation dogfood evidence"
 
 - Coverage: Tasks 2-4 cover `FND-001`/`FND-002`; Task 5 `FND-003`; Tasks 6-8 `FND-004`/`FND-005`/`FND-012`/`FND-015`/`FND-018`; Tasks 9-12 cover `FND-006`-`FND-011`/`FND-016`/`FND-017`; Task 13 covers `FND-014`; Task 14 completes `FND-008`/`FND-009`; Task 15 covers `FND-013`; Tasks 17-18 cover evidence and `FND-019`.
 - Type consistency: all callers consume `Result<T>` and the same `ExecutionAuthority.preview/execute/query`; resume is `AUTHORIZE_ATTEMPT` with cause `RESUME`; evidence reads use `INSPECT_EVIDENCE`.
-- Ordering: migrations are `0001 -> 0002 -> 0003 -> 0004`; authority commits before WSS delivery; restore verifies before listeners; subsequent code may proceed while Task 18 remains `IN_PROGRESS`.
+- Ordering: migrations are `0001 -> 0002 -> 0003 -> 0004 -> 0005`; authority commits before WSS delivery; restore verifies before listeners; subsequent code may proceed while Task 18 remains `IN_PROGRESS`.
 - Placeholder scan: the plan contains no deferred implementation markers, generic error-handling instructions, or undefined implementation steps.

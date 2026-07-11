@@ -103,6 +103,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 - Create `src/server/modules/projects/{contract,project-registry}.ts`.
 - Create `src/shared/contracts/projects.ts`.
 - Create `src/runner/repository/{config,discovery,global-registry}.ts`.
+- Create `src/server/db/migrations/0002_projects.sql` and verifier; add authoritative Project base branches without inventing values for unexpected old rows.
 - Create `src/cli/commands/{init,projects,status}.ts`.
 - Create `tests/unit/architecture/dependency-direction.test.ts`.
 - Test `tests/unit/projects/`, `tests/integration/projects/`, `tests/integration/cli-projects.test.ts`.
@@ -122,7 +123,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 
 **Files:**
 
-- Create `src/server/db/migrations/0002_runners.sql` and verifier.
+- Create `src/server/db/migrations/0003_runners.sql` and verifier.
 - Create `src/server/modules/runners/{contract,runner-registry,exposures}.ts`.
 - Create `src/server/adapters/wss/{protocol,runner-channel,revocations}.ts`.
 - Create `src/runner/{daemon,supervisor,local-diagnostics}.ts`.
@@ -149,7 +150,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 
 **Files:**
 
-- Create `src/server/db/migrations/0003_runs_authority.sql` and verifier.
+- Create `src/server/db/migrations/0004_runs_authority.sql` and verifier.
 - Create `src/shared/contracts/{runs,execution-authority,presets,context,telemetry}.ts`.
 - Create `src/server/modules/runs/{lifecycle,checkpoints,evidence,results}.ts` as private `ExecutionAuthority` implementation modules.
 - Create `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts` with minimal source-free records and mutation-guard ownership.
@@ -201,7 +202,7 @@ HTTP, CLI, MCP, and WSS Zod schemas reside in `src/shared/contracts/`. Adapters 
 
 **Files:**
 
-- Create `src/server/db/migrations/0004_foundation_operations.sql` and verifier.
+- Create `src/server/db/migrations/0005_foundation_operations.sql` and verifier.
 - Create `src/runner/{cache,outbox,offline-policy}.ts`.
 - Create `src/server/modules/runs/{event-deduplication,reconciliation}.ts`.
 - Create `tests/drills/network-partition.test.ts`, `tests/drills/cancellation.test.ts`, `tests/drills/runner-loss.test.ts`.

@@ -39,7 +39,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0005_github.sql` and verifier.
+- Create `src/server/db/migrations/0006_github.sql` and verifier.
 - Create `src/shared/contracts/github.ts`.
 - Create `src/server/adapters/github/{contract,app-auth,client,scope,webhooks,reconciliation}.ts`.
 - Extend the Foundation `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts` primitives only through their existing typed interfaces.
@@ -83,7 +83,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0006_coordination_source_mapping.sql` and verifier; Foundation already owns Coordination Records and mutation guards.
+- Create `src/server/db/migrations/0007_coordination_source_mapping.sql` and verifier; Foundation already owns Coordination Records and mutation guards.
 - Create `src/shared/contracts/coordination-records.ts`.
 - Extend `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts` with provider canonical mapping, late linking, and audited coalescing.
 - Create `src/server/modules/github-coordination/{assignment,delegation,delivery}.ts`.
@@ -126,7 +126,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0007_github_attention.sql` and verifier.
+- Create `src/server/db/migrations/0008_github_attention.sql` and verifier.
 - Create `src/server/modules/inbox/{events,inbox,command-center}.ts`.
 - Create `src/web/features/{inbox,command-center}/`.
 - Create `tests/drills/github-scope-narrowing.test.ts`, `github-member-offboarding.test.ts`, `github-missed-webhook.test.ts`.
