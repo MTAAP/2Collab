@@ -32,16 +32,39 @@ export function createGitHubReconciliationScheduler(input: GitHubReconciliationS
     try {
       for (const scope of input.scopes()) {
         const result = await input.reconcile(scope);
-        if (result.ok) { failures = 0; if (result.value.notBefore) next = Math.max(next, result.value.notBefore - input.clock()); }
-        else { failures += 1; next = Math.min(input.maximumBackoffMs, input.intervalMs * 2 ** Math.min(failures, 10)); }
+        if (result.ok) {
+          failures = 0;
+          if (result.value.notBefore) next = Math.max(next, result.value.notBefore - input.clock());
+        } else {
+          failures += 1;
+          next = Math.min(input.maximumBackoffMs, input.intervalMs * 2 ** Math.min(failures, 10));
+        }
       }
-    } finally { running = false; schedule(next); }
+    } finally {
+      running = false;
+      schedule(next);
+    }
   };
   return {
-    start() { if (!stopped) return; stopped = false; schedule(0); },
-    wake() { schedule(0); },
-    async runNow() { stopped = false; await tick(); },
-    stop() { stopped = true; if (timer) clear(timer); timer = undefined; },
-    state() { return { running, stopped, failures } as const; },
+    start() {
+      if (!stopped) return;
+      stopped = false;
+      schedule(0);
+    },
+    wake() {
+      schedule(0);
+    },
+    async runNow() {
+      stopped = false;
+      await tick();
+    },
+    stop() {
+      stopped = true;
+      if (timer) clear(timer);
+      timer = undefined;
+    },
+    state() {
+      return { running, stopped, failures } as const;
+    },
   };
 }

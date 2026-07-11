@@ -1,7 +1,12 @@
 import type { Result } from "../../../shared/contracts/result.ts";
 import type { GitHubProjection } from "../../../shared/contracts/github.ts";
 import type { GitHubPort } from "./contract.ts";
-import type { ConnectorScope, Observed, ReconciliationCursor, ReconciliationEvent } from "../../modules/connectors/contract.ts";
+import type {
+  ConnectorScope,
+  Observed,
+  ReconciliationCursor,
+  ReconciliationEvent,
+} from "../../modules/connectors/contract.ts";
 
 export type ReconciliationSummary = Readonly<{
   scanned: number;
@@ -14,12 +19,14 @@ export type GitHubReconciliationAuthority = Readonly<{
   reconcileSource(event: ReconciliationEvent<GitHubProjection>): Result<Observed<GitHubProjection>>;
 }>;
 
-export async function reconcileGitHubScope(input: Readonly<{
-  github: GitHubPort;
-  connectorAuthority: GitHubReconciliationAuthority;
-  scope: ConnectorScope;
-  cursor?: ReconciliationCursor;
-}>): Promise<Result<ReconciliationSummary>> {
+export async function reconcileGitHubScope(
+  input: Readonly<{
+    github: GitHubPort;
+    connectorAuthority: GitHubReconciliationAuthority;
+    scope: ConnectorScope;
+    cursor?: ReconciliationCursor;
+  }>,
+): Promise<Result<ReconciliationSummary>> {
   let scanned = 0;
   let updated = 0;
   let unchanged = 0;
@@ -31,5 +38,8 @@ export async function reconcileGitHubScope(input: Readonly<{
     if (applied.value.projectionRevision > 1) updated += 1;
     else unchanged += 1;
   }
-  return { ok: true, value: { scanned, updated, unchanged, ...(input.cursor ? { cursor: input.cursor } : {}) } };
+  return {
+    ok: true,
+    value: { scanned, updated, unchanged, ...(input.cursor ? { cursor: input.cursor } : {}) },
+  };
 }

@@ -7,9 +7,16 @@ import {
   createGitHubConnectorRoutes,
   type GitHubWebhookRouteDependencies,
 } from "./adapters/http/routes/connectors-github.ts";
+import {
+  createGitHubIssueRoutes,
+  type GitHubIssueRouteDependencies,
+} from "./adapters/http/routes/github-issues.ts";
+import { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
 
 type AppOptions = {
   docsRoot?: string;
+  githubIssues?: GitHubIssueRouteDependencies;
+  githubPlanning?: Parameters<typeof createGitHubPlanningRoutes>[0];
   githubWebhooks?: GitHubWebhookRouteDependencies;
   webRoot?: string;
 };
@@ -66,6 +73,12 @@ export function createApp(
   }
   if (options.githubWebhooks) {
     app.route("/", createGitHubConnectorRoutes(options.githubWebhooks));
+  }
+  if (options.githubIssues) {
+    app.route("/", createGitHubIssueRoutes(options.githubIssues));
+  }
+  if (options.githubPlanning) {
+    app.route("/", createGitHubPlanningRoutes(options.githubPlanning));
   }
 
   app.all("/api/*", (context) =>

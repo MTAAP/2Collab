@@ -71,7 +71,9 @@ describe("GitHub App scope ceiling", () => {
       selectedProjectIds: [],
     });
     github.addIssue({ repositoryId: "101", number: 1, title: "Allowed" });
-    github.beforeNextConfirmation(() => github.narrowScope({ repositoryIds: [], connectorEpoch: 4 }));
+    github.beforeNextConfirmation(() =>
+      github.narrowScope({ repositoryIds: [], connectorEpoch: 4 }),
+    );
     const result = await github.inspect(scope, { kind: "ISSUE", repositoryId: "101", number: 1 });
     expect(result).toMatchObject({ ok: false, error: { code: "CONNECTOR_REVOKED" } });
   });
@@ -111,7 +113,15 @@ describe("GitHub App scope ceiling", () => {
         now: 1_000,
         issue: async () => {
           issued += 1;
-          return { ok: true as const, value: { token: `token-${issued}`, expiresAt: 100_000, repositoryIds: ["101"], permissions: { issues: "write" as const } } };
+          return {
+            ok: true as const,
+            value: {
+              token: `token-${issued}`,
+              expiresAt: 100_000,
+              repositoryIds: ["101"],
+              permissions: { issues: "write" as const },
+            },
+          };
         },
       });
     await get(3);

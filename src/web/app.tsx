@@ -1,4 +1,12 @@
-import { BotIcon, PlayIcon, SettingsIcon, UsersIcon, WorkflowIcon } from "lucide-react";
+import {
+  BotIcon,
+  GitBranchIcon,
+  PlayIcon,
+  SettingsIcon,
+  UsersIcon,
+  WorkflowIcon,
+} from "lucide-react";
+import { GitHubPlanningFeature } from "./features/github/github-planning-feature.tsx";
 import { MembersFeature } from "./features/members/members-feature.tsx";
 import { PresetsFeature } from "./features/presets/presets-feature.tsx";
 import { RunnersFeature } from "./features/runners/runners-feature.tsx";
@@ -8,6 +16,7 @@ import { SetupFeature } from "./features/setup/setup-feature.tsx";
 
 const navigation = [
   { href: "/runs", label: "Runs", icon: PlayIcon },
+  { href: "/github", label: "GitHub", icon: GitBranchIcon },
   { href: "/presets", label: "Presets", icon: WorkflowIcon },
   { href: "/runners", label: "Runners", icon: BotIcon },
   { href: "/settings/team", label: "Team & access", icon: UsersIcon },
@@ -19,6 +28,8 @@ function AppShell() {
     <MembersFeature />
   ) : path.startsWith("/runners") ? (
     <RunnersFeature />
+  ) : path.startsWith("/github") ? (
+    <GitHubPlanningFeature />
   ) : path.startsWith("/presets") ? (
     <PresetsFeature />
   ) : (

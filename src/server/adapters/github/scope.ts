@@ -20,7 +20,11 @@ export type GitHubAuthorizedScope = Readonly<{
   projectNodeId?: string;
 }>;
 
-function denied(code: string, message: string, retry: "NEVER" | "REFRESH" = "NEVER"): Result<never> {
+function denied(
+  code: string,
+  message: string,
+  retry: "NEVER" | "REFRESH" = "NEVER",
+): Result<never> {
   return { ok: false, error: { code, message, retry } };
 }
 
@@ -33,7 +37,11 @@ export function assertGitHubScope(input: GitHubScopeInput): Result<GitHubAuthori
       return denied("GITHUB_REPOSITORY_NOT_SELECTED", "GitHub repository is not selected.");
     }
     if (!input.providerRepositoryIds.has(input.repositoryId)) {
-      return denied("GITHUB_REPOSITORY_UNAVAILABLE", "GitHub repository is unavailable.", "REFRESH");
+      return denied(
+        "GITHUB_REPOSITORY_UNAVAILABLE",
+        "GitHub repository is unavailable.",
+        "REFRESH",
+      );
     }
   }
   if (input.projectNodeId && !input.selectedProjectIds.has(input.projectNodeId)) {

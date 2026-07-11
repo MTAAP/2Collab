@@ -37,7 +37,9 @@ export function verifyGitHubSchema(database: Database): void {
     if (expected.some((name) => !actual.has(name))) throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
   for (const table of GITHUB_TABLES) {
-    if (database.query<{ strict: number }, []>(`PRAGMA table_list('${table}')`).get()?.strict !== 1) {
+    if (
+      database.query<{ strict: number }, []>(`PRAGMA table_list('${table}')`).get()?.strict !== 1
+    ) {
       throw new Error("SCHEMA_INTEGRITY_INVALID");
     }
   }

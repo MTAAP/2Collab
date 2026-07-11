@@ -9,7 +9,11 @@ describe("GitHub schema migration 0007", () => {
     migrate(database);
     expect(LATEST_SCHEMA_VERSION).toBe(7);
     expect(
-      database.query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
+      database
+        .query<{ version: number }, []>(
+          "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1",
+        )
+        .get(),
     ).toEqual({ version: 7 });
     expect(() => verifyGitHubSchema(database)).not.toThrow();
     database.close();
@@ -40,12 +44,14 @@ describe("GitHub schema migration 0007", () => {
       INSERT INTO github_project_connectors(project_id, connector_id, revision, created_at)
         VALUES ('project_1', 'github_1', 1, 0);
     `);
-    expect(() => database.exec(`
+    expect(() =>
+      database.exec(`
       INSERT INTO github_selected_repositories(
         project_id, connector_id, repository_id, repository_node_id, owner_login, name,
         permission_digest, scope_state, revision, created_at, updated_at
       ) VALUES ('project_1', 'github_1', 'not-a-number', 'R_1', 'owner', 'repo', '${"a".repeat(64)}', 'SELECTED', 1, 0, 0)
-    `)).toThrow();
+    `),
+    ).toThrow();
     database.close();
   });
 });

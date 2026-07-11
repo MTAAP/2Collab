@@ -1,15 +1,9 @@
 import { Hono } from "hono";
 import type { Result } from "../../../../shared/contracts/result.ts";
-import {
-  consumeVerifiedGitHubWebhook,
-  type EphemeralVerifiedGitHubDelivery,
-  type WebhookReceipt,
-} from "../../github/webhooks.ts";
+import type { WebhookReceipt } from "../../../modules/github-coordination/contract.ts";
 
 export type GitHubWebhookRouteDependencies = Readonly<{
-  webhookSecret(connectorId: string): Promise<Result<Uint8Array>>;
-  consume(connectorId: string, delivery: EphemeralVerifiedGitHubDelivery): Promise<Result<WebhookReceipt>>;
-  maxBodyBytes: number;
+  receive(connectorId: string, request: Request): Promise<Result<WebhookReceipt>>;
 }>;
 
 function status(code: string): 400 | 401 | 409 | 413 | 415 | 503 {
@@ -25,11 +19,15 @@ export function createGitHubConnectorRoutes(dependencies: GitHubWebhookRouteDepe
   const app = new Hono();
   app.post("/api/v1/connectors/github/:connectorId/webhooks", async (context) => {
     const connectorId = context.req.param("connectorId");
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(connectorId)) return context.json({ error: { code: "CONNECTOR_ID_INVALID", message: "Connector identifier is invalid." } }, 400);
-    const secret = await dependencies.webhookSecret(connectorId);
-    if (!secret.ok) return context.json({ error: secret.error }, 503);
-    const result = await consumeVerifiedGitHubWebhook(context.req.raw, secret.value, { maxBodyBytes: dependencies.maxBodyBytes }, (delivery) => dependencies.consume(connectorId, delivery));
-    return result.ok ? context.json(result.value, result.value.disposition === "REPLAY" ? 200 : 202) : context.json({ error: result.error }, status(result.error.code));
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(connectorId))
+      return context.json(
+        { error: { code: "CONNECTOR_ID_INVALID", message: "Connector identifier is invalid." } },
+        400,
+      );
+    const result = await dependencies.receive(connectorId, context.req.raw);
+    return result.ok
+      ? context.json(result.value, result.value.disposition === "REPLAY" ? 200 : 202)
+      : context.json({ error: result.error }, status(result.error.code));
   });
   return app;
 }

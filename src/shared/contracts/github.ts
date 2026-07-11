@@ -83,7 +83,10 @@ const IssueProjectionSchema = z
     number: GitHubNumberSchema,
     title: GitHubTitleSchema,
     state: z.enum(["OPEN", "CLOSED"]),
-    stateReason: z.enum(["COMPLETED", "NOT_PLANNED", "DUPLICATE", "REOPENED"]).nullable().optional(),
+    stateReason: z
+      .enum(["COMPLETED", "NOT_PLANNED", "DUPLICATE", "REOPENED"])
+      .nullable()
+      .optional(),
     labels: LabelsSchema,
     assignees: AssigneesSchema,
     milestoneNumber: GitHubNumberSchema.nullable().optional(),
@@ -129,7 +132,11 @@ const ProjectProjectionSchema = z
     fields: z
       .array(
         z
-          .object({ id: GitHubNodeIdSchema, name: GitHubNameSchema, dataType: z.string().min(1).max(64) })
+          .object({
+            id: GitHubNodeIdSchema,
+            name: GitHubNameSchema,
+            dataType: z.string().min(1).max(64),
+          })
           .strict(),
       )
       .max(100),
@@ -141,13 +148,23 @@ const ProjectItemProjectionSchema = z
     projectNodeId: GitHubNodeIdSchema,
     itemId: GitHubNodeIdSchema,
     content: GitHubWorkItemReferenceSchema,
-    fieldValues: z.record(GitHubNodeIdSchema, z.union([z.string().max(256), z.number().finite(), z.boolean(), z.null()])),
+    fieldValues: z.record(
+      GitHubNodeIdSchema,
+      z.union([z.string().max(256), z.number().finite(), z.boolean(), z.null()]),
+    ),
   })
   .strict();
 const RedactedProjectionSchema = z
   .object({
     kind: z.literal("REDACTED"),
-    sourceKind: z.enum(["REPOSITORY", "ISSUE", "PULL_REQUEST", "MILESTONE", "PROJECT", "PROJECT_ITEM"]),
+    sourceKind: z.enum([
+      "REPOSITORY",
+      "ISSUE",
+      "PULL_REQUEST",
+      "MILESTONE",
+      "PROJECT",
+      "PROJECT_ITEM",
+    ]),
     unsupportedRepositoryItems: z.number().int().nonnegative().max(100_000).optional(),
   })
   .strict();
@@ -174,19 +191,48 @@ export const GitHubProjectFieldValueSchema = z.discriminatedUnion("kind", [
 export type GitHubProjectFieldValue = Readonly<z.infer<typeof GitHubProjectFieldValueSchema>>;
 
 const CreateIssueSchema = z
-  .object({ kind: z.literal("CREATE_ISSUE"), repository: GitHubRepositoryRefSchema, title: GitHubTitleSchema, body: GitHubBodySchema })
+  .object({
+    kind: z.literal("CREATE_ISSUE"),
+    repository: GitHubRepositoryRefSchema,
+    title: GitHubTitleSchema,
+    body: GitHubBodySchema,
+  })
   .strict();
 const EditIssueSchema = z
-  .object({ kind: z.literal("EDIT_ISSUE"), issue: GitHubIssueRefSchema, title: GitHubTitleSchema.optional(), body: GitHubBodySchema.optional() })
+  .object({
+    kind: z.literal("EDIT_ISSUE"),
+    issue: GitHubIssueRefSchema,
+    title: GitHubTitleSchema.optional(),
+    body: GitHubBodySchema.optional(),
+  })
   .strict()
-  .refine((value) => value.title !== undefined || value.body !== undefined, "Issue edit must change a field");
+  .refine(
+    (value) => value.title !== undefined || value.body !== undefined,
+    "Issue edit must change a field",
+  );
 const AddCommentSchema = z
-  .object({ kind: z.literal("ADD_COMMENT"), issue: GitHubIssueRefSchema, body: GitHubBodySchema.min(1) })
+  .object({
+    kind: z.literal("ADD_COMMENT"),
+    issue: GitHubIssueRefSchema,
+    body: GitHubBodySchema.min(1),
+  })
   .strict();
-const SetLabelsSchema = z.object({ kind: z.literal("SET_LABELS"), issue: GitHubIssueRefSchema, labels: LabelsSchema }).strict();
-const SetAssigneesSchema = z.object({ kind: z.literal("SET_ASSIGNEES"), issue: GitHubIssueRefSchema, logins: AssigneesSchema }).strict();
+const SetLabelsSchema = z
+  .object({ kind: z.literal("SET_LABELS"), issue: GitHubIssueRefSchema, labels: LabelsSchema })
+  .strict();
+const SetAssigneesSchema = z
+  .object({
+    kind: z.literal("SET_ASSIGNEES"),
+    issue: GitHubIssueRefSchema,
+    logins: AssigneesSchema,
+  })
+  .strict();
 const SetMilestoneSchema = z
-  .object({ kind: z.literal("SET_MILESTONE"), item: GitHubWorkItemReferenceSchema, milestoneNumber: GitHubNumberSchema.nullable() })
+  .object({
+    kind: z.literal("SET_MILESTONE"),
+    item: GitHubWorkItemReferenceSchema,
+    milestoneNumber: GitHubNumberSchema.nullable(),
+  })
   .strict();
 const SetIssueStateSchema = z
   .object({
@@ -222,16 +268,43 @@ const EditMilestoneSchema = z
   })
   .strict()
   .refine(
-    (value) => value.title !== undefined || value.description !== undefined || value.dueOn !== undefined || value.state !== undefined,
+    (value) =>
+      value.title !== undefined ||
+      value.description !== undefined ||
+      value.dueOn !== undefined ||
+      value.state !== undefined,
     "Milestone edit must change a field",
   );
-const AddProjectItemSchema = z.object({ kind: z.literal("ADD_PROJECT_ITEM"), project: GitHubProjectRefSchema, item: GitHubWorkItemReferenceSchema }).strict();
-const RemoveProjectItemSchema = z.object({ kind: z.literal("REMOVE_PROJECT_ITEM"), project: GitHubProjectRefSchema, itemId: GitHubNodeIdSchema }).strict();
+const AddProjectItemSchema = z
+  .object({
+    kind: z.literal("ADD_PROJECT_ITEM"),
+    project: GitHubProjectRefSchema,
+    item: GitHubWorkItemReferenceSchema,
+  })
+  .strict();
+const RemoveProjectItemSchema = z
+  .object({
+    kind: z.literal("REMOVE_PROJECT_ITEM"),
+    project: GitHubProjectRefSchema,
+    itemId: GitHubNodeIdSchema,
+  })
+  .strict();
 const SetProjectFieldSchema = z
-  .object({ kind: z.literal("SET_PROJECT_FIELD"), project: GitHubProjectRefSchema, itemId: GitHubNodeIdSchema, fieldId: GitHubNodeIdSchema, value: GitHubProjectFieldValueSchema })
+  .object({
+    kind: z.literal("SET_PROJECT_FIELD"),
+    project: GitHubProjectRefSchema,
+    itemId: GitHubNodeIdSchema,
+    fieldId: GitHubNodeIdSchema,
+    value: GitHubProjectFieldValueSchema,
+  })
   .strict();
 const MoveProjectItemSchema = z
-  .object({ kind: z.literal("MOVE_PROJECT_ITEM"), project: GitHubProjectRefSchema, itemId: GitHubNodeIdSchema, afterItemId: GitHubNodeIdSchema.nullable() })
+  .object({
+    kind: z.literal("MOVE_PROJECT_ITEM"),
+    project: GitHubProjectRefSchema,
+    itemId: GitHubNodeIdSchema,
+    afterItemId: GitHubNodeIdSchema.nullable(),
+  })
   .strict();
 
 export const GitHubMutationSchema = z.discriminatedUnion("kind", [
@@ -258,7 +331,17 @@ export const GitHubCheckObservationSchema = z
     commitSha: CommitShaSchema,
     checkName: z.string().min(1).max(256),
     status: z.enum(["QUEUED", "IN_PROGRESS", "COMPLETED"]),
-    conclusion: z.enum(["SUCCESS", "FAILURE", "NEUTRAL", "CANCELLED", "SKIPPED", "TIMED_OUT", "ACTION_REQUIRED"]).nullable(),
+    conclusion: z
+      .enum([
+        "SUCCESS",
+        "FAILURE",
+        "NEUTRAL",
+        "CANCELLED",
+        "SKIPPED",
+        "TIMED_OUT",
+        "ACTION_REQUIRED",
+      ])
+      .nullable(),
     scopeDigest: Sha256Schema,
     observedAt: InstantSchema,
     fresh: z.boolean(),

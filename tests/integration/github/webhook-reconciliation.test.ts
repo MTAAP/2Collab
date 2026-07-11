@@ -45,23 +45,48 @@ function database(): Database {
 describe("signed GitHub webhook ingestion", () => {
   test("verifies before durable deduplication and rejects changed-digest replay", async () => {
     const db = database();
-    const consume = (request: Request) => consumeVerifiedGitHubWebhook(request, secret, { maxBodyBytes: 1024 }, async (delivery) => recordVerifiedGitHubDelivery({ database: db, connectorId: "github_1", projectIds: ["project_1"], delivery, receivedAt: 10 }));
+    const consume = (request: Request) =>
+      consumeVerifiedGitHubWebhook(request, secret, { maxBodyBytes: 1024 }, async (delivery) =>
+        recordVerifiedGitHubDelivery({
+          database: db,
+          connectorId: "github_1",
+          projectIds: ["project_1"],
+          delivery,
+          receivedAt: 10,
+        }),
+      );
     const first = await consume(signedRequest('{"action":"opened"}'));
     const replay = await consume(signedRequest('{"action":"opened"}'));
     const conflict = await consume(signedRequest('{"action":"closed"}'));
     expect(first).toMatchObject({ ok: true, value: { disposition: "PENDING" } });
     expect(replay).toMatchObject({ ok: true, value: { disposition: "REPLAY" } });
     expect(conflict).toMatchObject({ ok: false, error: { code: "WEBHOOK_DELIVERY_CONFLICT" } });
-    expect(db.query<{ count: number }, []>("SELECT count(*) AS count FROM github_webhook_deliveries").get()).toEqual({ count: 1 });
+    expect(
+      db
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM github_webhook_deliveries")
+        .get(),
+    ).toEqual({ count: 1 });
     db.close();
   });
 
   test("rejects invalid signatures and chunked overflow before consumer invocation", async () => {
     let consumed = 0;
-    const invalid = signedRequest("{}", "delivery-2", { "x-hub-signature-256": `sha256=${"0".repeat(64)}` });
-    expect(await consumeVerifiedGitHubWebhook(invalid, secret, { maxBodyBytes: 8 }, async () => { consumed += 1; throw new Error("unreachable"); })).toMatchObject({ ok: false, error: { code: "WEBHOOK_SIGNATURE_INVALID" } });
+    const invalid = signedRequest("{}", "delivery-2", {
+      "x-hub-signature-256": `sha256=${"0".repeat(64)}`,
+    });
+    expect(
+      await consumeVerifiedGitHubWebhook(invalid, secret, { maxBodyBytes: 8 }, async () => {
+        consumed += 1;
+        throw new Error("unreachable");
+      }),
+    ).toMatchObject({ ok: false, error: { code: "WEBHOOK_SIGNATURE_INVALID" } });
     const overflow = signedRequest('{"long":"payload"}', "delivery-3");
-    expect(await consumeVerifiedGitHubWebhook(overflow, secret, { maxBodyBytes: 8 }, async () => { consumed += 1; throw new Error("unreachable"); })).toMatchObject({ ok: false, error: { code: "WEBHOOK_BODY_TOO_LARGE" } });
+    expect(
+      await consumeVerifiedGitHubWebhook(overflow, secret, { maxBodyBytes: 8 }, async () => {
+        consumed += 1;
+        throw new Error("unreachable");
+      }),
+    ).toMatchObject({ ok: false, error: { code: "WEBHOOK_BODY_TOO_LARGE" } });
     expect(consumed).toBe(0);
   });
 });
