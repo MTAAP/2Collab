@@ -1351,9 +1351,11 @@ processes. `src/server/index.ts` is the only server executable boundary. It vali
 opens/migrates storage, constructs dependencies, reconciles startup state, starts listeners, and owns
 graceful shutdown. `src/cli/index.ts` is likewise the only CLI executable boundary.
 
-The compiled `collab` executable exposes user commands plus explicit `server` and `mcp-stdio` modes.
-The container runs `collab server`; MCP stdio runs through the same injected MCP command handlers and
-`ExecutionAuthority` rather than importing HTTP route code. `collab start` and its exact `collab run`
+The build produces the two canonical Product Spec artifacts: the portable `collab-server` executable
+and host-specific `collab` executable. The container runs `collab-server serve`; offline server
+operations remain `collab-server backup`, `restore`, `key`, and `auth recover`. `collab mcp-stdio`
+runs through the same injected MCP command handlers and `ExecutionAuthority` rather than importing
+HTTP route code. `collab start` and its exact `collab run`
 alias resolve the canonical server origin, load local project identity, acquire device credentials,
 and call the same public command contract as Web and MCP.
 
@@ -1384,7 +1386,7 @@ bounded grace period.
 
 Compose must require `SESSION_SECRET`, `PUBLIC_BASE_URL`, `WEBAUTHN_RP_ID`, `DEPLOYMENT_MASTER_KEY_FILE`, `BOOTSTRAP_SECRET_FILE`, and `BACKUP_DIR`; mount master/bootstrap secrets read-only outside `/data`, mount a separate backup volume, retain the read-only root, tmpfs, dropped capabilities, and no-new-privileges.
 
-The runtime image contains the compiled `collab` executable and launches `collab server`. Its
+The runtime image contains the compiled `collab-server` executable and launches `collab-server serve`. Its
 healthcheck uses `/readyz`, not `/healthz`, so a process with failed migrations, invalid keys, or
 incomplete reconciliation is never advertised ready. The image contains no compiler, source tree,
 development dependencies, tests, lockfile, package-manager cache, host-native artifacts, or default
@@ -1571,7 +1573,7 @@ Run each command separately and record each result: `bun ci`; `bun run format:ch
 `bun run typecheck`; `bun run test`; `bun run build`; `bunx playwright install chromium`;
 `bun run test:e2e:run`; `bun run audit:public`; `bun run manifest:verify`; `bun run archive:verify`;
 `bash tests/scripts/compose-config-with-temporary-secrets.sh`; `docker build --tag 2collab:verify .`;
-the compiled `collab` smoke; packaged `collab server` listener/readiness/shutdown smoke; live hardened
+the compiled `collab` smoke; packaged `collab-server serve` listener/readiness/shutdown smoke; live hardened
 container readiness; authenticated backup create/verify; offline isolated restore verify; and
 `bun run evidence:verify`.
 
@@ -1593,41 +1595,133 @@ git commit -m "test: prove foundation locally"
 
 **Files:**
 - Modify: `docs/evidence/foundation/DOGFOOD-LEDGER.md`
+- Create: `docs/evidence/foundation/{OPERATOR-RUNBOOK,MACHINE-EVIDENCE-TEMPLATE,RESTORE-DRILL-TEMPLATE}.md`
+- Create: `scripts/evidence/foundation-contract.ts`
+- Create: `scripts/{foundation-evidence,foundation-restore-drill}.ts`
+- Modify: `package.json`
+- Modify: `MANIFEST.sha256`
+- Test: `tests/unit/evidence/{foundation-live-schema,foundation-matrix,consecutive-days,dogfood-ledger}.test.ts`
+- Test: `tests/scripts/foundation-evidence.test.ts`
+- Test: `tests/drills/copied-backup-procedure.test.ts`
 
 **Interfaces:**
-- Consumes: exact verified build from Task 17, two trusted owners/machines, copied encrypted backup.
-- Produces: seven consecutive dated entries, two-machine runtime/host/mode matrix, isolated restore result, incident and direct-repair accounting.
+- Consumes: exact verified build from Task 17, two trusted owners/machines, copied encrypted backup,
+  injected clock/filesystem/command-executor adapters, and later authenticated operator observations.
+- Produces now: strict evidence schemas, safe dry-run operator tooling, an internally valid pending
+  ledger, and separate structural/exit validators. Produces only after real execution: sixteen
+  machine/runtime/host/mode rows, an isolated copied-backup restore result, and seven consecutive
+  reviewed daily entries.
 
-- [ ] **Step 1: Initialize the executable evidence ledger before day one**
+- [ ] **Step 1: Write failing evidence-contract and operator-safety tests**
 
-```markdown
-# Foundation Dogfood Ledger
+```ts
+test("the initialized ledger validates but does not satisfy the Foundation exit", async () => {
+  const fixture = createFoundationEvidenceFixture();
+  await fixture.initialize();
+  expect(await fixture.validate()).toEqual({ status: "IN_PROGRESS_EXTERNAL" });
+  expect((await fixture.checkExit()).code).toBe("FOUNDATION_EXIT_NOT_MET");
+});
 
-- Status: IN_PROGRESS
-- Required consecutive days: 7
-- Completed consecutive days: 0
-- Two trusted owners enrolled: 0
-- Two trusted machines enrolled: 0
-- Direct SQLite repairs: 0
-- Build revisions exercised: []
-- Runtime evidence rows: []
-- Restore drills: []
-- Incidents: []
+test("restore tooling refuses production or existing volumes and defaults to dry-run", async () => {
+  const fixture = createRestoreDrillFixture();
+  expect((await fixture.plan({ target: fixture.productionProject })).code).toBe("RESTORE_TARGET_UNSAFE");
+  expect(await fixture.plan({ target: fixture.newIsolatedProject })).toMatchObject({ mode: "DRY_RUN", listeners: "DISABLED" });
+});
 ```
 
-- [ ] **Step 2: Execute the two-machine matrix**
+- [ ] **Step 2: Verify RED**
+
+Run: `bun test tests/unit/evidence tests/scripts/foundation-evidence.test.ts tests/drills/copied-backup-procedure.test.ts`
+
+Expected: FAIL because the live evidence contract, derived streak/status logic, and safe restore planner do not exist.
+
+- [ ] **Step 3: Implement evidence machinery and initialize an honest pending ledger**
+
+Use closed UPPERCASE result/status values and strict schemas. `foundation-evidence` exposes `init`,
+`enroll-machine`, `record-run`, `record-restore`, `close-day`, `status`, `validate`, and `check-exit`.
+It never accepts manual aggregate statuses. `validate` succeeds for structurally consistent pending
+evidence; `check-exit` remains nonzero until every external obligation is actually satisfied.
+
+The machine matrix is exactly two owners/machines x `CLAUDE|CODEX` x `NATIVE|ORCA` x
+`HEADLESS|INTERACTIVE` = sixteen required tuples. Each row records schema/evidence/build/artifact IDs;
+opaque owner, machine, runner, run and attempt IDs; runner epoch and policy/mapping/profile revisions;
+safe profile fingerprint; runtime, host, mode and `WEB|CLI` launch surface; UTC start/terminal times;
+attempt lifecycle separately from run result; actual host-adapter provenance; interactive local-presence
+and shared-transport privacy results; `NOT_RUN|PASS|FAIL|BLOCKED_ENV`; reviewer and review time; and
+bounded safe notes. Each tuple has at least one accepted row, both owners use both Web and CLI, and
+each owner demonstrates headless and interactive across both surfaces. All rows use the same frozen
+Task 17 build; there is no fallback/substitution or transcript/keystroke content.
+
+The ledger locks one IANA timezone before day one. `close-day` derives local date from a trusted
+injected clock and does not accept a date argument. Rows are append-only; corrections are new records
+referencing the original. Reject future, duplicate, and out-of-order dates. A missing calendar date,
+direct database repair, incomplete/failed/unreviewed day, build change, or invalid evidence resets the
+derived streak. DST does not affect calendar-date consecutiveness. A machine replacement invalidates
+that machine's matrix coverage. Each day identifies the frozen tested build, safe run IDs/count,
+incidents or `NONE`, migrations/restarts or `NONE`, backup result, current restore-drill reference,
+repair result, recorded-at UTC time, and authenticated reviewer. Zero initial repairs means only none
+observed yet.
+
+`foundation-restore-drill` defaults to `--dry-run`. `--apply` requires a separately copied encrypted
+backup, its matching source/destination SHA-256, separately mounted master-key file (record key ID
+only), and a generated isolated Compose project. It refuses production project names, existing/live
+data volumes, shared backup/data paths, published ports before completion, and broad cleanup commands.
+The generated target uses a brand-new empty volume, read-only copied backup/key mounts, no runners or
+connectors, and no listener during verify/apply. It performs `collab-server restore verify` and the
+actual offline `collab-server restore apply`, then proves a fresh authority incarnation, invalid
+sessions/capability chains/old permits, advanced runner/connector epochs, connector
+`REVIEW_REQUIRED`, and no pre-completion listener. Optional inspection boots only the isolated target
+on a distinct loopback port; cleanup removes only generated labeled resources.
+
+The human-readable ledger is derived from validated structured evidence and starts with zero days,
+owners, machines and rows, `UNREVIEWED`, Foundation `IN_PROGRESS_EXTERNAL`, and exit `NOT_MET`.
+Templates and runbook prohibit secrets, environment values, raw arguments, transcripts, terminal
+content, provider URLs, private paths, or manually asserted `PASS`. The runbook distinguishes building
+the machinery now from later operator evidence commits.
+
+Package scripts:
+
+```json
+{
+  "evidence:validate": "bun run scripts/foundation-evidence.ts validate",
+  "evidence:foundation-exit": "bun run scripts/foundation-evidence.ts check-exit"
+}
+```
+
+- [ ] **Step 4: Verify the machinery and pending state**
+
+Run: `bun test tests/unit/evidence tests/scripts/foundation-evidence.test.ts tests/drills/copied-backup-procedure.test.ts && bun run evidence:validate`
+
+Expected: PASS; the pending ledger is structurally valid. Separately run `bun run
+evidence:foundation-exit`; expected now: nonzero with stable `FOUNDATION_EXIT_NOT_MET`. This expected
+pending exit is not a package failure and must not be rewritten as `PASS`.
+
+- [ ] **Step 5: Commit the machinery and initialized pending evidence**
+
+```bash
+git add docs/evidence/foundation scripts/evidence scripts/foundation-evidence.ts scripts/foundation-restore-drill.ts tests/unit/evidence tests/scripts/foundation-evidence.test.ts tests/drills/copied-backup-procedure.test.ts package.json MANIFEST.sha256
+git commit -m "feat: add foundation live evidence machinery"
+```
+
+The following steps are operator work after Task 17's exact build is frozen. They are not fabricated,
+do not block GitHub/Outline/Automation implementation, and land only as later evidence commits.
+
+- [ ] **External Step A: Execute the two-machine matrix**
 
 Run on each trusted machine: `collab doctor && collab runner status && collab run --preset foundation-headless "Record Foundation runtime evidence" && collab run --preset foundation-interactive "Record Foundation interactive evidence"`
 
 Expected: both owners record Claude and Codex through Native and Orca in HEADLESS and INTERACTIVE modes; interactive bytes remain local and shared evidence contains safe metadata only.
 
-- [ ] **Step 3: Execute isolated restore evidence**
+- [ ] **External Step B: Execute copied isolated restore evidence**
 
-Run: `docker compose exec collab-server collab-server backup create --output /backups/foundation.dbc && docker compose run --rm --no-deps collab-server collab-server restore verify --input /backups/foundation.dbc`
+Run the reviewed `foundation-restore-drill --apply` procedure against a copied encrypted backup and a
+new isolated target. Do not select the deployment's Compose project, data volume, or backup volume.
 
-Expected: authentication and schema verification complete before listeners open; sessions/capabilities are invalidated, runner/connector epochs increase, and connectors require review.
+Expected: copied digest equality, offline verify and apply, fresh authority incarnation, invalid old
+sessions/capabilities/permits, advanced runner/connector epochs, connectors requiring review, and no
+listener before completion.
 
-- [ ] **Step 4: Record seven consecutive days without direct repair**
+- [ ] **External Step C: Record seven consecutive days without direct repair**
 
 ```markdown
 ## Daily entry schema
@@ -1645,10 +1739,15 @@ Expected: authentication and schema verification complete before listeners open;
 
 Expected: seven consecutive completed entries, zero direct SQLite repairs, and no missing build/run/incident/restore fields. Until then `FND-019` remains `IN_PROGRESS`.
 
-- [ ] **Step 5: Commit the completed evidence**
+- [ ] **External Step D: Validate, review, and commit completed evidence**
+
+Run: `bun run evidence:validate && bun run evidence:foundation-exit`
+
+Expected only after authentic observations: both commands exit 0. Before that, Foundation remains
+`IN_PROGRESS_EXTERNAL` and the canonical exit is `NOT_MET`.
 
 ```bash
-git add docs/evidence/foundation/DOGFOOD-LEDGER.md
+git add docs/evidence/foundation
 git commit -m "docs: record foundation dogfood evidence"
 ```
 
