@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { z } from "zod";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import type { ProjectId, TeamId } from "../../../shared/contracts/ids.ts";
@@ -7,6 +8,7 @@ import {
   InspectProjectSchema,
   ListProjectsSchema,
   type Project,
+  ProjectSchema,
 } from "../../../shared/contracts/projects.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import type { ProjectRegistry } from "./contract.ts";
@@ -14,7 +16,7 @@ import type { ProjectRegistry } from "./contract.ts";
 type Dependencies = Readonly<{
   database: Database;
   clock: () => number;
-  id: (prefix: "project") => string;
+  id: (prefix: "project" | "audit") => string;
   digest?: (value: string) => Promise<Uint8Array>;
 }>;
 
@@ -34,6 +36,12 @@ function error<T>(code: string, message: string, retry: DomainError["retry"] = "
 async function sha256(value: string): Promise<Uint8Array> {
   return new Bun.CryptoHasher("sha256").update(value).digest();
 }
+
+function hex(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("hex");
+}
+
+const StoredProjectResultSchema = z.object({ ok: z.literal(true), value: ProjectSchema }).strict();
 
 function project(row: ProjectRow): Project {
   return {
@@ -74,6 +82,36 @@ export function createProjectRegistry(dependencies: Dependencies): ProjectRegist
     return member ? { role: member.role, proofHash } : null;
   };
 
+  const replay = (
+    actorId: string,
+    storageKey: string,
+    inputHash: string,
+  ): Result<Project> | undefined => {
+    const row = dependencies.database
+      .query<{ input_hash: string; result_json: string }, [string, string]>(
+        "SELECT input_hash, result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
+      )
+      .get(actorId, storageKey);
+    if (!row) return undefined;
+    if (row.input_hash !== inputHash) {
+      return error(
+        "IDEMPOTENCY_CONFLICT",
+        "Idempotency key was already used with different input.",
+      );
+    }
+    if (Buffer.byteLength(row.result_json, "utf8") > 16 * 1024) {
+      return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    }
+    try {
+      const parsed = StoredProjectResultSchema.safeParse(JSON.parse(row.result_json));
+      return parsed.success
+        ? (parsed.data as Result<Project>)
+        : error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    } catch {
+      return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+    }
+  };
+
   return {
     async create(command) {
       const input = CreateProjectSchema.safeParse(command);
@@ -82,6 +120,16 @@ export function createProjectRegistry(dependencies: Dependencies): ProjectRegist
       if (authority?.role !== "OWNER")
         return error("OWNER_REQUIRED", "Owner authorization is required.");
       try {
+        const storageKey = `PROJECT_CREATE:${input.data.idempotencyKey}`;
+        const hash = await digest(
+          JSON.stringify({ baseBranch: input.data.baseBranch, name: input.data.name }),
+        );
+        if (hash.byteLength !== 32) {
+          return error("PROJECT_STORAGE_FAILED", "Project creation failed.", "SAME_INPUT");
+        }
+        const inputHash = hex(hash);
+        const prior = replay(input.data.actor.memberId, storageKey, inputHash);
+        if (prior) return prior;
         return inImmediateTransaction(dependencies.database, () => {
           const currentOwner = dependencies.database
             .query<{ team_id: string }, [string, string, Uint8Array, number, number]>(
@@ -102,6 +150,8 @@ export function createProjectRegistry(dependencies: Dependencies): ProjectRegist
               dependencies.clock(),
             );
           if (!currentOwner) return error("OWNER_REQUIRED", "Owner authorization is required.");
+          const committedReplay = replay(input.data.actor.memberId, storageKey, inputHash);
+          if (committedReplay) return committedReplay;
           const row: ProjectRow = {
             id: dependencies.id("project"),
             team_id: currentOwner.team_id,
@@ -115,7 +165,32 @@ export function createProjectRegistry(dependencies: Dependencies): ProjectRegist
               "INSERT INTO projects(id, team_id, name, base_branch, revision, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .run(row.id, row.team_id, row.name, row.base_branch, row.revision, row.created_at);
-          return { ok: true as const, value: project(row) };
+          const result = { ok: true as const, value: project(row) };
+          dependencies.database
+            .query<void, [string, string, string, string, string, string, number]>(
+              "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              dependencies.id("audit"),
+              "PROJECT_CREATED",
+              "MEMBER",
+              input.data.actor.memberId,
+              row.id,
+              JSON.stringify({ teamId: row.team_id, baseBranch: row.base_branch }),
+              dependencies.clock(),
+            );
+          dependencies.database
+            .query<void, [string, string, string, string, number]>(
+              "INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .run(
+              input.data.actor.memberId,
+              storageKey,
+              inputHash,
+              JSON.stringify(result),
+              dependencies.clock(),
+            );
+          return result;
         });
       } catch {
         return error("PROJECT_STORAGE_FAILED", "Project creation failed.", "SAME_INPUT");

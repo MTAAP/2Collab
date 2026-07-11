@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import foundationMigration from "./migrations/0001_foundation.sql" with { type: "text" };
 import projectsMigration from "./migrations/0002_projects.sql" with { type: "text" };
+import { verifyProjectsTableSchema } from "./migrations/0002_projects.verify.ts";
 import runnersMigration from "./migrations/0003_runners.sql" with { type: "text" };
 import {
   RUNNER_INDEXES,
@@ -90,28 +91,7 @@ function validateClaimedSchema(database: Database, version: number): void {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
   if (version >= 2) {
-    const projectColumns = new Set(
-      database
-        .query<{ name: string }, []>("PRAGMA table_info(projects)")
-        .all()
-        .map((row) => row.name),
-    );
-    const projectTable = database
-      .query<{ strict: number }, []>("PRAGMA table_list('projects')")
-      .get();
-    const projectSql = database
-      .query<{ sql: string }, []>(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
-      )
-      .get()?.sql;
-    if (
-      !projectColumns.has("base_branch") ||
-      projectTable?.strict !== 1 ||
-      !projectSql?.includes("base_branch TEXT NOT NULL") ||
-      !projectSql.includes("name = trim(name)")
-    ) {
-      throw new Error("SCHEMA_INTEGRITY_INVALID");
-    }
+    verifyProjectsTableSchema(database);
   }
   if (version >= 3) {
     const triggers = new Set(

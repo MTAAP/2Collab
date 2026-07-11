@@ -1,11 +1,17 @@
-import { link, lstat, mkdir, open, readFile, realpath, rm } from "node:fs/promises";
+import { link, lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, join } from "node:path";
 import type { FileHandle } from "node:fs/promises";
-import type { ProjectsApi } from "../ports/projects-api.ts";
+import type { Stats } from "node:fs";
+import { ProjectIdentityRequestSchema, type ProjectsApi } from "../ports/projects-api.ts";
 import { parseProjectConfig, serializeProjectConfig } from "../../runner/repository/config.ts";
-import { resolveRepositoryRoot } from "../../runner/repository/discovery.ts";
+import {
+  isPrimaryCheckout,
+  resolveRepositoryRoot,
+  type DiscoveryGit,
+} from "../../runner/repository/discovery.ts";
 import type { LocalProjectRegistry } from "../../runner/repository/global-registry.ts";
+import type { ProjectId } from "../../shared/contracts/ids.ts";
 import {
   CanonicalServerOriginSchema,
   ProjectViewSchema,
@@ -22,22 +28,51 @@ export type InitProjectOptions = Readonly<{
 export type InitProjectDependencies = Readonly<{
   projectsApi: ProjectsApi;
   registry: LocalProjectRegistry;
+  filesystem?: InitFilesystem;
+  git?: DiscoveryGit;
 }>;
 
-async function assertPrimaryCheckout(root: string): Promise<void> {
-  const process = Bun.spawn(
-    ["git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
-    { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
-  );
-  const [exitCode, output] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-  ]);
-  if (exitCode !== 0) throw new Error("PROJECT_REPOSITORY_NOT_FOUND");
-  const [gitDirectory, commonDirectory] = output.trim().split("\n");
-  if (!gitDirectory || !commonDirectory) throw new Error("PROJECT_REPOSITORY_NOT_FOUND");
-  if ((await realpath(gitDirectory)) !== (await realpath(commonDirectory))) {
-    throw new Error("PROJECT_CHECKOUT_TRANSIENT");
+export interface InitFilesystem {
+  link(existingPath: string, newPath: string): Promise<void>;
+  lstat(path: string): Promise<Stats>;
+  mkdir(path: string, options: { mode: number }): Promise<string | undefined>;
+  open(path: string, flags: string | number, mode?: number): Promise<FileHandle>;
+  realpath(path: string): Promise<string>;
+  rm(path: string, options?: { force?: boolean }): Promise<void>;
+}
+
+const nodeFilesystem: InitFilesystem = { link, lstat, mkdir, open, realpath, rm };
+
+function sameNode(first: Stats, second: Stats): boolean {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+async function assertDirectory(
+  filesystem: InitFilesystem,
+  path: string,
+  identity?: Stats,
+): Promise<Stats> {
+  const current = await filesystem.lstat(path);
+  if (
+    !current.isDirectory() ||
+    current.isSymbolicLink() ||
+    (identity !== undefined && !sameNode(identity, current))
+  ) {
+    throw new Error("PROJECT_CONFIG_UNSAFE");
+  }
+  return current;
+}
+
+async function removeIfParentCurrent(
+  filesystem: InitFilesystem,
+  path: string,
+  directoryIdentity: Stats,
+): Promise<void> {
+  try {
+    await assertDirectory(filesystem, dirname(path), directoryIdentity);
+    await filesystem.rm(path, { force: true });
+  } catch {
+    // Never follow a replaced parent merely to clean up a temporary path.
   }
 }
 
@@ -45,11 +80,35 @@ function sha256(value: string): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
 }
 
-async function writeConfigIfAbsent(path: string, content: string): Promise<string> {
+async function writeConfigIfAbsent(
+  path: string,
+  content: string,
+  filesystem: InitFilesystem,
+  directoryIdentity: Stats,
+): Promise<string> {
+  const directoryPath = dirname(path);
   try {
-    const metadata = await lstat(path);
+    await assertDirectory(filesystem, directoryPath, directoryIdentity);
+    const metadata = await filesystem.lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("PROJECT_CONFIG_UNSAFE");
-    const existing = await readFile(path, "utf8");
+    const handle = await filesystem.open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let existing: string;
+    try {
+      await assertDirectory(filesystem, directoryPath, directoryIdentity);
+      const opened = await handle.stat();
+      if (!opened.isFile() || !sameNode(metadata, opened)) {
+        throw new Error("PROJECT_CONFIG_UNSAFE");
+      }
+      existing = await handle.readFile("utf8");
+      const afterOpen = await handle.stat();
+      const afterPath = await filesystem.lstat(path);
+      await assertDirectory(filesystem, directoryPath, directoryIdentity);
+      if (!sameNode(opened, afterOpen) || !sameNode(opened, afterPath)) {
+        throw new Error("PROJECT_CONFIG_UNSAFE");
+      }
+    } finally {
+      await handle.close();
+    }
     const expected = parseProjectConfig(content);
     const actual = parseProjectConfig(existing);
     if (
@@ -66,26 +125,45 @@ async function writeConfigIfAbsent(path: string, content: string): Promise<strin
   }
 
   const temporaryPath = join(dirname(path), `.config.toml.${Bun.randomUUIDv7()}.tmp`);
-  const handle = await open(temporaryPath, "wx", 0o600);
+  await assertDirectory(filesystem, directoryPath, directoryIdentity);
+  const handle = await filesystem.open(temporaryPath, "wx", 0o600);
+  let temporaryIdentity!: Stats;
   try {
     await handle.writeFile(content, "utf8");
     await handle.sync();
+    temporaryIdentity = await handle.stat();
   } finally {
     await handle.close();
   }
   try {
-    await link(temporaryPath, path);
-    await rm(temporaryPath);
-    const directory = await open(dirname(path), "r");
+    await assertDirectory(filesystem, directoryPath, directoryIdentity);
+    await filesystem.link(temporaryPath, path);
+    const installed = await filesystem.lstat(path);
+    if (
+      !installed.isFile() ||
+      installed.isSymbolicLink() ||
+      !sameNode(temporaryIdentity, installed)
+    ) {
+      throw new Error("PROJECT_CONFIG_UNSAFE");
+    }
+    await filesystem.rm(temporaryPath);
+    await assertDirectory(filesystem, directoryPath, directoryIdentity);
+    const directory = await filesystem.open(directoryPath, "r");
     try {
+      const openedDirectory = await directory.stat();
+      if (!openedDirectory.isDirectory() || !sameNode(directoryIdentity, openedDirectory)) {
+        throw new Error("PROJECT_CONFIG_UNSAFE");
+      }
       await directory.sync();
+      await assertDirectory(filesystem, directoryPath, directoryIdentity);
     } finally {
       await directory.close();
     }
   } catch (error) {
-    await rm(temporaryPath, { force: true });
+    await removeIfParentCurrent(filesystem, temporaryPath, directoryIdentity);
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      return writeConfigIfAbsent(path, content);
+      await assertDirectory(filesystem, directoryPath, directoryIdentity);
+      return writeConfigIfAbsent(path, content, filesystem, directoryIdentity);
     }
     throw error;
   }
@@ -101,31 +179,56 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-async function acquireInitLock(path: string): Promise<FileHandle> {
+async function acquireInitLock(
+  path: string,
+  filesystem: InitFilesystem,
+  directoryIdentity: Stats,
+): Promise<FileHandle> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     let created: FileHandle | undefined;
     try {
-      created = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
+      await assertDirectory(filesystem, dirname(path), directoryIdentity);
+      created = await filesystem.open(
+        path,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
+        0o600,
+      );
       await created.writeFile(`${process.pid}\n`, "utf8");
       await created.sync();
+      const opened = await created.stat();
+      const named = await filesystem.lstat(path);
+      await assertDirectory(filesystem, dirname(path), directoryIdentity);
+      if (!sameNode(opened, named)) throw new Error("PROJECT_CONFIG_UNSAFE");
       return created;
     } catch (error) {
       if (created) {
         await created.close();
-        await rm(path, { force: true });
+        await removeIfParentCurrent(filesystem, path, directoryIdentity);
       }
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const before = await lstat(path);
+      await assertDirectory(filesystem, dirname(path), directoryIdentity);
+      const before = await filesystem.lstat(path);
       if (!before.isFile() || before.isSymbolicLink() || before.size > 32) {
         throw new Error("PROJECT_CONFIG_UNSAFE");
       }
-      const owner = Number.parseInt(await readFile(path, "utf8"), 10);
-      const after = await lstat(path);
-      if (before.dev !== after.dev || before.ino !== after.ino) {
+      const existing = await filesystem.open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let owner: number;
+      try {
+        const opened = await existing.stat();
+        if (!sameNode(before, opened)) throw new Error("PROJECT_CONFIG_UNSAFE");
+        owner = Number.parseInt(await existing.readFile("utf8"), 10);
+        const after = await filesystem.lstat(path);
+        await assertDirectory(filesystem, dirname(path), directoryIdentity);
+        if (!sameNode(opened, after)) throw new Error("PROJECT_CONFIG_UNSAFE");
+      } finally {
+        await existing.close();
+      }
+      if (!Number.isFinite(owner)) {
         throw new Error("PROJECT_CONFIG_UNSAFE");
       }
       if (Number.isSafeInteger(owner) && owner > 0 && !processIsAlive(owner)) {
-        await rm(path);
+        await filesystem.rm(path);
+        await assertDirectory(filesystem, dirname(path), directoryIdentity);
         continue;
       }
       await Bun.sleep(25);
@@ -134,15 +237,22 @@ async function acquireInitLock(path: string): Promise<FileHandle> {
   throw new Error("PROJECT_INIT_BUSY");
 }
 
-async function releaseInitLock(path: string, handle: FileHandle): Promise<void> {
+async function releaseInitLock(
+  path: string,
+  handle: FileHandle,
+  filesystem: InitFilesystem,
+  directoryIdentity: Stats,
+): Promise<void> {
   const opened = await handle.stat();
   await handle.close();
   try {
-    const current = await lstat(path);
+    await assertDirectory(filesystem, dirname(path), directoryIdentity);
+    const current = await filesystem.lstat(path);
     if (opened.dev !== current.dev || opened.ino !== current.ino) {
       throw new Error("PROJECT_CONFIG_UNSAFE");
     }
-    await rm(path);
+    await filesystem.rm(path);
+    await assertDirectory(filesystem, dirname(path), directoryIdentity);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -156,21 +266,39 @@ export async function initProject(
   if (!origin.success || origin.data !== options.serverOrigin) {
     throw new Error("PROJECT_SERVER_ORIGIN_INVALID");
   }
-  const { root } = await resolveRepositoryRoot(options.cwd);
-  await assertPrimaryCheckout(root);
+  const identity = ProjectIdentityRequestSchema.safeParse({
+    serverOrigin: options.serverOrigin,
+    projectId: options.projectId,
+  });
+  if (!identity.success || identity.data.serverOrigin !== options.serverOrigin) {
+    throw new Error("PROJECT_IDENTITY_INVALID");
+  }
+  const filesystem = dependencies.filesystem ?? nodeFilesystem;
+  const discoveryDependencies = dependencies.git
+    ? { filesystem, git: dependencies.git }
+    : { filesystem };
+  const { root } = await resolveRepositoryRoot(options.cwd, discoveryDependencies);
+  if (!(await isPrimaryCheckout(root, discoveryDependencies))) {
+    throw new Error("PROJECT_CHECKOUT_TRANSIENT");
+  }
   const collabDirectory = join(root, ".collab");
   try {
-    const metadata = await lstat(collabDirectory);
+    const metadata = await filesystem.lstat(collabDirectory);
     if (!metadata.isDirectory() || metadata.isSymbolicLink())
       throw new Error("PROJECT_CONFIG_UNSAFE");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await mkdir(collabDirectory, { mode: 0o700 });
+    try {
+      await filesystem.mkdir(collabDirectory, { mode: 0o700 });
+    } catch (mkdirError) {
+      if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+    }
   }
+  const directoryIdentity = await assertDirectory(filesystem, collabDirectory);
 
   const remote = await dependencies.projectsApi.inspect({
     serverOrigin: origin.data,
-    projectId: options.projectId,
+    projectId: identity.data.projectId as ProjectId,
   });
   if (!remote.ok) throw new Error(remote.error.code);
   const parsedProject = ProjectViewSchema.safeParse(remote.value);
@@ -179,7 +307,8 @@ export async function initProject(
   }
 
   const lockPath = join(collabDirectory, "init.lock");
-  const lock = await acquireInitLock(lockPath);
+  await assertDirectory(filesystem, collabDirectory, directoryIdentity);
+  const lock = await acquireInitLock(lockPath, filesystem, directoryIdentity);
   try {
     const content = serializeProjectConfig({
       projectId: parsedProject.data.id,
@@ -187,7 +316,12 @@ export async function initProject(
       serverUrl: origin.data,
       baseBranch: parsedProject.data.baseBranch,
     });
-    const persisted = await writeConfigIfAbsent(join(collabDirectory, "config.toml"), content);
+    const persisted = await writeConfigIfAbsent(
+      join(collabDirectory, "config.toml"),
+      content,
+      filesystem,
+      directoryIdentity,
+    );
     dependencies.registry.register(
       {
         serverOrigin: origin.data,
@@ -200,7 +334,7 @@ export async function initProject(
       { replace: options.replaceLocalMapping === true },
     );
   } finally {
-    await releaseInitLock(lockPath, lock);
+    await releaseInitLock(lockPath, lock, filesystem, directoryIdentity);
   }
   return parsedProject.data as ProjectView;
 }

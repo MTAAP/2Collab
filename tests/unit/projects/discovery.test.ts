@@ -67,6 +67,9 @@ describe("project config", () => {
     for (const source of [
       `${VALID_CONFIG}#${"x".repeat(16 * 1024)}\n`,
       VALID_CONFIG.replace("proj_1", "proj_1\u0001"),
+      VALID_CONFIG.replace("https://collab.test", "https://collab.test\\n"),
+      VALID_CONFIG.replace("https://collab.test", "https://collab.test\\t"),
+      VALID_CONFIG.replace("https://collab.test", "https://collab.test\\u007f"),
       'project_id=["proj_1"]\nteam_id="team_1"\nserver_url="https://collab.test"\nbase_branch="main"\n',
       'project_id.value="proj_1"\nteam_id="team_1"\nserver_url="https://collab.test"\nbase_branch="main"\n',
     ]) {
@@ -154,6 +157,43 @@ describe("repository discovery", () => {
         async lstat(path) {
           const actual = await lstat(path);
           if (path !== canonicalConfigPath || ++configStats < 2) return actual;
+          return {
+            dev: actual.dev,
+            ino: actual.ino + 1,
+            mode: actual.mode,
+            size: actual.size,
+            mtimeMs: actual.mtimeMs,
+            ctimeMs: actual.ctimeMs,
+            isDirectory: () => actual.isDirectory(),
+            isFile: () => actual.isFile(),
+            isSymbolicLink: () => actual.isSymbolicLink(),
+          };
+        },
+      };
+
+      await expect(discoverProject(directory, { filesystem })).rejects.toThrow(
+        "PROJECT_CONFIG_UNSAFE",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a parent directory identity swap around the config open", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "2collab-discovery-"));
+    try {
+      await Bun.$`git init -q ${directory}`;
+      const configDirectory = join(directory, ".collab");
+      await mkdir(configDirectory);
+      await writeFile(join(configDirectory, "config.toml"), VALID_CONFIG);
+      const canonicalDirectory = await realpath(configDirectory);
+      let directoryStats = 0;
+      const filesystem: DiscoveryFilesystem = {
+        realpath,
+        open,
+        async lstat(path) {
+          const actual = await lstat(path);
+          if (path !== canonicalDirectory || ++directoryStats < 2) return actual;
           return {
             dev: actual.dev,
             ino: actual.ino + 1,

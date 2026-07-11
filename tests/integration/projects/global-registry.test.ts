@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import * as nodeFilesystem from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +51,73 @@ describe("local global project registry", () => {
     } finally {
       registry.close();
     }
+  });
+
+  test("rejects an unsafe concurrent initialization winner", async () => {
+    const path = await registryPath();
+    await mkdir(dirname(path), { recursive: true });
+    const attacker = join(dirname(path), "attacker.db");
+    await writeFile(attacker, "attacker");
+    const filesystem = {
+      ...nodeFilesystem,
+      linkSync(_temporaryPath: string, destination: string) {
+        nodeFilesystem.symlinkSync(attacker, destination);
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+    };
+
+    expect(() => openLocalProjectRegistry(path, { filesystem } as never)).toThrow(
+      "PROJECT_REGISTRY_UNSAFE",
+    );
+  });
+
+  test("rejects a parent directory identity swap around registry initialization", async () => {
+    const path = await registryPath();
+    await mkdir(dirname(path), { recursive: true });
+    let directoryStats = 0;
+    const filesystem = {
+      ...nodeFilesystem,
+      lstatSync(candidate: Parameters<typeof nodeFilesystem.lstatSync>[0]) {
+        const actual = nodeFilesystem.lstatSync(candidate);
+        if (String(candidate) !== dirname(path) || ++directoryStats < 3) return actual;
+        return {
+          ...actual,
+          ino: actual.ino + 1,
+          isDirectory: () => actual.isDirectory(),
+          isFile: () => actual.isFile(),
+          isSymbolicLink: () => actual.isSymbolicLink(),
+        };
+      },
+    };
+
+    expect(() => openLocalProjectRegistry(path, { filesystem } as never)).toThrow(
+      "PROJECT_REGISTRY_UNSAFE",
+    );
+  });
+
+  test("rejects a registry file identity swap around database open", async () => {
+    const path = await registryPath();
+    const created = openLocalProjectRegistry(path);
+    created.close();
+    let fileStats = 0;
+    const filesystem = {
+      ...nodeFilesystem,
+      lstatSync(candidate: Parameters<typeof nodeFilesystem.lstatSync>[0]) {
+        const actual = nodeFilesystem.lstatSync(candidate);
+        if (String(candidate) !== path || ++fileStats < 3) return actual;
+        return {
+          ...actual,
+          ino: actual.ino + 1,
+          isDirectory: () => actual.isDirectory(),
+          isFile: () => actual.isFile(),
+          isSymbolicLink: () => actual.isSymbolicLink(),
+        };
+      },
+    };
+
+    expect(() => openLocalProjectRegistry(path, { filesystem } as never)).toThrow(
+      "PROJECT_REGISTRY_UNSAFE",
+    );
   });
 
   test("keys by origin and project, preserves multi-origin IDs, and refuses ambiguous lookup", async () => {
@@ -123,5 +191,22 @@ describe("local global project registry", () => {
     drifted.database.exec("DROP TABLE project_checkouts");
     drifted.close();
     expect(() => openLocalProjectRegistry(driftedPath)).toThrow("PROJECT_REGISTRY_CORRUPT");
+  });
+
+  test("validates every persisted routing row on open, lookup, and list", async () => {
+    for (const [column, value] of [
+      ["server_origin", "file:///tmp/attacker"],
+      ["base_branch", "../main"],
+      ["preferred_checkout", "relative/checkout"],
+    ] as const) {
+      const path = await registryPath();
+      const registry = openLocalProjectRegistry(path);
+      registry.register(first);
+      registry.database.query(`UPDATE project_checkouts SET ${column} = ?`).run(value);
+      expect(() => registry.lookup({ projectId: "project_1" })).toThrow("PROJECT_REGISTRY_CORRUPT");
+      expect(() => registry.list()).toThrow("PROJECT_REGISTRY_CORRUPT");
+      registry.close();
+      expect(() => openLocalProjectRegistry(path)).toThrow("PROJECT_REGISTRY_CORRUPT");
+    }
   });
 });

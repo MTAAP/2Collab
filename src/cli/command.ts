@@ -110,7 +110,11 @@ export async function runCli(
       }
       if (command === "list") {
         if (commandArgs.length > 0) throw new Error("PROJECT_ARGUMENTS_INVALID");
-        io.log(JSON.stringify(await listCurrentProject(cwd, dependencies.projectsApi)));
+        io.log(
+          JSON.stringify(
+            await listCurrentProject(cwd, dependencies.projectsApi, dependencies.registry),
+          ),
+        );
         return 0;
       }
       if (command === "projects") {

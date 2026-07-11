@@ -24,9 +24,14 @@ export interface DiscoveryFilesystem {
 
 export interface DiscoveryGit {
   root(startDirectory: string): Promise<string>;
+  directories?(root: string): Promise<Readonly<{ gitDirectory: string; commonDirectory: string }>>;
 }
 
-export type DiscoveredProject = Readonly<{ root: string; config: ProjectConfig }>;
+export type DiscoveredProject = Readonly<{
+  root: string;
+  config: ProjectConfig;
+  configSha256: string;
+}>;
 export type DiscoveryDependencies = Readonly<{
   filesystem?: DiscoveryFilesystem;
   git?: DiscoveryGit;
@@ -49,6 +54,21 @@ const processGit: DiscoveryGit = {
     const root = stdout.trim();
     if (!root) throw new Error("PROJECT_REPOSITORY_NOT_FOUND");
     return root;
+  },
+  async directories(root) {
+    const process = Bun.spawn(
+      ["git", "-C", root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    const [exitCode, output] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+    ]);
+    const [gitDirectory, commonDirectory] = output.trim().split("\n");
+    if (exitCode !== 0 || !gitDirectory || !commonDirectory) {
+      throw new Error("PROJECT_REPOSITORY_NOT_FOUND");
+    }
+    return { gitDirectory, commonDirectory };
   },
 };
 
@@ -83,19 +103,32 @@ export async function discoverProject(
     const before = await filesystem.lstat(configPath);
     if (!before.isFile() || before.isSymbolicLink()) unsafe();
     handle = await filesystem.open(configPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const directoryAfterOpen = await filesystem.lstat(configDirectory);
+    if (!sameIdentity(directoryStat, directoryAfterOpen)) unsafe();
     const opened = (await handle.stat()) as SafeStat;
     if (!opened.isFile() || !sameIdentity(before, opened)) unsafe();
     const bytes = await handle.readFile();
     const afterOpen = (await handle.stat()) as SafeStat;
     const afterPath = await filesystem.lstat(configPath);
-    if (!sameIdentity(opened, afterOpen) || !sameIdentity(opened, afterPath)) unsafe();
+    const directoryAfterRead = await filesystem.lstat(configDirectory);
+    if (
+      !sameIdentity(opened, afterOpen) ||
+      !sameIdentity(opened, afterPath) ||
+      !sameIdentity(directoryStat, directoryAfterRead)
+    ) {
+      unsafe();
+    }
     let source: string;
     try {
       source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       unsafe();
     }
-    return { root: canonicalRoot, config: parseProjectConfig(source) };
+    return {
+      root: canonicalRoot,
+      config: parseProjectConfig(source),
+      configSha256: new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+    };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("PROJECT_CONFIG_")) throw error;
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -106,6 +139,21 @@ export async function discoverProject(
     await handle?.close();
   }
   return unsafe();
+}
+
+export async function isPrimaryCheckout(
+  root: string,
+  dependencies: DiscoveryDependencies = {},
+): Promise<boolean> {
+  const filesystem = dependencies.filesystem ?? nodeFilesystem;
+  const git = dependencies.git ?? processGit;
+  const directories = git.directories;
+  if (!directories) throw new Error("PROJECT_REPOSITORY_NOT_FOUND");
+  const value = await directories(root);
+  return (
+    (await filesystem.realpath(value.gitDirectory)) ===
+    (await filesystem.realpath(value.commonDirectory))
+  );
 }
 
 export async function resolveRepositoryRoot(

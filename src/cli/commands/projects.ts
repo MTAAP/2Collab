@@ -1,4 +1,5 @@
 import type { LocalProjectRegistry } from "../../runner/repository/global-registry.ts";
+import type { ProjectId } from "../../shared/contracts/ids.ts";
 import { ProjectViewSchema, type ProjectView } from "../../shared/contracts/projects.ts";
 import type { ProjectsApi } from "../ports/projects-api.ts";
 
@@ -25,7 +26,7 @@ export async function listKnownProjects(
     registry.list().map(async (mapping) => {
       const remote = await projectsApi.inspect({
         serverOrigin: mapping.serverOrigin,
-        projectId: mapping.projectId,
+        projectId: mapping.projectId as ProjectId,
       });
       if (!remote.ok) {
         return {

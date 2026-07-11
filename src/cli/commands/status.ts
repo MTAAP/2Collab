@@ -12,7 +12,7 @@ export async function projectStatus(
     return listKnownProjects(dependencies.registry, dependencies.projectsApi);
   }
   try {
-    return await listCurrentProject(options.cwd, dependencies.projectsApi);
+    return await listCurrentProject(options.cwd, dependencies.projectsApi, dependencies.registry);
   } catch (error) {
     if (
       error instanceof Error &&

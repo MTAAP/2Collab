@@ -13,6 +13,14 @@ export const CanonicalServerOriginSchema = z
   .min(1)
   .max(2_048)
   .transform((value, context) => {
+    if (
+      [...value].some(
+        (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      )
+    ) {
+      context.addIssue({ code: "custom", message: "Invalid server origin" });
+      return z.NEVER;
+    }
     let url: URL;
     try {
       url = new URL(value);
@@ -73,6 +81,7 @@ export const LocalProjectConfigSchema = ProjectConfigSchema;
 export const CreateProjectSchema = z
   .object({
     actor: MemberActorSchema,
+    idempotencyKey: IdentifierSchema,
     name: z.string().trim().min(1).max(120),
     baseBranch: GitRefRuntimeSchema,
   })
@@ -89,6 +98,7 @@ export const ListProjectsSchema = z.object({ actor: MemberActorSchema }).strict(
 
 export type CreateProject = Readonly<{
   actor: MemberActor;
+  idempotencyKey: string;
   name: string;
   baseBranch: GitRef;
 }>;

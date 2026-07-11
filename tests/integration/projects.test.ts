@@ -5,6 +5,9 @@ import { createProjectRegistry } from "../../src/server/modules/projects/project
 import foundationMigration from "../../src/server/db/migrations/0001_foundation.sql" with {
   type: "text",
 };
+import projectsMigration from "../../src/server/db/migrations/0002_projects.sql" with {
+  type: "text",
+};
 import { verifyProjectsSchema } from "../../src/server/db/migrations/0002_projects.verify.ts";
 
 function seedDeployment(database: Database): void {
@@ -50,12 +53,18 @@ describe("server project registry", () => {
         id: () => `project_${++sequence}`,
       });
 
-      const denied = await registry.create({ actor: member, name: "Denied", baseBranch: "main" });
+      const denied = await registry.create({
+        actor: member,
+        idempotencyKey: "deny_project_1",
+        name: "Denied",
+        baseBranch: "main",
+      });
       expect(denied.ok).toBeFalse();
       if (!denied.ok) expect(denied.error.code).toBe("OWNER_REQUIRED");
 
       const created = await registry.create({
         actor: owner,
+        idempotencyKey: "create_project_1",
         name: "Collab",
         baseBranch: "refs/heads/trunk",
       });
@@ -85,14 +94,116 @@ describe("server project registry", () => {
       seedDeployment(database);
       const registry = createProjectRegistry({ database, clock: () => 100, id: () => "project_1" });
       for (const command of [
-        { actor: owner, name: "Project", baseBranch: "../main" },
-        { actor: owner, name: "Project", baseBranch: "main", projectId: "chosen" },
-        { actor: owner, name: "Project", baseBranch: "main", teamId: "team_other" },
+        { actor: owner, idempotencyKey: "invalid_ref", name: "Project", baseBranch: "../main" },
+        {
+          actor: owner,
+          idempotencyKey: "chosen_project",
+          name: "Project",
+          baseBranch: "main",
+          projectId: "chosen",
+        },
+        {
+          actor: owner,
+          idempotencyKey: "chosen_team",
+          name: "Project",
+          baseBranch: "main",
+          teamId: "team_other",
+        },
       ]) {
         const result = await registry.create(command as never);
         expect(result.ok).toBeFalse();
         if (!result.ok) expect(result.error.code).toBe("PROJECT_INPUT_INVALID");
       }
+    } finally {
+      database.close();
+    }
+  });
+
+  test("replays identical creates, conflicts on changed input, and audits the committed write", async () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      migrate(database);
+      seedDeployment(database);
+      let projectSequence = 0;
+      let auditSequence = 0;
+      const registry = createProjectRegistry({
+        database,
+        clock: () => 100,
+        id: (prefix) =>
+          prefix === "project" ? `project_${++projectSequence}` : `audit_${++auditSequence}`,
+      });
+      const command = {
+        actor: owner,
+        idempotencyKey: "create_collab_1",
+        name: "Collab",
+        baseBranch: "main",
+      } as const;
+
+      const [first, replay] = await Promise.all([
+        registry.create(command),
+        registry.create(command),
+      ]);
+      const conflict = await registry.create({ ...command, name: "Different" });
+
+      expect(first).toEqual(replay);
+      expect(first.ok).toBeTrue();
+      expect(conflict).toEqual({
+        ok: false,
+        error: {
+          code: "IDEMPOTENCY_CONFLICT",
+          message: "Idempotency key was already used with different input.",
+          retry: "NEVER",
+        },
+      });
+      expect(
+        database.query<{ count: number }, []>("SELECT count(*) AS count FROM projects").get(),
+      ).toEqual({ count: 1 });
+      expect(
+        database
+          .query<{ kind: string; actor_id: string; subject_id: string; safe_details: string }, []>(
+            "SELECT kind, actor_id, subject_id, safe_details FROM audit_events",
+          )
+          .all(),
+      ).toEqual([
+        {
+          kind: "PROJECT_CREATED",
+          actor_id: "owner_1",
+          subject_id: "project_1",
+          safe_details: JSON.stringify({ teamId: "team_1", baseBranch: "main" }),
+        },
+      ]);
+      expect(
+        database
+          .query<{ actor_id: string; idempotency_key: string }, []>(
+            "SELECT actor_id, idempotency_key FROM idempotency_results",
+          )
+          .all(),
+      ).toEqual([{ actor_id: "owner_1", idempotency_key: "PROJECT_CREATE:create_collab_1" }]);
+      expect(
+        JSON.stringify({
+          idempotency: database
+            .query<{ input_hash: string; result_json: string }, []>(
+              "SELECT input_hash, result_json FROM idempotency_results",
+            )
+            .all(),
+          audit: database
+            .query<{ safe_details: string }, []>("SELECT safe_details FROM audit_events")
+            .all(),
+        }),
+      ).not.toContain(owner.sessionProof);
+      database.exec("UPDATE idempotency_results SET result_json = '{\"ok\":false}'");
+      const corruptReplay = await registry.create(command);
+      expect(corruptReplay).toEqual({
+        ok: false,
+        error: {
+          code: "IDEMPOTENCY_STORAGE_INVALID",
+          message: "Stored idempotency result is invalid.",
+          retry: "NEVER",
+        },
+      });
+      expect(
+        database.query<{ count: number }, []>("SELECT count(*) AS count FROM projects").get(),
+      ).toEqual({ count: 1 });
     } finally {
       database.close();
     }
@@ -113,6 +224,17 @@ describe("project migration", () => {
           .all()
           .map((row) => row.name),
       ).toContain("base_branch");
+    } finally {
+      database.close();
+    }
+  });
+
+  test("verifies the exact standalone v2 Project schema", () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      database.exec(foundationMigration);
+      database.exec(projectsMigration);
+      verifyProjectsSchema(database);
     } finally {
       database.close();
     }
@@ -180,6 +302,37 @@ describe("project migration", () => {
       ).toContain("projects");
     } finally {
       database.close();
+    }
+  });
+
+  test("fails closed when any security-relevant claimed Project schema invariant drifts", () => {
+    const drifts = [
+      ["id TEXT PRIMARY KEY", "id TEXT"],
+      ["id TEXT PRIMARY KEY\n    CHECK (length(id) BETWEEN 1 AND 128)", "id TEXT PRIMARY KEY"],
+      ["team_id TEXT NOT NULL REFERENCES deployments(team_id)", "team_id TEXT NOT NULL"],
+      ["name TEXT NOT NULL", "name TEXT"],
+      ["base_branch TEXT NOT NULL", "base_branch TEXT"],
+      ["CHECK (base_branch NOT GLOB '*..*' AND base_branch NOT GLOB '*//*')", "CHECK (1)"],
+      ["revision INTEGER NOT NULL CHECK (revision > 0)", "revision INTEGER NOT NULL"],
+      ["created_at INTEGER NOT NULL CHECK (created_at >= 0)", "created_at TEXT NOT NULL"],
+    ] as const;
+
+    for (const [expected, replacement] of drifts) {
+      const database = new Database(":memory:", { strict: true });
+      try {
+        migrate(database);
+        const sql = database
+          .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = 'projects'")
+          .get()?.sql;
+        expect(sql).toContain(expected);
+        database.exec("PRAGMA foreign_keys = OFF");
+        database.exec("DROP TABLE projects");
+        database.exec((sql ?? "").replace(expected, replacement));
+        database.exec("PRAGMA foreign_keys = ON");
+        expect(() => migrate(database)).toThrow("SCHEMA_INTEGRITY_INVALID");
+      } finally {
+        database.close();
+      }
     }
   });
 });
