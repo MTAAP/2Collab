@@ -106,7 +106,24 @@ export const ServerWelcomeSchema = z
   .strict();
 
 export const RunnerMessageBodySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("HEARTBEAT") }).strict(),
+  z
+    .object({
+      kind: z.literal("HEARTBEAT"),
+      repositoryObservations: z
+        .array(
+          z
+            .object({
+              projectId: IdentifierSchema,
+              mappingRevision: z.number().int().positive(),
+              baseBranch: z.string().min(1).max(255),
+              baseCommit: CommitShaSchema,
+            })
+            .strict(),
+        )
+        .max(128)
+        .default([]),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("OPERATION_ACKNOWLEDGEMENT"),

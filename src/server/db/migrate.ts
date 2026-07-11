@@ -38,9 +38,13 @@ import workflowExecutionMigration from "./migrations/0014_workflow_execution.sql
 import { verifyWorkflowExecutionSchema } from "./migrations/0014_workflow_execution.verify.ts";
 import gatesTelemetryMigration from "./migrations/0015_gates_telemetry.sql" with { type: "text" };
 import { verifyGatesTelemetrySchema } from "./migrations/0015_gates_telemetry.verify.ts";
+import repositoryObservationsMigration from "./migrations/0016_repository_observations.sql" with {
+  type: "text",
+};
+import { verifyRepositoryObservationSchema } from "./migrations/0016_repository_observations.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-export const LATEST_SCHEMA_VERSION = 15;
+export const LATEST_SCHEMA_VERSION = 16;
 const MIGRATION_SOURCES = [
   foundationMigration,
   projectsMigration,
@@ -57,6 +61,7 @@ const MIGRATION_SOURCES = [
   workflowsMigration,
   workflowExecutionMigration,
   gatesTelemetryMigration,
+  repositoryObservationsMigration,
 ] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
@@ -165,6 +170,7 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 13) verifyWorkflowsSchema(database);
   if (version >= 14) verifyWorkflowExecutionSchema(database);
   if (version >= 15) verifyGatesTelemetrySchema(database);
+  if (version >= 16) verifyRepositoryObservationSchema(database);
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -304,6 +310,10 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 14) {
       database.exec(gatesTelemetryMigration);
+      currentVersion = 15;
+    }
+    if (currentVersion === 15) {
+      database.exec(repositoryObservationsMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);

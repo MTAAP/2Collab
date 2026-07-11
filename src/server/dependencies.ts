@@ -285,6 +285,20 @@ export async function createServerDependencies(
         command.execution.profileVersionId,
         command.execution.expectedProfileVersion,
       );
+    const configurationBounds = database
+      .query<{ maximum_attempts: number; deadline_seconds: number }, [string, number, string]>(
+        `SELECT versions.maximum_attempts, versions.deadline_seconds
+         FROM personal_run_preset_versions AS versions
+         JOIN personal_run_presets AS presets ON presets.id = versions.preset_id
+         WHERE versions.preset_id = ? AND versions.version = ?
+           AND presets.state = 'ACTIVE'
+           AND (presets.project_id IS NULL OR presets.project_id = ?)`,
+      )
+      .get(
+        command.effectiveConfiguration.configurationId,
+        command.effectiveConfiguration.version,
+        command.projectId,
+      );
     const exposure = command.execution.exposureRevision
       ? database
           .query<{ revision: number }, [string, string, number, string, number, number]>(
@@ -305,10 +319,27 @@ export async function createServerDependencies(
       command.repository.base.kind === "EXACT"
         ? command.repository.base.commitSha
         : database
-            .query<{ base_commit: string }, [string, string]>(
-              "SELECT base_commit FROM agent_runs WHERE project_id = ? AND repository_id = ? ORDER BY created_at DESC LIMIT 1",
+            .query<{ base_commit: string }, [string, number, string, number, number]>(
+              `SELECT observations.base_commit
+               FROM runner_repository_observations AS observations
+               JOIN runner_mapping_versions AS mappings
+                 ON mappings.runner_id = observations.runner_id
+                AND mappings.project_id = observations.project_id
+                AND mappings.revision = observations.mapping_revision
+                AND mappings.revoked_at IS NULL
+               JOIN projects ON projects.id = observations.project_id
+               WHERE observations.runner_id = ? AND observations.runner_epoch = ?
+                 AND observations.project_id = ? AND observations.mapping_revision = ?
+                 AND observations.base_branch = projects.base_branch
+                 AND observations.observed_at > ?`,
             )
-            .get(command.projectId, command.repository.repositoryId)?.base_commit;
+            .get(
+              command.execution.runnerId,
+              command.execution.expectedRunnerEpoch,
+              command.projectId,
+              command.execution.projectMappingRevision,
+              clock() - 30,
+            )?.base_commit;
     if (
       !project ||
       !runner ||
@@ -316,6 +347,7 @@ export async function createServerDependencies(
       runner.runner_epoch !== command.execution.expectedRunnerEpoch ||
       !profile ||
       profile.fingerprint.length !== 64 ||
+      !configurationBounds ||
       (command.execution.exposureRevision !== undefined && !exposure) ||
       !resolvedBaseCommit
     )
@@ -346,8 +378,8 @@ export async function createServerDependencies(
         authoritySessionSeconds: 30,
         authorityRenewalSeconds: 10,
         mutationDisconnectGraceSeconds: 15,
-        maximumAttempts: 1_000,
-        deadlineAt: clock() + 30 * 24 * 60 * 60,
+        maximumAttempts: configurationBounds.maximum_attempts,
+        deadlineAt: clock() + configurationBounds.deadline_seconds,
         connectorEpochs: {},
       },
     };
@@ -646,15 +678,166 @@ export async function createServerDependencies(
   const workflowEngine = createWorkflowEngine({
     database,
     authority: authorityDelegate,
-    clock,
-    resolveLaunches: async () => ({
-      ok: false,
-      error: {
-        code: "WORKFLOW_LAUNCH_BINDING_UNAVAILABLE",
-        message: "A stored run binding is unavailable.",
-        retry: "REFRESH",
-      },
-    }),
+    clockMs: () => Date.now(),
+    resolveLaunches: async ({ definition, inputs, bindings, schedulerActor }) => {
+      const launches: Record<
+        string,
+        import("./modules/workflows/contract.ts").StepLaunchConfiguration
+      > = {};
+      for (const node of definition.nodes) {
+        if (node.kind !== "AGENT_RUN") continue;
+        const binding = bindings[node.key];
+        const preset = binding
+          ? resolveExactPersonalRunPresetVersion(
+              database,
+              schedulerActor.originalDispatcherId,
+              binding.personalRunPresetId,
+              binding.expectedVersion,
+            )
+          : null;
+        const template = database
+          .query<{ id: string; version: number; definition_json: string }, [string]>(
+            "SELECT id, version, definition_json FROM team_run_template_versions WHERE id = ? AND archived_at IS NULL",
+          )
+          .get(node.runTemplateVersionId);
+        if (!binding || !preset?.projectId || !template)
+          return {
+            ok: false as const,
+            error: {
+              code: "WORKFLOW_LAUNCH_BINDING_UNAVAILABLE",
+              message: "A stored run binding is unavailable.",
+              retry: "REFRESH" as const,
+            },
+          };
+        const definitionValue = JSON.parse(
+          template.definition_json,
+        ) as import("../shared/contracts/templates.ts").TeamRunTemplateDraft;
+        const runner = database
+          .query<{ owner_member_id: string }, [string]>(
+            "SELECT owner_member_id FROM runners WHERE id = ? AND revoked_at IS NULL",
+          )
+          .get(preset.runnerId);
+        const exposureRevision =
+          runner && runner.owner_member_id !== schedulerActor.originalDispatcherId
+            ? database
+                .query<{ revision: number }, [string, string, number, string, number]>(
+                  `SELECT revision FROM runner_exposures WHERE runner_id = ? AND project_id = ?
+                   AND mapping_revision = ? AND profile_id = ? AND profile_version = ?
+                   AND revoked_at IS NULL`,
+                )
+                .get(
+                  preset.runnerId,
+                  preset.projectId,
+                  preset.mappingRevision,
+                  preset.profileId,
+                  preset.profileVersion,
+                )?.revision
+            : undefined;
+        const repository = {
+          repositoryId: binding.repository.repositoryId as never,
+          mode: preset.repositoryMode,
+          assurance: preset.repositoryAssurance,
+          base: { kind: "RESOLVE_DEFAULT_BASE" as const },
+          ...(binding.repository.intendedBranch
+            ? { intendedBranch: binding.repository.intendedBranch }
+            : {}),
+        };
+        const execution = {
+          runnerId: preset.runnerId as never,
+          expectedRunnerEpoch: preset.runnerEpoch,
+          projectMappingRevision: preset.mappingRevision,
+          profileVersionId: preset.profileId as never,
+          expectedProfileVersion: preset.profileVersion,
+          ...(exposureRevision ? { exposureRevision } : {}),
+          host: preset.host,
+          interaction: preset.interaction,
+        };
+        const goal = preset.reusableGoalTemplate ?? definitionValue.name;
+        const provisional = {
+          kind: "LAUNCH_RUN" as const,
+          idempotencyKey: `workflow_preflight_${node.key}` as never,
+          actor: schedulerActor,
+          projectId: preset.projectId as never,
+          coordination: { kind: "EXISTING", coordinationRecordId: "workflow_preflight" as never },
+          goal,
+          repository,
+          execution,
+          effectiveConfiguration: {
+            configurationId: preset.presetId,
+            version: preset.presetVersion,
+            digest: "0".repeat(64) as never,
+          },
+        } as unknown as LaunchRun;
+        const facts = databaseAuthorityFacts(provisional);
+        if (!facts.ok) return facts;
+        const acknowledgementVersion = exposureRevision
+          ? database
+              .query<{ version: number }, [string, string, number]>(
+                `SELECT acknowledgements.version FROM runner_exposures AS exposures
+                 JOIN runner_exposure_acknowledgements AS acknowledgements
+                   ON acknowledgements.id = exposures.acknowledgement_id
+                 WHERE exposures.runner_id = ? AND exposures.project_id = ?
+                   AND exposures.revision = ? AND exposures.revoked_at IS NULL
+                   AND acknowledgements.revoked_at IS NULL`,
+              )
+              .get(preset.runnerId, preset.projectId, exposureRevision)?.version
+          : undefined;
+        const configuration = resolveEffectiveRunConfiguration(preset, {
+          runGoal: goal,
+          ...(preset.derivedTemplate?.id === template.id &&
+          preset.derivedTemplate.version === template.version
+            ? {
+                teamTemplate: {
+                  id: template.id,
+                  version: template.version,
+                  coreInstructions: definitionValue.coreInstructions,
+                  typedVariables: Object.fromEntries(
+                    definitionValue.variables
+                      .filter((variable) => inputs[variable.key] !== undefined)
+                      .map((variable) => [
+                        variable.key,
+                        inputs[variable.key] as string | number | boolean,
+                      ]),
+                  ),
+                },
+              }
+            : {}),
+          authorityFacts: {
+            projectRevision: facts.value.projectRevision,
+            runnerPolicyRevision: facts.value.runnerPolicyRevision,
+            securityPolicyVersion: facts.value.securityPolicyVersion,
+            securityDigest: facts.value.securityDigest as never,
+            ...(exposureRevision && acknowledgementVersion
+              ? { exposureRevision, acknowledgementVersion }
+              : {}),
+            connectorEpochs: facts.value.connectorEpochs,
+            grantIds: [],
+          },
+          currentBinding: {
+            projectId: preset.projectId,
+            runnerId: preset.runnerId,
+            runnerEpoch: preset.runnerEpoch,
+            mappingRevision: preset.mappingRevision,
+            profileId: preset.profileId,
+            profileVersion: preset.profileVersion,
+            profileFingerprint: preset.profileFingerprint,
+          },
+        });
+        if (!configuration.ok) return configuration;
+        launches[node.key] = {
+          projectId: preset.projectId as never,
+          goal,
+          repository,
+          execution,
+          effectiveConfiguration: {
+            configurationId: preset.presetId,
+            version: preset.presetVersion,
+            digest: configuration.value.digest,
+          },
+        };
+      }
+      return { ok: true as const, value: launches };
+    },
     revocationAffects: (snapshot, event) => {
       if (event.kind !== "EXPOSURE") return false;
       const exposure = database

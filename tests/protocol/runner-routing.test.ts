@@ -55,7 +55,9 @@ describe("runner inbound semantic routing", () => {
       },
     });
 
-    expect(await router.route(envelope({ kind: "HEARTBEAT" }))).toEqual({ accepted: true });
+    expect(await router.route(envelope({ kind: "HEARTBEAT", repositoryObservations: [] }))).toEqual(
+      { accepted: true },
+    );
     expect(
       await router.route(
         envelope({
@@ -98,7 +100,7 @@ describe("runner inbound semantic routing", () => {
       ),
     ).toEqual({ accepted: true });
 
-    expect(calls[0]).toEqual(["heartbeat", { principal }]);
+    expect(calls[0]).toEqual(["heartbeat", { principal, repositoryObservations: [] }]);
     expect(calls[2]).toEqual([
       "semantic",
       expect.objectContaining({
@@ -135,10 +137,12 @@ describe("runner inbound semantic routing", () => {
         return { ok: true, value: { accepted: true } };
       },
     });
-    expect(await router.route(envelope({ kind: "HEARTBEAT" }))).toEqual({
-      accepted: false,
-      code: "CONNECTION_FENCED",
-    });
+    expect(await router.route(envelope({ kind: "HEARTBEAT", repositoryObservations: [] }))).toEqual(
+      {
+        accepted: false,
+        code: "CONNECTION_FENCED",
+      },
+    );
     expect(effects).toBe(0);
   });
 });

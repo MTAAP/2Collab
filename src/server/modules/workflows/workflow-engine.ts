@@ -34,7 +34,14 @@ type Dependencies = Readonly<{
       definition: import("../../../shared/contracts/workflow.ts").WorkflowDefinition;
       inputs: Readonly<Record<string, string | number | boolean>>;
       bindings: Readonly<
-        Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+        Record<
+          string,
+          Readonly<{
+            personalRunPresetId: string;
+            expectedVersion: number;
+            repository: Readonly<{ repositoryId: string; intendedBranch?: string }>;
+          }>
+        >
       >;
       schedulerActor: import("../../../shared/contracts/actors.ts").SchedulerActor;
     }>,
@@ -590,7 +597,14 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       let resolvedPresetVersionId = command.presetVersionId;
       let presetBindings:
         | Readonly<
-            Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+            Record<
+              string,
+              Readonly<{
+                personalRunPresetId: string;
+                expectedVersion: number;
+                repository: Readonly<{ repositoryId: string; intendedBranch?: string }>;
+              }>
+            >
           >
         | undefined;
       let runTemplatesSnapshot: ReadonlyMap<string, TeamRunTemplateVersion> | undefined;

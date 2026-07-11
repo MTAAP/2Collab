@@ -19,8 +19,16 @@ const preset: PersonalWorkflowPreset = {
   version: 1,
   workflowTemplateVersionId: "workflow_review_v1",
   bindings: {
-    implement: { personalRunPresetId: "claude_impl", expectedVersion: 3 },
-    review: { personalRunPresetId: "codex_review", expectedVersion: 7 },
+    implement: {
+      personalRunPresetId: "claude_impl",
+      expectedVersion: 3,
+      repository: { repositoryId: "repository_1", intendedBranch: "collab/implement" },
+    },
+    review: {
+      personalRunPresetId: "codex_review",
+      expectedVersion: 7,
+      repository: { repositoryId: "repository_1" },
+    },
   },
   createdAt: 100,
 };
@@ -52,6 +60,7 @@ function authorityWith(staleKeys: readonly string[]) {
               interaction: "HEADLESS",
               repositoryMode: "MUTATING",
               repositoryAssurance: "ADVISORY",
+              repository: preset.bindings.implement?.repository,
             },
             review: {
               personalRunPresetId: "codex_review",
@@ -63,6 +72,7 @@ function authorityWith(staleKeys: readonly string[]) {
               interaction: "INTERACTIVE",
               repositoryMode: "INSPECT_ONLY",
               repositoryAssurance: "ENFORCED",
+              repository: preset.bindings.review?.repository,
             },
           },
         },

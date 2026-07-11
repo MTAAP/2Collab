@@ -132,7 +132,7 @@ test("default entry boots composed Task6 auth and exchanges authenticated runner
         sequence: 1,
         issuedAt: now,
         expiresAt: now + 10,
-        body: { kind: "HEARTBEAT" },
+        body: { kind: "HEARTBEAT", repositoryObservations: [] },
       }),
     );
     for (let index = 0; index < 8; index += 1) await Promise.resolve();

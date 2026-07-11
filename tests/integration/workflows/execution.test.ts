@@ -129,8 +129,16 @@ test("loads immutable template and exact preset bindings and snapshots typed inp
     )
     .run(JSON.stringify(startCommand.definition), "c".repeat(64));
   const bindings = {
-    implement: { personalRunPresetId: "implement_preset", expectedVersion: 1 },
-    review: { personalRunPresetId: "review_preset", expectedVersion: 2 },
+    implement: {
+      personalRunPresetId: "implement_preset",
+      expectedVersion: 1,
+      repository: { repositoryId: "repository_1" },
+    },
+    review: {
+      personalRunPresetId: "review_preset",
+      expectedVersion: 2,
+      repository: { repositoryId: "repository_1" },
+    },
   };
   database
     .query(

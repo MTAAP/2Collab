@@ -159,7 +159,7 @@ describe("migrate", () => {
     }
   });
 
-  test("keeps the complete schema verified through bounded automation version 15", () => {
+  test("keeps the complete schema verified through repository observations version 16", () => {
     const db = memoryDatabase();
     try {
       migrate(db);
@@ -217,10 +217,11 @@ describe("migrate", () => {
         { version: 13, applied_at: expect.any(Number) },
         { version: 14, applied_at: expect.any(Number) },
         { version: 15, applied_at: expect.any(Number) },
+        { version: 16, applied_at: expect.any(Number) },
       ]);
       expect(
         db.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get(),
-      ).toEqual({ count: 15 });
+      ).toEqual({ count: 16 });
     } finally {
       db.close();
     }
@@ -653,7 +654,7 @@ describe("migrate", () => {
   });
 
   test("refuses a database with an unknown newer schema version", () => {
-    const db = databaseWithHistory([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    const db = databaseWithHistory([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
     try {
       expect(() => migrate(db)).toThrow("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
     } finally {

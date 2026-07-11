@@ -91,6 +91,10 @@ export type PublishRunTemplate = Readonly<{
 export type PersonalWorkflowBinding = Readonly<{
   personalRunPresetId: string;
   expectedVersion: number;
+  repository: Readonly<{
+    repositoryId: string;
+    intendedBranch?: string;
+  }>;
 }>;
 
 export type PersonalWorkflowPreset = Readonly<{
