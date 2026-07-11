@@ -3,9 +3,14 @@ import { Hono } from "hono";
 import { APP_METADATA } from "../shared/app-metadata.ts";
 import { createFoundationHttpApp } from "./adapters/http/app.ts";
 import type { FoundationHttpDependencies } from "./adapters/http/app.ts";
+import {
+  createGitHubConnectorRoutes,
+  type GitHubWebhookRouteDependencies,
+} from "./adapters/http/routes/connectors-github.ts";
 
 type AppOptions = {
   docsRoot?: string;
+  githubWebhooks?: GitHubWebhookRouteDependencies;
   webRoot?: string;
 };
 
@@ -58,6 +63,9 @@ export function createApp(
 
   if (dependencies) {
     app.route("/", createFoundationHttpApp(dependencies));
+  }
+  if (options.githubWebhooks) {
+    app.route("/", createGitHubConnectorRoutes(options.githubWebhooks));
   }
 
   app.all("/api/*", (context) =>
