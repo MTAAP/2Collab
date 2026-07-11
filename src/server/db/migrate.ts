@@ -14,9 +14,11 @@ import foundationConfigurationCorrectionsMigration from "./migrations/0006_found
   type: "text",
 };
 import { verifyFoundationConfigurationCorrectionsSchema } from "./migrations/0006_foundation_configuration_corrections.verify.ts";
+import githubMigration from "./migrations/0007_github.sql" with { type: "text" };
+import { verifyGitHubSchema } from "./migrations/0007_github.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-export const LATEST_SCHEMA_VERSION = 6;
+export const LATEST_SCHEMA_VERSION = 7;
 const MIGRATION_SOURCES = [
   foundationMigration,
   projectsMigration,
@@ -24,6 +26,7 @@ const MIGRATION_SOURCES = [
   runsAuthorityMigration,
   foundationOperationsMigration,
   foundationConfigurationCorrectionsMigration,
+  githubMigration,
 ] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
@@ -118,6 +121,9 @@ function validateClaimedSchema(database: Database, version: number): void {
   }
   if (version >= 6) {
     verifyFoundationConfigurationCorrectionsSchema(database);
+  }
+  if (version >= 7) {
+    verifyGitHubSchema(database);
   }
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
@@ -220,6 +226,10 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 5) {
       database.exec(foundationConfigurationCorrectionsMigration);
+      currentVersion = 6;
+    }
+    if (currentVersion === 6) {
+      database.exec(githubMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);
