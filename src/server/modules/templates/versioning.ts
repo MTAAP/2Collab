@@ -7,9 +7,14 @@ import type {
   TeamRunTemplateDraft,
   TeamRunTemplateVersion,
 } from "../../../shared/contracts/templates.ts";
-import type { WorkflowDefinition } from "../../../shared/contracts/workflow.ts";
+import {
+  CanvasLayoutSchema,
+  type CanvasLayout,
+  type WorkflowDefinition,
+} from "../../../shared/contracts/workflow.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import { semanticHash } from "../workflows/definition.ts";
+import { layoutHash } from "../workflows/versioning.ts";
 import { validateWorkflow } from "../workflows/validation.ts";
 import type { TemplateRegistry } from "./contract.ts";
 import { runTemplateHash, sanitizeRunTemplate, stableJson } from "./run-templates.ts";
@@ -27,6 +32,7 @@ export type PublishWorkflowTemplate = Readonly<{
   templateKey: string;
   expectedVersion: number;
   definition: WorkflowDefinition;
+  layout: CanvasLayout;
   runTemplates: ReadonlyMap<string, TeamRunTemplateVersion>;
 }>;
 export type TeamWorkflowTemplateVersion = Readonly<{
@@ -180,7 +186,14 @@ export function createTemplateRegistry(dependencies: Dependencies): TemplateRegi
       if (!activeMember(dependencies.database, command.actorMemberId))
         return failure("MEMBER_AUTHORITY_REQUIRED", "Active member authority is required.");
       const diagnostics = validateWorkflow(command.definition, command.runTemplates);
-      if (diagnostics.length > 0)
+      const parsedLayout = CanvasLayoutSchema.safeParse(command.layout);
+      const definitionKeys = new Set(command.definition.nodes.map((node) => node.key));
+      if (
+        diagnostics.length > 0 ||
+        !parsedLayout.success ||
+        parsedLayout.data.nodes.length !== definitionKeys.size ||
+        parsedLayout.data.nodes.some((node) => !definitionKeys.has(node.key))
+      )
         return failure("WORKFLOW_INVALID", "The Workflow Definition is invalid.");
       return inImmediateTransaction(dependencies.database, () => {
         const current = dependencies.database
@@ -216,6 +229,20 @@ export function createTemplateRegistry(dependencies: Dependencies): TemplateRegi
             value.version,
             stableJson(value.definition),
             value.semanticHash,
+            command.actorMemberId,
+            dependencies.clock(),
+          );
+        dependencies.database
+          .query<void, [string, string, string, string, number]>(
+            `INSERT INTO workflow_canvas_layouts(
+               workflow_template_version_id, revision, layout_json, layout_hash,
+               saved_by_member_id, saved_at
+             ) VALUES (?, 1, ?, ?, ?, ?)`,
+          )
+          .run(
+            value.id,
+            stableJson(parsedLayout.data),
+            layoutHash(parsedLayout.data),
             command.actorMemberId,
             dependencies.clock(),
           );

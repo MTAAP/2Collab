@@ -4,6 +4,7 @@ import type { CoordinationRecordId } from "../../../shared/contracts/ids.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import type { WorkflowDefinition } from "../../../shared/contracts/workflow.ts";
 import type { WorkflowStepResult } from "../../../shared/contracts/workflow-results.ts";
+import type { WorkflowAuthorityRevocationEvent } from "./revocation.ts";
 
 export type WorkflowExecutionState =
   | "ACTIVE"
@@ -21,6 +22,10 @@ export type WorkflowExecutionSnapshot = Readonly<{
   definition: WorkflowDefinition;
   schedulerActor: SchedulerActor;
   launches: Readonly<Record<string, StepLaunchConfiguration>>;
+  inputs?: Readonly<Record<string, string | number | boolean>>;
+  presetBindings?: Readonly<
+    Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+  >;
 }>;
 
 export type WorkflowExecution = Readonly<{
@@ -45,9 +50,12 @@ export type StartWorkflow = Readonly<{
   coordinationRevision: number;
   templateVersionId: string;
   presetVersionId: string;
-  definition: WorkflowDefinition;
+  definition?: WorkflowDefinition;
   schedulerActor: SchedulerActor;
-  launches: Readonly<Record<string, StepLaunchConfiguration>>;
+  launches?: Readonly<Record<string, StepLaunchConfiguration>>;
+  inputs?: Readonly<Record<string, string | number | boolean>>;
+  workflowPresetId?: string;
+  workflowPresetVersion?: number;
 }>;
 
 export type WorkflowEventCommand = Readonly<{
@@ -82,6 +90,8 @@ export interface WorkflowEngine {
   decide(command: RecordHumanDecision): Promise<Result<WorkflowExecution>>;
   pause(command: WorkflowControlCommand): Promise<Result<WorkflowExecution>>;
   resume(command: WorkflowControlCommand): Promise<Result<WorkflowExecution>>;
+  cancel(command: WorkflowControlCommand): Promise<Result<WorkflowExecution>>;
+  applyRevocation(event: WorkflowAuthorityRevocationEvent): readonly WorkflowExecution[];
   inspect(workflowExecutionId: string): Result<WorkflowExecution>;
   tick(): Promise<void>;
   failAfterIntentCommitOnce(): void;

@@ -25,7 +25,7 @@ CREATE TABLE team_workflow_template_versions (
 ) STRICT;
 
 CREATE TABLE workflow_canvas_layouts (
-  workflow_template_version_id TEXT NOT NULL,
+  workflow_template_version_id TEXT NOT NULL REFERENCES team_workflow_template_versions(id),
   revision INTEGER NOT NULL CHECK(revision > 0),
   layout_json TEXT NOT NULL,
   layout_hash TEXT NOT NULL CHECK(length(layout_hash) = 64),
@@ -45,7 +45,7 @@ CREATE TABLE workflow_drafts (
 ) STRICT;
 
 CREATE TABLE workflow_draft_history (
-  draft_id TEXT NOT NULL,
+  draft_id TEXT NOT NULL REFERENCES workflow_drafts(id),
   revision INTEGER NOT NULL CHECK(revision > 0),
   definition_json TEXT NOT NULL,
   layout_json TEXT NOT NULL,
@@ -58,7 +58,8 @@ CREATE TABLE personal_workflow_presets (
   id TEXT NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
   owner_member_id TEXT NOT NULL CHECK(length(owner_member_id) BETWEEN 1 AND 128),
   version INTEGER NOT NULL CHECK(version > 0),
-  workflow_template_version_id TEXT NOT NULL CHECK(length(workflow_template_version_id) BETWEEN 1 AND 128),
+  workflow_template_version_id TEXT NOT NULL REFERENCES team_workflow_template_versions(id)
+    CHECK(length(workflow_template_version_id) BETWEEN 1 AND 128),
   bindings_json TEXT NOT NULL,
   created_at INTEGER NOT NULL CHECK(created_at >= 0),
   PRIMARY KEY(id, version),
@@ -73,6 +74,67 @@ CREATE TABLE template_registry_writes (
   result_json TEXT NOT NULL,
   created_at INTEGER NOT NULL CHECK(created_at >= 0)
 ) STRICT;
+
+CREATE TRIGGER team_run_template_version_identity_immutable
+BEFORE UPDATE OF id, template_key, version, project_id, definition_json, semantic_hash,
+  published_by_member_id, published_at ON team_run_template_versions
+BEGIN
+  SELECT RAISE(ABORT, 'TEAM_RUN_TEMPLATE_VERSION_IMMUTABLE');
+END;
+
+CREATE TRIGGER team_run_template_version_delete_denied
+BEFORE DELETE ON team_run_template_versions
+BEGIN
+  SELECT RAISE(ABORT, 'TEAM_RUN_TEMPLATE_VERSION_DELETE_DENIED');
+END;
+
+CREATE TRIGGER team_workflow_template_version_immutable
+BEFORE UPDATE ON team_workflow_template_versions
+BEGIN
+  SELECT RAISE(ABORT, 'TEAM_WORKFLOW_TEMPLATE_VERSION_IMMUTABLE');
+END;
+
+CREATE TRIGGER team_workflow_template_version_delete_denied
+BEFORE DELETE ON team_workflow_template_versions
+BEGIN
+  SELECT RAISE(ABORT, 'TEAM_WORKFLOW_TEMPLATE_VERSION_DELETE_DENIED');
+END;
+
+CREATE TRIGGER personal_workflow_preset_version_immutable
+BEFORE UPDATE ON personal_workflow_presets
+BEGIN
+  SELECT RAISE(ABORT, 'PERSONAL_WORKFLOW_PRESET_VERSION_IMMUTABLE');
+END;
+
+CREATE TRIGGER personal_workflow_preset_version_delete_denied
+BEFORE DELETE ON personal_workflow_presets
+BEGIN
+  SELECT RAISE(ABORT, 'PERSONAL_WORKFLOW_PRESET_VERSION_DELETE_DENIED');
+END;
+
+CREATE TRIGGER workflow_canvas_layout_immutable
+BEFORE UPDATE ON workflow_canvas_layouts
+BEGIN
+  SELECT RAISE(ABORT, 'WORKFLOW_CANVAS_LAYOUT_IMMUTABLE');
+END;
+
+CREATE TRIGGER workflow_canvas_layout_delete_denied
+BEFORE DELETE ON workflow_canvas_layouts
+BEGIN
+  SELECT RAISE(ABORT, 'WORKFLOW_CANVAS_LAYOUT_DELETE_DENIED');
+END;
+
+CREATE TRIGGER workflow_draft_history_immutable
+BEFORE UPDATE ON workflow_draft_history
+BEGIN
+  SELECT RAISE(ABORT, 'WORKFLOW_DRAFT_HISTORY_IMMUTABLE');
+END;
+
+CREATE TRIGGER workflow_draft_history_delete_denied
+BEFORE DELETE ON workflow_draft_history
+BEGIN
+  SELECT RAISE(ABORT, 'WORKFLOW_DRAFT_HISTORY_DELETE_DENIED');
+END;
 
 INSERT INTO schema_migrations(version, applied_at)
 VALUES (13, CAST(strftime('%s', 'now') AS INTEGER) * 1000);

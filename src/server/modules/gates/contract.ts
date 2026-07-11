@@ -13,6 +13,7 @@ export type InspectGateManifest = Readonly<{
   trustedBaseRevision: string;
 }>;
 export type ApproveGateFingerprint = Readonly<{
+  runnerId: string;
   projectId: string;
   baseRevision: string;
   fingerprint: string;

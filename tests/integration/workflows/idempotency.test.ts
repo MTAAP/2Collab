@@ -19,7 +19,12 @@ test("duplicate starts and terminal events cannot launch twice", async () => {
   database.exec(migration13);
   database.exec(migration14);
   const fake = createWorkflowAuthority();
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   expect(await engine.start(startCommand)).toEqual(await engine.start(startCommand));
   await engine.tick();
   const occurrence = database
@@ -58,7 +63,12 @@ test("a contract-invalid result leaves the durable occurrence active", async () 
   database.exec(migration13);
   database.exec(migration14);
   const fake = createWorkflowAuthority();
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   await engine.start(startCommand);
   await engine.tick();
   const runId = database

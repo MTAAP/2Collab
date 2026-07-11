@@ -112,7 +112,7 @@ const launch = (mode: "MUTATING" | "INSPECT_ONLY") => ({
   },
 });
 
-export const startCommand: StartWorkflow = {
+export const startCommand = {
   idempotencyKey: "workflow_start_1",
   workflowExecutionId: "workflow_1",
   coordinationRecordId: "coordination_1" as CoordinationRecordId,
@@ -129,4 +129,4 @@ export const startCommand: StartWorkflow = {
     implement: launch("MUTATING"),
     review: launch("INSPECT_ONLY"),
   },
-};
+} satisfies StartWorkflow;

@@ -263,7 +263,25 @@ export function createGateEvaluationStore(
             "GATE_EVALUATION_REPLAY",
             "Gate evaluation identifier was replayed with different inputs.",
           );
-        return { ok: true, value: rowToEvaluation(existing) };
+        if (existing.state !== "PENDING") {
+          const prior = JSON.parse(existing.evidence_json) as {
+            checkRunId?: string;
+            status?: string;
+            conclusion?: string | null;
+            observedAt?: number;
+          };
+          if (
+            prior.checkRunId !== observation.checkRunId ||
+            prior.status !== observation.status ||
+            prior.conclusion !== observation.conclusion ||
+            prior.observedAt !== observation.observedAt
+          )
+            return fail(
+              "GATE_EVALUATION_REPLAY",
+              "Gate evaluation identifier was replayed with different inputs.",
+            );
+          return { ok: true, value: rowToEvaluation(existing) };
+        }
       }
       if (observation.commitSha !== command.repositoryRevision)
         return fail("GATE_REVISION_STALE", "GitHub check revision is stale.", "REFRESH");
@@ -295,22 +313,30 @@ export function createGateEvaluationStore(
         conclusion: observation.conclusion,
         observedAt: observation.observedAt,
       });
-      dependencies.database
-        .query(
-          `INSERT INTO gate_evaluations(id, run_id, repository_revision, gate_key, manifest_fingerprint, kind, state, evidence_json, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          command.id,
-          command.runId,
-          command.repositoryRevision,
-          command.gateKey,
-          command.manifestFingerprint,
-          command.kind,
-          state,
-          evidence,
-          now,
-          state === "PENDING" ? null : now,
-        );
+      if (existing)
+        dependencies.database
+          .query(
+            `UPDATE gate_evaluations SET state=?, evidence_json=?, completed_at=?
+             WHERE id=? AND state='PENDING'`,
+          )
+          .run(state, evidence, state === "PENDING" ? null : now, command.id);
+      else
+        dependencies.database
+          .query(
+            `INSERT INTO gate_evaluations(id, run_id, repository_revision, gate_key, manifest_fingerprint, kind, state, evidence_json, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            command.id,
+            command.runId,
+            command.repositoryRevision,
+            command.gateKey,
+            command.manifestFingerprint,
+            command.kind,
+            state,
+            evidence,
+            now,
+            state === "PENDING" ? null : now,
+          );
       return state === "PENDING"
         ? {
             ok: true,
@@ -322,10 +348,16 @@ export function createGateEvaluationStore(
               manifestFingerprint: command.manifestFingerprint,
               kind: command.kind,
               state,
-              createdAt: now,
+              createdAt: existing?.created_at ?? now,
             },
           }
-        : { ok: true, value: completedEvaluation(command, state, now) };
+        : {
+            ok: true,
+            value: {
+              ...completedEvaluation(command, state, now),
+              createdAt: existing?.created_at ?? now,
+            },
+          };
     },
   };
 }
@@ -340,6 +372,24 @@ export function createGateCoordinator(
       return parsed.ok ? { ok: true, value: parsed.value.summary } : parsed;
     },
     async approveFingerprint(command) {
+      const runnerTable = dependencies.database
+        .query<{ present: number }, []>(
+          "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='runners'",
+        )
+        .get();
+      if (
+        !runnerTable ||
+        !dependencies.database
+          .query<{ present: number }, [string, string]>(
+            `SELECT 1 AS present FROM runners
+             WHERE id = ? AND owner_member_id = ? AND revoked_at IS NULL`,
+          )
+          .get(command.runnerId, command.approvedByRunnerOwnerId)
+      )
+        return fail(
+          "RUNNER_OWNER_REQUIRED",
+          "Only the active runner owner may approve a gate fingerprint.",
+        );
       const approved = approveGateFingerprint(dependencies.database, command);
       return approved.ok
         ? { ok: true, value: { fingerprint: approved.value.fingerprint } }
@@ -365,10 +415,50 @@ export function createGateCoordinator(
         manifestFingerprint: command.manifestFingerprint,
         kind: command.kind,
       };
-      if (command.kind === "LOCAL_COMMAND")
+      if (command.kind === "LOCAL_COMMAND") {
+        if (command.localEvidence) {
+          if (
+            command.runnerActor?.kind !== "RUNNER" ||
+            !command.sessionId ||
+            !Number.isInteger(command.sessionFence) ||
+            (command.sessionFence ?? 0) < 1 ||
+            !command.idempotencyKey
+          )
+            return fail(
+              "GATE_RUNNER_EVIDENCE_REQUIRED",
+              "Authenticated runner gate evidence is required.",
+            );
+          const authenticated = dependencies.database
+            .query<{ present: number }, [string, string, number, number, number, string, number]>(
+              `SELECT 1 AS present
+               FROM authority_sessions AS sessions
+               JOIN execution_attempts AS attempts ON attempts.id = sessions.attempt_id
+               JOIN runners ON runners.id = sessions.runner_id
+               WHERE sessions.id = ? AND sessions.runner_id = ? AND sessions.runner_epoch = ?
+                 AND sessions.fence = ? AND sessions.state = 'ACTIVE' AND sessions.expires_at > ?
+                 AND attempts.run_id = ? AND runners.runner_epoch = ?
+                 AND runners.revoked_at IS NULL`,
+            )
+            .get(
+              command.sessionId,
+              command.runnerActor.runnerId,
+              command.runnerActor.runnerEpoch,
+              command.sessionFence as number,
+              dependencies.clock(),
+              command.runId,
+              command.runnerActor.runnerEpoch,
+            );
+          if (!authenticated)
+            return fail(
+              "GATE_RUNNER_EVIDENCE_STALE",
+              "Runner gate evidence authority is stale.",
+              "REFRESH",
+            );
+        }
         return command.localEvidence
           ? store.recordLocal(binding, command.localEvidence)
           : store.startLocal(binding);
+      }
       if (!command.checkObservation || !command.requiredGitHubCheck)
         return fail("GATE_EVIDENCE_INVALID", "GitHub gate evidence is unavailable.", "REFRESH");
       return store.recordGitHub(binding, command.checkObservation, command.requiredGitHubCheck);

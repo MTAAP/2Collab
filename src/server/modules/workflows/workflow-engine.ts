@@ -21,11 +21,28 @@ import { workflowDigest, workflowIdempotencyKey } from "./idempotency.ts";
 import { evaluateJoin } from "./joins.ts";
 import { validateStepResult } from "./results.ts";
 import { dispatchStep, type WorkflowLaunchIntent } from "./step-run-factory.ts";
+import { validateWorkflow } from "./validation.ts";
+import type { TeamRunTemplateVersion } from "../../../shared/contracts/templates.ts";
 
 type Dependencies = Readonly<{
   database: Database;
   authority: ExecutionAuthority;
   clock: () => number;
+  allowInlineLaunchesForTesting?: boolean;
+  resolveLaunches?: (
+    input: Readonly<{
+      definition: import("../../../shared/contracts/workflow.ts").WorkflowDefinition;
+      inputs: Readonly<Record<string, string | number | boolean>>;
+      bindings: Readonly<
+        Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+      >;
+      schedulerActor: import("../../../shared/contracts/actors.ts").SchedulerActor;
+    }>,
+  ) => Promise<Result<Readonly<Record<string, StepLaunchConfiguration>>>>;
+  revocationAffects?: (
+    snapshot: WorkflowExecutionSnapshot,
+    event: import("./revocation.ts").WorkflowAuthorityRevocationEvent,
+  ) => boolean;
 }>;
 type ExecutionRow = Readonly<{
   id: string;
@@ -92,6 +109,68 @@ function executionView(row: ExecutionRow): WorkflowExecution {
 }
 function snapshot(row: ExecutionRow): WorkflowExecutionSnapshot {
   return JSON.parse(row.snapshot_json) as WorkflowExecutionSnapshot;
+}
+function typedInputsValid(
+  definition: import("../../../shared/contracts/workflow.ts").WorkflowDefinition,
+  inputs: Readonly<Record<string, string | number | boolean>>,
+): boolean {
+  const declared = new Map(definition.inputs.map((input) => [input.key, input]));
+  if (Object.keys(inputs).some((key) => !declared.has(key))) return false;
+  return definition.inputs.every((input) => {
+    const value = inputs[input.key];
+    if (value === undefined) return !input.required;
+    return (
+      (input.type === "STRING" && typeof value === "string" && value.length <= 16_384) ||
+      (input.type === "NUMBER" && typeof value === "number" && Number.isFinite(value)) ||
+      (input.type === "BOOLEAN" && typeof value === "boolean")
+    );
+  });
+}
+function loadStoredDefinition(
+  database: Database,
+  templateVersionId: string,
+): import("../../../shared/contracts/workflow.ts").WorkflowDefinition | null {
+  const row = database
+    .query<{ definition_json: string }, [string]>(
+      "SELECT definition_json FROM team_workflow_template_versions WHERE id = ?",
+    )
+    .get(templateVersionId);
+  if (!row) return null;
+  const parsed = WorkflowDefinitionSchema.safeParse(JSON.parse(row.definition_json));
+  return parsed.success ? parsed.data : null;
+}
+function loadRunTemplates(
+  database: Database,
+  definition: import("../../../shared/contracts/workflow.ts").WorkflowDefinition,
+): ReadonlyMap<string, TeamRunTemplateVersion> {
+  const result = new Map<string, TeamRunTemplateVersion>();
+  for (const node of definition.nodes) {
+    if (node.kind !== "AGENT_RUN" || result.has(node.runTemplateVersionId)) continue;
+    const row = database
+      .query<
+        {
+          id: string;
+          template_key: string;
+          version: number;
+          definition_json: string;
+          semantic_hash: string;
+        },
+        [string]
+      >(
+        `SELECT id, template_key, version, definition_json, semantic_hash
+         FROM team_run_template_versions WHERE id = ? AND archived_at IS NULL`,
+      )
+      .get(node.runTemplateVersionId);
+    if (row)
+      result.set(row.id, {
+        id: row.id,
+        templateKey: row.template_key,
+        version: row.version,
+        definition: JSON.parse(row.definition_json),
+        semanticHash: row.semantic_hash,
+      } as TeamRunTemplateVersion);
+  }
+  return result;
 }
 function nodeByKey(
   snapshotValue: WorkflowExecutionSnapshot,
@@ -165,6 +244,27 @@ function scheduleAgent(
        ) VALUES (?, ?, ?, ?, ?)`,
     )
     .run(idempotencyKey, row.id, stepOccurrenceId, row.revision, stableJson(configuration));
+}
+function enqueueActiveChildCancellations(database: Database, workflowExecutionId: string): void {
+  const active = database
+    .query<{ id: string; agent_run_id: string }, [string]>(
+      `SELECT id, agent_run_id FROM workflow_step_occurrences
+       WHERE workflow_execution_id = ? AND state = 'RUNNING' AND agent_run_id IS NOT NULL`,
+    )
+    .all(workflowExecutionId);
+  for (const child of active)
+    database
+      .query<void, [string, string, string, string]>(
+        `INSERT OR IGNORE INTO workflow_cancellation_outbox(
+           idempotency_key, workflow_execution_id, step_occurrence_id, agent_run_id
+         ) VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        `workflow-cancel-${workflowExecutionId}-${child.id}`,
+        workflowExecutionId,
+        child.id,
+        child.agent_run_id,
+      );
 }
 function applyTarget(
   database: Database,
@@ -241,7 +341,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
   };
   const control = (
     command: WorkflowControlCommand,
-    action: "PAUSE" | "RESUME",
+    action: "PAUSE" | "RESUME" | "CANCEL",
   ): Result<WorkflowExecution> => {
     const requestDigest = workflowDigest({ ...command, action });
     const prior = dependencies.database
@@ -264,12 +364,27 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       if (snapshotValue.schedulerActor.originalDispatcherId !== command.actor.memberId)
         return failure("WORKFLOW_ACTOR_INVALID", "The workflow control actor is invalid.");
       const now = dependencies.clock();
-      if (action === "RESUME" && now >= row.absolute_deadline_at) {
+      if (action === "CANCEL") {
+        dependencies.database
+          .query(
+            "UPDATE workflow_launch_intents SET invalidated_reason = 'WORKFLOW_CANCELLED' WHERE workflow_execution_id = ? AND dispatched_at IS NULL",
+          )
+          .run(row.id);
+        enqueueActiveChildCancellations(dependencies.database, row.id);
+        row = updateExecution(dependencies.database, row, {
+          state: "CANCELLED",
+          currentNodeKey: row.current_node_key ?? undefined,
+          terminalReason: "WORKFLOW_CANCELLED",
+          now,
+          bumpRevision: true,
+        });
+      } else if (action === "RESUME" && now >= row.absolute_deadline_at) {
         dependencies.database
           .query(
             "UPDATE workflow_launch_intents SET invalidated_reason = 'WORKFLOW_DEADLINE_EXCEEDED' WHERE workflow_execution_id = ? AND dispatched_at IS NULL",
           )
           .run(row.id);
+        enqueueActiveChildCancellations(dependencies.database, row.id);
         row = updateExecution(dependencies.database, row, {
           state: "FAILED",
           currentNodeKey: row.current_node_key ?? undefined,
@@ -328,11 +443,52 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
 
   return {
     inspect,
+    applyRevocation(event) {
+      return inImmediateTransaction(dependencies.database, () => {
+        const rows = dependencies.database
+          .query<ExecutionRow, []>(
+            "SELECT * FROM workflow_executions WHERE state IN ('ACTIVE','WAITING','PAUSED')",
+          )
+          .all();
+        const affected: WorkflowExecution[] = [];
+        for (const row of rows) {
+          const value = snapshot(row);
+          const matches =
+            (event.kind === "MEMBER" &&
+              value.schedulerActor.originalDispatcherId === event.subjectId) ||
+            dependencies.revocationAffects?.(value, event) === true;
+          if (!matches) continue;
+          dependencies.database
+            .query(
+              `UPDATE workflow_launch_intents
+               SET invalidated_reason = 'WORKFLOW_AUTHORITY_REVOKED'
+               WHERE workflow_execution_id = ? AND dispatched_at IS NULL`,
+            )
+            .run(row.id);
+          enqueueActiveChildCancellations(dependencies.database, row.id);
+          affected.push(
+            executionView(
+              updateExecution(dependencies.database, row, {
+                state: "WAITING",
+                currentNodeKey: row.current_node_key ?? undefined,
+                terminalReason: "WORKFLOW_AUTHORITY_REVOKED",
+                now: dependencies.clock(),
+                bumpRevision: true,
+              }),
+            ),
+          );
+        }
+        return affected;
+      });
+    },
     async pause(command) {
       return control(command, "PAUSE");
     },
     async resume(command) {
       return control(command, "RESUME");
+    },
+    async cancel(command) {
+      return control(command, "CANCEL");
     },
     failAfterIntentCommitOnce() {
       crashBeforeDispatch = true;
@@ -348,10 +504,120 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
         return prior.request_digest === requestDigest
           ? (JSON.parse(prior.result_json) as Result<WorkflowExecution>)
           : failure("IDEMPOTENCY_KEY_REUSED", "The idempotency key was already used.");
-      const parsedDefinition = WorkflowDefinitionSchema.safeParse(command.definition);
+      const storedMode = command.definition === undefined || command.launches === undefined;
+      if (!storedMode && !dependencies.allowInlineLaunchesForTesting)
+        return failure(
+          "WORKFLOW_STORED_LAUNCH_REQUIRED",
+          "Workflows must launch from stored immutable versions.",
+        );
+      const storedDefinition = storedMode
+        ? loadStoredDefinition(dependencies.database, command.templateVersionId)
+        : null;
+      const parsedDefinition = WorkflowDefinitionSchema.safeParse(
+        storedMode ? storedDefinition : command.definition,
+      );
       if (!parsedDefinition.success)
         return failure("WORKFLOW_INVALID", "The Workflow Definition is invalid.");
       const definition = parsedDefinition.data;
+      let launches = command.launches;
+      let resolvedPresetVersionId = command.presetVersionId;
+      let presetBindings:
+        | Readonly<
+            Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+          >
+        | undefined;
+      let runTemplatesSnapshot: ReadonlyMap<string, TeamRunTemplateVersion> | undefined;
+      const inputs = command.inputs ?? {};
+      if (storedMode) {
+        if (
+          !command.workflowPresetId ||
+          !Number.isInteger(command.workflowPresetVersion) ||
+          !typedInputsValid(definition, inputs)
+        )
+          return failure("WORKFLOW_INPUT_INVALID", "The typed Workflow inputs are invalid.");
+        const preset = dependencies.database
+          .query<
+            {
+              workflow_template_version_id: string;
+              bindings_json: string;
+              owner_member_id: string;
+            },
+            [string, number]
+          >(
+            `SELECT workflow_template_version_id, bindings_json, owner_member_id
+             FROM personal_workflow_presets WHERE id = ? AND version = ?`,
+          )
+          .get(command.workflowPresetId, command.workflowPresetVersion as number);
+        if (
+          !preset ||
+          preset.workflow_template_version_id !== command.templateVersionId ||
+          preset.owner_member_id !== command.schedulerActor.originalDispatcherId
+        )
+          return failure("WORKFLOW_PRESET_STALE", "The Workflow Preset is unavailable.", "REFRESH");
+        presetBindings = JSON.parse(preset.bindings_json) as typeof presetBindings;
+        resolvedPresetVersionId = `${command.workflowPresetId}_v${command.workflowPresetVersion}`;
+        const agentKeys = definition.nodes
+          .filter((node) => node.kind === "AGENT_RUN")
+          .map((node) => node.key)
+          .sort();
+        if (
+          Object.keys(presetBindings ?? {})
+            .sort()
+            .join("\0") !== agentKeys.join("\0")
+        )
+          return failure(
+            "WORKFLOW_PRESET_BINDING_REQUIRED",
+            "Every Agent Run requires one exact preset binding.",
+            "REFRESH",
+          );
+        const diagnostics = validateWorkflow(
+          definition,
+          loadRunTemplates(dependencies.database, definition),
+        );
+        if (diagnostics.length > 0)
+          return failure("WORKFLOW_INVALID", "The Workflow Definition is invalid.");
+        if (!dependencies.resolveLaunches)
+          return failure(
+            "WORKFLOW_LAUNCH_RESOLVER_REQUIRED",
+            "Workflow launch bindings cannot be resolved.",
+            "REFRESH",
+          );
+        const resolved = await dependencies.resolveLaunches({
+          definition,
+          inputs,
+          bindings: presetBindings ?? {},
+          schedulerActor: command.schedulerActor,
+        });
+        if (!resolved.ok) return resolved;
+        launches = resolved.value;
+        if (Object.keys(launches).sort().join("\0") !== agentKeys.join("\0"))
+          return failure(
+            "WORKFLOW_PRESET_BINDING_REQUIRED",
+            "Every Agent Run requires one exact preset binding.",
+            "REFRESH",
+          );
+        const templates = loadRunTemplates(dependencies.database, definition);
+        runTemplatesSnapshot = templates;
+        for (const node of definition.nodes) {
+          if (node.kind !== "AGENT_RUN") continue;
+          const template = templates.get(node.runTemplateVersionId);
+          const launch = launches[node.key];
+          if (
+            !template ||
+            !launch ||
+            template.definition.repositoryMode !== launch.repository.mode ||
+            (template.definition.minimumAssurance === "ENFORCED" &&
+              launch.repository.assurance !== "ENFORCED")
+          )
+            return failure(
+              "WORKFLOW_PRESET_BINDING_INCOMPATIBLE",
+              "A Workflow step binding is incompatible with its Run Template.",
+              "REFRESH",
+            );
+        }
+      }
+      if (command.schedulerActor.workflowExecutionId !== command.workflowExecutionId)
+        return failure("WORKFLOW_ACTOR_INVALID", "The workflow scheduler actor is invalid.");
       const start = definition.nodes.find((node) => node.kind === "START");
       const transition = start
         ? definition.transitions.find(
@@ -366,8 +632,34 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
           const snapshotValue: WorkflowExecutionSnapshot = {
             definition,
             schedulerActor: command.schedulerActor,
-            launches: command.launches,
+            launches: launches ?? {},
+            ...(storedMode ? { inputs, presetBindings } : {}),
           };
+          if (storedMode) {
+            const currentDefinition = loadStoredDefinition(
+              dependencies.database,
+              command.templateVersionId,
+            );
+            const currentPreset = dependencies.database
+              .query<
+                { bindings_json: string; workflow_template_version_id: string },
+                [string, number]
+              >(
+                `SELECT bindings_json, workflow_template_version_id
+                 FROM personal_workflow_presets WHERE id = ? AND version = ?`,
+              )
+              .get(command.workflowPresetId as string, command.workflowPresetVersion as number);
+            if (
+              !currentDefinition ||
+              stableJson(currentDefinition) !== stableJson(definition) ||
+              !currentPreset ||
+              currentPreset.workflow_template_version_id !== command.templateVersionId ||
+              stableJson(JSON.parse(currentPreset.bindings_json)) !== stableJson(presetBindings) ||
+              stableJson([...loadRunTemplates(dependencies.database, definition)]) !==
+                stableJson([...(runTemplatesSnapshot ?? [])])
+            )
+              throw new Error("WORKFLOW_LAUNCH_SNAPSHOT_STALE");
+          }
           dependencies.database
             .query<void, [string, string, number, string, string, string, number, number, number]>(
               `INSERT INTO workflow_executions(
@@ -381,7 +673,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
               command.coordinationRecordId,
               command.coordinationRevision,
               command.templateVersionId,
-              command.presetVersionId,
+              resolvedPresetVersionId,
               stableJson(snapshotValue),
               now + definition.absoluteDeadlineMs,
               now,
@@ -433,6 +725,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
               "UPDATE workflow_launch_intents SET invalidated_reason = 'WORKFLOW_DEADLINE_EXCEEDED' WHERE workflow_execution_id = ? AND dispatched_at IS NULL",
             )
             .run(row.id);
+          enqueueActiveChildCancellations(dependencies.database, row.id);
           updateExecution(dependencies.database, row, {
             state: "FAILED",
             currentNodeKey: row.current_node_key ?? undefined,
@@ -456,9 +749,52 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
         throw new Error("INJECTED_WORKFLOW_SCHEDULER_CRASH");
       }
       for (const intentRow of intents) {
-        const row = executionRow(dependencies.database, intentRow.workflow_execution_id);
+        let row = executionRow(dependencies.database, intentRow.workflow_execution_id);
         if (row?.state !== "ACTIVE" || dependencies.clock() >= row.absolute_deadline_at) continue;
         const snapshotValue = snapshot(row);
+        if (snapshotValue.presetBindings) {
+          if (!dependencies.resolveLaunches) continue;
+          const refreshed = await dependencies.resolveLaunches({
+            definition: snapshotValue.definition,
+            inputs: snapshotValue.inputs ?? {},
+            bindings: snapshotValue.presetBindings,
+            schedulerActor: snapshotValue.schedulerActor,
+          });
+          const nodeKey = intentRow.step_occurrence_id.replace(/-\d+$/, "");
+          if (
+            !refreshed.ok ||
+            !refreshed.value[nodeKey] ||
+            stableJson(refreshed.value[nodeKey]) !== stableJson(snapshotValue.launches[nodeKey])
+          ) {
+            const observedRow = row;
+            inImmediateTransaction(dependencies.database, () => {
+              const current = executionRow(dependencies.database, observedRow.id);
+              if (
+                !current ||
+                current.revision !== observedRow.revision ||
+                current.state !== "ACTIVE"
+              )
+                return;
+              dependencies.database
+                .query(
+                  `UPDATE workflow_launch_intents
+                   SET invalidated_reason = 'WORKFLOW_PRESET_BINDING_STALE'
+                   WHERE idempotency_key = ? AND dispatched_at IS NULL`,
+                )
+                .run(intentRow.idempotency_key);
+              updateExecution(dependencies.database, current, {
+                state: "WAITING",
+                currentNodeKey: current.current_node_key ?? undefined,
+                terminalReason: "WORKFLOW_PRESET_BINDING_STALE",
+                now: dependencies.clock(),
+                bumpRevision: true,
+              });
+            });
+            continue;
+          }
+          row = executionRow(dependencies.database, row.id);
+          if (row?.state !== "ACTIVE") continue;
+        }
         const activeCount = dependencies.database
           .query<{ count: number }, [string]>(
             "SELECT count(*) AS count FROM workflow_step_occurrences WHERE workflow_execution_id = ? AND state = 'RUNNING'",
@@ -481,7 +817,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
         if (!launched.ok) continue;
         inImmediateTransaction(dependencies.database, () => {
           const current = executionRow(dependencies.database, row.id);
-          if (current?.state !== "ACTIVE") return;
+          if (current?.state !== "ACTIVE" || current.revision !== row.revision) return;
           dependencies.database
             .query<void, [number, string]>(
               "UPDATE workflow_launch_intents SET dispatched_at = ? WHERE idempotency_key = ? AND dispatched_at IS NULL",
@@ -611,6 +947,25 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
           let current = executionRow(dependencies.database, row.id) as ExecutionRow;
           if (["COMPLETED", "FAILED", "CANCELLED"].includes(current.state))
             return { ok: true as const, value: executionView(current) };
+          if (current.revision !== command.expectedRevision)
+            return failure(
+              "WORKFLOW_REVISION_CONFLICT",
+              "The Workflow Execution changed.",
+              "REFRESH",
+            );
+          const currentOccurrence = dependencies.database
+            .query<OccurrenceRow, [string, string]>(
+              "SELECT * FROM workflow_step_occurrences WHERE id = ? AND workflow_execution_id = ?",
+            )
+            .get(command.stepOccurrenceId, command.workflowExecutionId);
+          if (
+            currentOccurrence?.state !== "RUNNING" ||
+            currentOccurrence.agent_run_id !== command.runId
+          )
+            return failure(
+              "WORKFLOW_STEP_EVENT_INVALID",
+              "The step event does not match active work.",
+            );
           dependencies.database
             .query<void, [string, string]>(
               "UPDATE workflow_step_occurrences SET state = 'TERMINAL', result_json = ? WHERE id = ?",
@@ -767,6 +1122,26 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
           const node = nodeByKey(snapshotValue, command.nodeKey);
           if (node?.kind !== "HUMAN_DECISION" || !node.choices.includes(command.choice))
             return failure("WORKFLOW_DECISION_INVALID", "The workflow decision is invalid.");
+          const membersTable = dependencies.database
+            .query<{ present: number }, []>(
+              "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='members'",
+            )
+            .get();
+          if (membersTable) {
+            const member = dependencies.database
+              .query<{ role: "OWNER" | "MEMBER"; status: string }, [string]>(
+                "SELECT role, status FROM members WHERE id = ?",
+              )
+              .get(command.actor.memberId);
+            if (
+              member?.status !== "ACTIVE" ||
+              (node.requiredRole === "OWNER" && member.role !== "OWNER")
+            )
+              return failure(
+                "WORKFLOW_DECISION_ACTOR_DENIED",
+                "The member cannot record this workflow decision.",
+              );
+          }
           dependencies.database
             .query<void, [string, string, string, string, string, number, number]>(
               `INSERT INTO workflow_decisions(

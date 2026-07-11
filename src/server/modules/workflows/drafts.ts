@@ -171,14 +171,45 @@ export function createWorkflowDraftStore(dependencies: Dependencies) {
       const source = read(command.draftId);
       if (!source) return failure("WORKFLOW_DRAFT_NOT_FOUND", "The Workflow Draft was not found.");
       const copyId = dependencies.id("draft");
-      return this.save({
-        idempotencyKey: command.idempotencyKey,
-        actorMemberId: command.actorMemberId,
-        draftId: copyId,
-        templateKey: source.templateKey,
-        expectedRevision: 0,
-        definition: source.definition,
-        layout: source.layout,
+      return inImmediateTransaction(dependencies.database, () => {
+        const now = dependencies.clock();
+        dependencies.database
+          .query<void, [string, string, string, string, string, number]>(
+            `INSERT INTO workflow_drafts(
+               id, template_key, revision, definition_json, layout_json,
+               updated_by_member_id, updated_at
+             ) VALUES (?, ?, 1, ?, ?, ?, ?)`,
+          )
+          .run(
+            copyId,
+            source.templateKey,
+            stableJson(source.definition),
+            stableJson(source.layout),
+            command.actorMemberId,
+            now,
+          );
+        dependencies.database
+          .query<void, [string, string, string, string, number]>(
+            `INSERT INTO workflow_draft_history(
+               draft_id, revision, definition_json, layout_json, authored_by_member_id, authored_at
+             ) VALUES (?, 1, ?, ?, ?, ?)`,
+          )
+          .run(
+            copyId,
+            stableJson(source.definition),
+            stableJson(source.layout),
+            command.actorMemberId,
+            now,
+          );
+        const result = { ok: true as const, value: read(copyId) as WorkflowDraft };
+        remember(
+          command.idempotencyKey,
+          command.actorMemberId,
+          "DUPLICATE_WORKFLOW_DRAFT",
+          digest,
+          result,
+        );
+        return result;
       });
     },
   };
