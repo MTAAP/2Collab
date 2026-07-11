@@ -646,7 +646,7 @@ export async function createServerDependencies(
   const workflowEngine = createWorkflowEngine({
     database,
     authority: authorityDelegate,
-    clock,
+    clockMs: clock,
     resolveLaunches: async () => ({
       ok: false,
       error: {
