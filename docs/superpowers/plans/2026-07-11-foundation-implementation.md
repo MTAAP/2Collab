@@ -451,7 +451,7 @@ Expected: PASS; issuer/audience/signature/state/nonce, trusted proxy origin, CSR
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/modules/identity src/server/modules/connectors src/server/adapters/http/middleware src/server/commands tests/integration/identity tests/drills/offboarding-active-run.test.ts
+git add src/shared/contracts/commands.ts src/server/db/migrations/0001_foundation.sql src/server/db/migrations/0001_foundation.verify.ts src/server/modules/identity src/server/modules/connectors src/server/adapters/http/middleware src/server/commands tests/unit/connectors tests/integration/connectors tests/integration/identity tests/drills/offboarding-active-run.test.ts
 git commit -m "feat: secure provider and device identity"
 ```
 
