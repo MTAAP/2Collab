@@ -39,6 +39,7 @@ describe("local identity lifecycle", () => {
     ).toEqual({ count: 1 });
     expect(value.databaseText()).not.toContain(value.bootstrapSecret);
     const ceremonyAfterClaim = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "bootstrap-after-claim",
       principal: { kind: "BOOTSTRAP", secret: value.bootstrapSecret },
       displayName: "Later",
     });
@@ -76,6 +77,7 @@ describe("local identity lifecycle", () => {
     if (!replayExchange.ok) expect(replayExchange.error.code).toBe("INVITATION_EXCHANGED");
 
     const begun = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "begin-grace-invitation",
       principal: { kind: "INVITATION", secret: exchange.value.secret },
       displayName: "Grace",
     });
@@ -118,6 +120,7 @@ describe("local identity lifecycle", () => {
     if (!deniedInspect.ok) expect(deniedInspect.error.code).toBe("OWNER_REQUIRED");
     const deniedRevoke = await value.identity.revokeInvitation({
       actor: memberActor,
+      idempotencyKey: "member-denied-revoke",
       invitationId: invitation.value.id,
     });
     expect(deniedRevoke.ok).toBe(false);
@@ -161,7 +164,13 @@ describe("local identity lifecycle", () => {
     const second = await value.invite(owner.value, "Revoked");
     if (!second.ok) throw new Error(second.error.code);
     expect(
-      (await value.identity.revokeInvitation({ actor, invitationId: second.value.id })).ok,
+      (
+        await value.identity.revokeInvitation({
+          actor,
+          idempotencyKey: "owner-revoke-invitation",
+          invitationId: second.value.id,
+        })
+      ).ok,
     ).toBe(true);
     const revoked = await value.identity.exchangeInvitation({
       secret: second.value.secret,
@@ -181,11 +190,13 @@ describe("local identity lifecycle", () => {
       sessionId: owner.value.id,
     } as const;
     const begunRegistration = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "begin-second-passkey",
       principal: actor,
       displayName: "Ada",
     });
     if (!begunRegistration.ok) throw new Error(begunRegistration.error.code);
     const registered = await value.identity.finishPasskeyRegistration({
+      idempotencyKey: "finish-second-passkey",
       principal: actor,
       challengeId: begunRegistration.value.challengeId,
       credentialName: "Security key",
@@ -198,6 +209,7 @@ describe("local identity lifecycle", () => {
     expect(registered.ok).toBe(true);
 
     const auth = await value.identity.beginPasskeyAuthentication({
+      idempotencyKey: "begin-auth-ada",
       credentialId: "credential-ada",
     });
     if (!auth.ok) throw new Error(auth.error.code);
@@ -231,6 +243,7 @@ describe("local identity lifecycle", () => {
     ).toEqual({ signature_counter: 1 });
 
     const zero = await value.identity.beginPasskeyAuthentication({
+      idempotencyKey: "begin-auth-zero",
       credentialId: "credential-security-key",
     });
     if (!zero.ok) throw new Error(zero.error.code);
@@ -247,17 +260,20 @@ describe("local identity lifecycle", () => {
 
     const revoked = await value.identity.revokePasskey({
       actor,
+      idempotencyKey: "revoke-security-key",
       credentialId: registered.ok ? registered.value.id : "",
       expectedRevision: registered.ok ? registered.value.revision + 1 : 0,
     });
     expect(revoked.ok).toBe(true);
     const revokedAuth = await value.identity.beginPasskeyAuthentication({
+      idempotencyKey: "begin-revoked-auth",
       credentialId: "credential-security-key",
     });
     expect(revokedAuth.ok).toBe(false);
     if (!revokedAuth.ok) expect(revokedAuth.error.code).toBe("PASSKEY_NOT_FOUND");
 
     const staleChallenge = await value.identity.beginPasskeyAuthentication({
+      idempotencyKey: "begin-stale-auth",
       credentialId: "credential-ada",
     });
     if (!staleChallenge.ok) throw new Error(staleChallenge.error.code);
@@ -311,6 +327,7 @@ describe("local identity lifecycle", () => {
     if (!lostResponseRetry.ok) expect(lostResponseRetry.error.code).toBe("SECRET_ALREADY_ISSUED");
     for (const oldCode of first.value.codes) {
       const old = await value.identity.redeemRecoveryCode({
+        idempotencyKey: value.idempotencyKey("old-recovery"),
         memberId: owner.value.memberId,
         code: oldCode,
       });
@@ -320,8 +337,16 @@ describe("local identity lifecycle", () => {
 
     const code = replacement.value.codes[0] ?? "";
     const [redeemed, replay] = await Promise.all([
-      value.identity.redeemRecoveryCode({ memberId: owner.value.memberId, code }),
-      value.identity.redeemRecoveryCode({ memberId: owner.value.memberId, code }),
+      value.identity.redeemRecoveryCode({
+        idempotencyKey: "redeem-race-one",
+        memberId: owner.value.memberId,
+        code,
+      }),
+      value.identity.redeemRecoveryCode({
+        idempotencyKey: "redeem-race-two",
+        memberId: owner.value.memberId,
+        code,
+      }),
     ]);
     expect([redeemed.ok, replay.ok].filter(Boolean)).toHaveLength(1);
     const denied = redeemed.ok ? replay : redeemed;
@@ -338,11 +363,13 @@ describe("local identity lifecycle", () => {
     if (!restricted.ok) expect(restricted.error.code).toBe("SESSION_INVALID");
 
     const registration = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "begin-recovery-registration",
       principal: { kind: "RECOVERY", sessionId: session.id },
       displayName: "Ada",
     });
     if (!registration.ok) throw new Error(registration.error.code);
     const replacementCredential = await value.identity.finishPasskeyRegistration({
+      idempotencyKey: "finish-recovery-registration",
       principal: { kind: "RECOVERY", sessionId: session.id },
       challengeId: registration.value.challengeId,
       credentialName: "Recovered passkey",
@@ -354,6 +381,7 @@ describe("local identity lifecycle", () => {
     });
     expect(replacementCredential.ok).toBe(true);
     const consumedRecoverySession = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "begin-consumed-recovery",
       principal: { kind: "RECOVERY", sessionId: session.id },
       displayName: "Ada",
     });
@@ -361,6 +389,7 @@ describe("local identity lifecycle", () => {
     if (!consumedRecoverySession.ok)
       expect(consumedRecoverySession.error.code).toBe("RECOVERY_SESSION_INVALID");
     const authentication = await value.identity.beginPasskeyAuthentication({
+      idempotencyKey: "begin-recovered-auth",
       credentialId: "credential-recovered",
     });
     if (!authentication.ok) throw new Error(authentication.error.code);
@@ -380,6 +409,7 @@ describe("local identity lifecycle", () => {
   test("consumes challenges once, rejects exact expiry, and never persists clear challenge material", async () => {
     const value = fixture();
     const begun = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "begin-expired-bootstrap",
       principal: { kind: "BOOTSTRAP", secret: value.bootstrapSecret },
       displayName: "Ada",
     });
@@ -410,6 +440,7 @@ describe("local identity lifecycle", () => {
     });
     if (!exchange.ok) throw new Error(exchange.error.code);
     const begun = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "begin-rollback-invitation",
       principal: { kind: "INVITATION", secret: exchange.value.secret },
       displayName: "Grace",
     });

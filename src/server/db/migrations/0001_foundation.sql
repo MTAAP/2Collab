@@ -101,6 +101,7 @@ CREATE TABLE webauthn_challenges (
   purpose TEXT NOT NULL CHECK (purpose IN ('PASSKEY_REGISTRATION', 'PASSKEY_AUTHENTICATION', 'PRIVILEGED_REAUTHENTICATION')),
   challenge_hash BLOB NOT NULL UNIQUE CHECK (length(challenge_hash) = 32),
   member_id TEXT REFERENCES members(id),
+  passkey_credential_id TEXT REFERENCES passkey_credentials(id),
   invitation_exchange_session_id TEXT REFERENCES invitation_exchange_sessions(id),
   bootstrap_binding_hash BLOB CHECK (bootstrap_binding_hash IS NULL OR length(bootstrap_binding_hash) = 32),
   rp_id TEXT NOT NULL CHECK (length(rp_id) BETWEEN 1 AND 253),
@@ -114,6 +115,7 @@ CREATE TABLE webauthn_challenges (
   CHECK (
     (
       purpose = 'PASSKEY_REGISTRATION'
+      AND passkey_credential_id IS NULL
       AND (
         (member_id IS NOT NULL)
         + (invitation_exchange_session_id IS NOT NULL)
@@ -124,10 +126,12 @@ CREATE TABLE webauthn_challenges (
       purpose = 'PASSKEY_AUTHENTICATION'
       AND invitation_exchange_session_id IS NULL
       AND bootstrap_binding_hash IS NULL
+      AND (passkey_credential_id IS NULL OR member_id IS NOT NULL)
     )
     OR (
       purpose = 'PRIVILEGED_REAUTHENTICATION'
       AND member_id IS NOT NULL
+      AND passkey_credential_id IS NULL
       AND invitation_exchange_session_id IS NULL
       AND bootstrap_binding_hash IS NULL
     )

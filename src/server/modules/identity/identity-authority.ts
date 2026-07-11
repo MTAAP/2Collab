@@ -11,6 +11,7 @@ import type {
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import type { IdentityAuthority } from "./contract.ts";
+import { IdentityIdempotency } from "./idempotency.ts";
 import { invitationState } from "./invitations.ts";
 import {
   simpleWebAuthnPort,
@@ -31,6 +32,7 @@ type ChallengeRow = Readonly<{
   purpose: "PASSKEY_REGISTRATION" | "PASSKEY_AUTHENTICATION";
   challenge_hash: Uint8Array;
   member_id: string | null;
+  passkey_credential_id: string | null;
   invitation_exchange_session_id: string | null;
   bootstrap_binding_hash: Uint8Array | null;
   revision: number;
@@ -125,7 +127,7 @@ function validateConfiguration(dependencies: IdentityAuthorityDependencies): voi
   } catch {
     throw new Error("IDENTITY_CONFIGURATION_INVALID");
   }
-  const localhost = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  const localhost = url.hostname === "localhost";
   if (
     (url.protocol !== "https:" && !(localhost && url.protocol === "http:")) ||
     url.origin !== dependencies.publicOrigin ||
@@ -148,6 +150,7 @@ export function createIdentityAuthority(
   const webAuthn = dependencies.webAuthn ?? simpleWebAuthnPort;
   const digest = dependencies.digest ?? sha256;
   const deriveSecret = dependencies.deriveSecret ?? hashOneTimeSecret;
+  const idempotency = new IdentityIdempotency(database, digest, clock);
   const validBootstrapSecret = async (secret: string): Promise<boolean> => {
     if (secret.length < 32 || secret.length > 512) return false;
     return constantTimeEqual(await digest(secret), await digest(dependencies.bootstrapSecret));
@@ -167,10 +170,49 @@ export function createIdentityAuthority(
       .run(id("audit"), kind, actorKind, actorId, subjectId, JSON.stringify(details), clock());
   };
 
-  const activeMember = (actor: MemberActor): Readonly<{ role: "OWNER" | "MEMBER" }> | null => {
+  const auditFailure = (surface: string, code: string): void => {
+    try {
+      audit("IDENTITY_ATTEMPT_FAILED", "SYSTEM", "IDENTITY", null, { surface, code });
+    } catch {
+      // A failed audit sink must not expose the rejected input or replace the stable domain error.
+    }
+  };
+  const reject = <T>(
+    surface: string,
+    code: string,
+    message: string,
+    retry: DomainError["retry"] = "NEVER",
+  ): Result<T> => {
+    auditFailure(surface, code);
+    return error(code, message, retry);
+  };
+  const auditedTransaction = <TResult extends Result<unknown>>(
+    surface: string,
+    operation: () => TResult,
+  ): TResult => {
+    const result = inImmediateTransaction(database, operation);
+    if (!result.ok) auditFailure(surface, result.error.code);
+    return result;
+  };
+
+  const activeMember = (
+    actor: MemberActor,
+  ): Readonly<{
+    role: "OWNER" | "MEMBER";
+    memberRevision: number;
+    sessionRevision: number;
+  }> | null => {
     return database
-      .query<Readonly<{ role: "OWNER" | "MEMBER" }>, [string, string, number]>(
-        `SELECT members.role FROM members
+      .query<
+        Readonly<{
+          role: "OWNER" | "MEMBER";
+          memberRevision: number;
+          sessionRevision: number;
+        }>,
+        [string, string, number]
+      >(
+        `SELECT members.role, members.revision AS memberRevision,
+                sessions.revision AS sessionRevision FROM members
          JOIN sessions ON sessions.member_id = members.id
          WHERE members.id = ? AND sessions.id = ? AND members.status = 'ACTIVE'
            AND sessions.kind = 'BROWSER' AND sessions.revoked_at IS NULL AND sessions.expires_at > ?`,
@@ -205,6 +247,11 @@ export function createIdentityAuthority(
   const expectedChallenge = (stored: Uint8Array) => async (candidate: string) =>
     constantTimeEqual(await digest(candidate), stored);
 
+  const generatedChallenge = (options: Readonly<Record<string, unknown>>): string | null => {
+    const value = options.challenge;
+    return typeof value === "string" && /^[A-Za-z0-9_-]{32,512}$/.test(value) ? value : null;
+  };
+
   const exchangeBySecret = async (secret: string): Promise<ExchangeRow | null> => {
     if (secret.length < 32 || secret.length > 512) return null;
     const secretHash = await digest(secret);
@@ -213,6 +260,14 @@ export function createIdentityAuthority(
         "SELECT id, invitation_id, revision, expires_at, consumed_at, revoked_at FROM invitation_exchange_sessions WHERE session_hash = ?",
       )
       .get(secretHash);
+  };
+
+  const registrationActorId = async (principal: RegistrationPrincipal): Promise<string | null> => {
+    if (principal.kind === "BOOTSTRAP") return "BOOTSTRAP";
+    if (principal.kind === "MEMBER") return `MEMBER_${principal.memberId}`;
+    if (principal.kind === "RECOVERY") return `RECOVERY_${principal.sessionId}`;
+    const exchange = await exchangeBySecret(principal.secret);
+    return exchange ? `INVITATION_${exchange.id}` : null;
   };
 
   const memberForRegistration = async (
@@ -224,6 +279,11 @@ export function createIdentityAuthority(
         invitationSessionId: string | null;
         bootstrapHash: Uint8Array | null;
         opaqueUserId: Uint8Array;
+        sessionRevision: number | null;
+        memberRevision: number | null;
+        invitationRevision: number | null;
+        sessionId: string | null;
+        sessionKind: "BROWSER" | "RECOVERY" | null;
       }>
     >
   > => {
@@ -243,16 +303,26 @@ export function createIdentityAuthority(
           invitationSessionId: null,
           bootstrapHash: binding,
           opaqueUserId: (await digest(`bootstrap:${principal.secret}`)).slice(0, 32),
+          sessionRevision: null,
+          memberRevision: null,
+          invitationRevision: null,
+          sessionId: null,
+          sessionKind: null,
         },
       };
     }
     if (principal.kind === "INVITATION") {
       const exchange = await exchangeBySecret(principal.secret);
+      const invitation = exchange ? getInvitation(exchange.invitation_id) : null;
       if (
         !exchange ||
         exchange.consumed_at !== null ||
         exchange.revoked_at !== null ||
-        clock() >= exchange.expires_at
+        clock() >= exchange.expires_at ||
+        !invitation ||
+        invitation.consumed_at !== null ||
+        invitation.revoked_at !== null ||
+        clock() >= invitation.expires_at
       ) {
         return error("INVITATION_SESSION_INVALID", "Invitation session is invalid.");
       }
@@ -263,13 +333,25 @@ export function createIdentityAuthority(
           invitationSessionId: exchange.id,
           bootstrapHash: null,
           opaqueUserId: (await digest(`invitation:${exchange.id}`)).slice(0, 32),
+          sessionRevision: exchange.revision,
+          memberRevision: null,
+          invitationRevision: invitation.revision,
+          sessionId: exchange.id,
+          sessionKind: null,
         },
       };
     }
     if (principal.kind === "RECOVERY") {
       const row = database
-        .query<Readonly<{ member_id: string }>, [string, number]>(
-          "SELECT member_id FROM sessions WHERE id = ? AND kind = 'RECOVERY' AND revoked_at IS NULL AND expires_at > ?",
+        .query<
+          Readonly<{ member_id: string; session_revision: number; member_revision: number }>,
+          [string, number]
+        >(
+          `SELECT sessions.member_id, sessions.revision AS session_revision,
+                  members.revision AS member_revision
+           FROM sessions JOIN members ON members.id = sessions.member_id
+           WHERE sessions.id = ? AND sessions.kind = 'RECOVERY' AND sessions.revoked_at IS NULL
+             AND sessions.expires_at > ? AND members.status = 'ACTIVE'`,
         )
         .get(principal.sessionId, clock());
       if (!row) return error("RECOVERY_SESSION_INVALID", "Recovery session is invalid.");
@@ -286,10 +368,23 @@ export function createIdentityAuthority(
           bootstrapHash: null,
           opaqueUserId:
             existing?.opaque_user_id ?? (await digest(`member:${row.member_id}`)).slice(0, 32),
+          sessionRevision: row.session_revision,
+          memberRevision: row.member_revision,
+          invitationRevision: null,
+          sessionId: principal.sessionId,
+          sessionKind: "RECOVERY",
         },
       };
     }
-    if (!activeMember(principal)) return error("SESSION_INVALID", "Member session is invalid.");
+    const memberAuthority = database
+      .query<{ session_revision: number; member_revision: number }, [string, string, number]>(
+        `SELECT sessions.revision AS session_revision, members.revision AS member_revision
+         FROM sessions JOIN members ON members.id = sessions.member_id
+         WHERE members.id = ? AND sessions.id = ? AND members.status = 'ACTIVE'
+           AND sessions.kind = 'BROWSER' AND sessions.revoked_at IS NULL AND sessions.expires_at > ?`,
+      )
+      .get(principal.memberId, principal.sessionId, clock());
+    if (!memberAuthority) return error("SESSION_INVALID", "Member session is invalid.");
     const existing = database
       .query<Readonly<{ opaque_user_id: Uint8Array }>, [string]>(
         "SELECT opaque_user_id FROM passkey_credentials WHERE member_id = ? ORDER BY created_at LIMIT 1",
@@ -303,8 +398,71 @@ export function createIdentityAuthority(
         bootstrapHash: null,
         opaqueUserId:
           existing?.opaque_user_id ?? (await digest(`member:${principal.memberId}`)).slice(0, 32),
+        sessionRevision: memberAuthority.session_revision,
+        memberRevision: memberAuthority.member_revision,
+        invitationRevision: null,
+        sessionId: principal.sessionId,
+        sessionKind: "BROWSER",
       },
     };
+  };
+
+  type RegistrationAuthority = Extract<
+    Awaited<ReturnType<typeof memberForRegistration>>,
+    { ok: true }
+  >["value"];
+
+  const registrationAuthorityCurrent = (authority: RegistrationAuthority): boolean => {
+    if (authority.bootstrapHash) {
+      return (
+        database.query<{ count: number }, []>("SELECT count(*) AS count FROM deployments").get()
+          ?.count === 0
+      );
+    }
+    if (authority.invitationSessionId) {
+      return Boolean(
+        database
+          .query<{ id: string }, [string, number, number, number, number]>(
+            `SELECT invitation_exchange_sessions.id
+             FROM invitation_exchange_sessions
+             JOIN invitations ON invitations.id = invitation_exchange_sessions.invitation_id
+             WHERE invitation_exchange_sessions.id = ?
+               AND invitation_exchange_sessions.revision = ?
+               AND invitations.revision = ?
+               AND invitation_exchange_sessions.consumed_at IS NULL
+               AND invitation_exchange_sessions.revoked_at IS NULL
+               AND invitation_exchange_sessions.expires_at > ?
+               AND invitations.consumed_at IS NULL AND invitations.revoked_at IS NULL
+               AND invitations.expires_at > ?`,
+          )
+          .get(
+            authority.invitationSessionId,
+            authority.sessionRevision ?? -1,
+            authority.invitationRevision ?? -1,
+            clock(),
+            clock(),
+          ),
+      );
+    }
+    if (!authority.memberId) return false;
+    return Boolean(
+      database
+        .query<{ id: string }, [string, string, string, number, number, number]>(
+          `SELECT sessions.id FROM sessions JOIN members ON members.id = sessions.member_id
+           WHERE sessions.member_id = ? AND sessions.id = ? AND sessions.kind = ?
+             AND sessions.revision = ? AND members.revision = ?
+             AND members.status = 'ACTIVE' AND sessions.revoked_at IS NULL
+             AND sessions.expires_at > ?`,
+        )
+        .get(
+          authority.memberId,
+          authority.sessionId ?? "",
+          authority.sessionKind ?? "",
+          authority.sessionRevision ?? -1,
+          authority.memberRevision ?? -1,
+          clock(),
+        ),
+    );
   };
 
   const insertCredential = (
@@ -411,45 +569,31 @@ export function createIdentityAuthority(
 
   return {
     async beginPasskeyRegistration(command: BeginPasskeyRegistration) {
-      if (!validText(command.displayName))
+      if (!validText(command.displayName) || !validIdempotencyKey(command.idempotencyKey))
         return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const actorId = await registrationActorId(command.principal);
+      if (actorId) {
+        const earlyTicket = await idempotency.ticket(actorId, command.idempotencyKey, command);
+        if (!earlyTicket.ok) return earlyTicket;
+        const earlyReplay = idempotency.replay<never>(earlyTicket.value);
+        if (earlyReplay) return earlyReplay;
+      }
       const principal = await memberForRegistration(command.principal);
-      if (!principal.ok) return principal;
-      const rawChallenge = base64Url(randomBytes(32));
-      const hash = await digest(rawChallenge);
+      if (!principal.ok) {
+        auditFailure("PASSKEY_REGISTRATION_BEGIN", principal.error.code);
+        return principal;
+      }
+      const ticket = await idempotency.ticket(
+        actorId ?? `MEMBER_${principal.value.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
       const challengeId = id("challenge");
       const now = clock();
       try {
-        database
-          .query<
-            void,
-            [
-              string,
-              Uint8Array,
-              string | null,
-              string | null,
-              Uint8Array | null,
-              string,
-              string,
-              number,
-              number,
-            ]
-          >(
-            `INSERT INTO webauthn_challenges(id, purpose, challenge_hash, member_id,
-             invitation_exchange_session_id, bootstrap_binding_hash, rp_id, expected_origin,
-             revision, created_at, expires_at) VALUES (?, 'PASSKEY_REGISTRATION', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-          )
-          .run(
-            challengeId,
-            hash,
-            principal.value.memberId,
-            principal.value.invitationSessionId,
-            principal.value.bootstrapHash,
-            dependencies.rpId,
-            dependencies.publicOrigin,
-            now,
-            now + CHALLENGE_LIFETIME,
-          );
         const excludes = principal.value.memberId
           ? database
               .query<Readonly<{ credential_id: string; transports: string | null }>, [string]>(
@@ -464,7 +608,7 @@ export function createIdentityAuthority(
               }))
           : [];
         const options = await webAuthn.generateRegistrationOptions({
-          challenge: rawChallenge,
+          challenge: randomBytes(32),
           rpName: dependencies.rpName,
           rpId: dependencies.rpId,
           userId: principal.value.opaqueUserId,
@@ -472,19 +616,62 @@ export function createIdentityAuthority(
           userDisplayName: command.displayName,
           excludeCredentials: excludes,
         });
-        return {
-          ok: true,
-          value: {
-            challengeId,
-            challenge: rawChallenge,
-            expiresAt: (now + CHALLENGE_LIFETIME) as never,
-            options,
-          },
-        };
+        const rawChallenge = generatedChallenge(options);
+        if (!rawChallenge) return error("PASSKEY_OPERATION_FAILED", "Passkey operation failed.");
+        const hash = await digest(rawChallenge);
+        return auditedTransaction("PASSKEY_REGISTRATION_BEGIN", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
+          if (!registrationAuthorityCurrent(principal.value)) {
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+          }
+          database
+            .query<
+              void,
+              [
+                string,
+                Uint8Array,
+                string | null,
+                string | null,
+                Uint8Array | null,
+                string,
+                string,
+                number,
+                number,
+              ]
+            >(
+              `INSERT INTO webauthn_challenges(id, purpose, challenge_hash, member_id,
+               invitation_exchange_session_id, bootstrap_binding_hash, rp_id, expected_origin,
+               revision, created_at, expires_at) VALUES (?, 'PASSKEY_REGISTRATION', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            )
+            .run(
+              challengeId,
+              hash,
+              principal.value.memberId,
+              principal.value.invitationSessionId,
+              principal.value.bootstrapHash,
+              dependencies.rpId,
+              dependencies.publicOrigin,
+              now,
+              now + CHALLENGE_LIFETIME,
+            );
+          idempotency.storeSecretIssued(
+            ticket.value,
+            "SECRET_ALREADY_ISSUED",
+            "Passkey challenge was already issued.",
+          );
+          return {
+            ok: true,
+            value: {
+              challengeId,
+              challenge: rawChallenge,
+              expiresAt: (now + CHALLENGE_LIFETIME) as never,
+              options,
+            },
+          } as const;
+        });
       } catch {
-        database
-          .query<void, [string]>("DELETE FROM webauthn_challenges WHERE id = ?")
-          .run(challengeId);
+        auditFailure("PASSKEY_REGISTRATION_BEGIN", "PASSKEY_OPERATION_FAILED");
         return error("PASSKEY_OPERATION_FAILED", "Passkey operation failed.");
       }
     },
@@ -496,10 +683,18 @@ export function createIdentityAuthority(
         !validText(command.displayName) ||
         !validText(command.credentialName)
       ) {
+        auditFailure("BOOTSTRAP", "BOOTSTRAP_SECRET_INVALID");
         return error("BOOTSTRAP_SECRET_INVALID", "Bootstrap secret is invalid.");
       }
+      const ticket = await idempotency.ticket("BOOTSTRAP", command.idempotencyKey, command);
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<MemberSession>(ticket.value);
+      if (replay) return replay;
       const status = challengeStatus(challenge(command.challengeId), "PASSKEY_REGISTRATION");
-      if (!status.ok) return status;
+      if (!status.ok) {
+        auditFailure("BOOTSTRAP", status.error.code);
+        return status;
+      }
       const binding = await digest(command.bootstrapSecret);
       if (
         !status.value.bootstrap_binding_hash ||
@@ -507,10 +702,15 @@ export function createIdentityAuthority(
       )
         return error("CHALLENGE_INVALID", "Passkey challenge is invalid.");
       const verified = await verifyRegistration(status.value, command.response);
-      if (!verified.ok) return verified;
+      if (!verified.ok) {
+        auditFailure("BOOTSTRAP", verified.error.code);
+        return verified;
+      }
       const opaqueUserId = (await digest(`bootstrap:${command.bootstrapSecret}`)).slice(0, 32);
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("BOOTSTRAP", () => {
+          const committedReplay = idempotency.replay<MemberSession>(ticket.value);
+          if (committedReplay) return committedReplay;
           if (
             database.query<{ count: number }, []>("SELECT count(*) AS count FROM deployments").get()
               ?.count
@@ -518,6 +718,8 @@ export function createIdentityAuthority(
             return error("DEPLOYMENT_ALREADY_BOOTSTRAPPED", "Deployment was already bootstrapped.");
           const current = challengeStatus(challenge(command.challengeId), "PASSKEY_REGISTRATION");
           if (!current.ok) return current;
+          if (current.value.revision !== status.value.revision)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const now = clock();
           const deploymentId = id("deployment");
           const teamId = id("team");
@@ -545,19 +747,32 @@ export function createIdentityAuthority(
             )
             .run(now, command.challengeId);
           audit("DEPLOYMENT_BOOTSTRAPPED", "BOOTSTRAP", deploymentId, memberId, { role: "OWNER" });
-          return {
+          const result = {
             ok: true,
             value: sessionView(sessionId, memberId, now + BROWSER_SESSION_LIFETIME),
-          };
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
+        auditFailure("BOOTSTRAP", "IDENTITY_OPERATION_FAILED");
         return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
       }
     },
 
     async finishPasskeyRegistration(command) {
-      if (!validText(command.credentialName))
+      if (!validText(command.credentialName) || !validIdempotencyKey(command.idempotencyKey))
         return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        command.principal.kind === "RECOVERY"
+          ? `RECOVERY_${command.principal.sessionId}`
+          : `MEMBER_${command.principal.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<PasskeyCredential>(ticket.value);
+      if (replay) return replay;
       const principal = await memberForRegistration(command.principal);
       if (!principal.ok || !principal.value.memberId)
         return principal.ok ? error("SESSION_INVALID", "Member session is invalid.") : principal;
@@ -566,11 +781,20 @@ export function createIdentityAuthority(
       if (status.value.member_id !== principal.value.memberId)
         return error("CHALLENGE_INVALID", "Passkey challenge is invalid.");
       const verified = await verifyRegistration(status.value, command.response);
-      if (!verified.ok) return verified;
+      if (!verified.ok) {
+        auditFailure("PASSKEY_REGISTRATION_FINISH", verified.error.code);
+        return verified;
+      }
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("PASSKEY_REGISTRATION_FINISH", () => {
+          const committedReplay = idempotency.replay<PasskeyCredential>(ticket.value);
+          if (committedReplay) return committedReplay;
+          if (!registrationAuthorityCurrent(principal.value))
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const current = challengeStatus(challenge(command.challengeId), "PASSKEY_REGISTRATION");
           if (!current.ok) return current;
+          if (current.value.revision !== status.value.revision)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const credential = insertCredential(
             principal.value.memberId as string,
             principal.value.opaqueUserId,
@@ -595,7 +819,9 @@ export function createIdentityAuthority(
             credential.id,
             { recovery: command.principal.kind === "RECOVERY" },
           );
-          return { ok: true, value: credential };
+          const result = { ok: true, value: credential } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
         return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
@@ -603,60 +829,115 @@ export function createIdentityAuthority(
     },
 
     async beginPasskeyAuthentication(command) {
-      const credentials = command.credentialId
+      if (!validIdempotencyKey(command.idempotencyKey))
+        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        "PASSKEY_AUTHENTICATION_BEGIN",
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
+      const credential = command.credentialId
         ? database
             .query<CredentialRow, [string]>(
               "SELECT * FROM passkey_credentials WHERE credential_id = ? AND revoked_at IS NULL",
             )
-            .all(command.credentialId)
-        : database
-            .query<CredentialRow, []>("SELECT * FROM passkey_credentials WHERE revoked_at IS NULL")
-            .all();
-      if (command.credentialId && credentials.length === 0)
+            .get(command.credentialId)
+        : null;
+      if (command.credentialId && !credential)
         return error("PASSKEY_NOT_FOUND", "Passkey was not found.");
-      const rawChallenge = base64Url(randomBytes(32));
-      const hash = await digest(rawChallenge);
+      const credentialMemberRevision = credential
+        ? database
+            .query<{ revision: number }, [string]>(
+              "SELECT revision FROM members WHERE id = ? AND status = 'ACTIVE'",
+            )
+            .get(credential.member_id)?.revision
+        : undefined;
+      if (credential && credentialMemberRevision === undefined)
+        return error("PASSKEY_NOT_FOUND", "Passkey was not found.");
       const challengeId = id("challenge");
       const now = clock();
-      database
-        .query<void, [string, Uint8Array, string, string, number, number]>(
-          `INSERT INTO webauthn_challenges(id, purpose, challenge_hash, rp_id, expected_origin, revision, created_at, expires_at) VALUES (?, 'PASSKEY_AUTHENTICATION', ?, ?, ?, 1, ?, ?)`,
-        )
-        .run(
-          challengeId,
-          hash,
-          dependencies.rpId,
-          dependencies.publicOrigin,
-          now,
-          now + CHALLENGE_LIFETIME,
-        );
       try {
+        const allowCredentials = credential
+          ? [
+              {
+                id: credential.credential_id,
+                transports: database
+                  .query<{ transport: string }, [string]>(
+                    "SELECT transport FROM passkey_credential_transports WHERE passkey_credential_id = ?",
+                  )
+                  .all(credential.id)
+                  .map((row) => row.transport),
+              },
+            ]
+          : undefined;
         const options = await webAuthn.generateAuthenticationOptions({
-          challenge: rawChallenge,
+          challenge: randomBytes(32),
           rpId: dependencies.rpId,
-          allowCredentials: credentials.map((credential) => ({
-            id: credential.credential_id,
-            transports: database
-              .query<{ transport: string }, [string]>(
-                "SELECT transport FROM passkey_credential_transports WHERE passkey_credential_id = ?",
-              )
-              .all(credential.id)
-              .map((row) => row.transport),
-          })),
+          ...(allowCredentials ? { allowCredentials } : {}),
         });
-        return {
-          ok: true,
-          value: {
-            challengeId,
-            challenge: rawChallenge,
-            expiresAt: (now + CHALLENGE_LIFETIME) as never,
-            options,
-          },
-        };
+        const rawChallenge = generatedChallenge(options);
+        if (!rawChallenge) return error("PASSKEY_OPERATION_FAILED", "Passkey operation failed.");
+        const hash = await digest(rawChallenge);
+        return auditedTransaction("PASSKEY_AUTHENTICATION_BEGIN", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
+          if (credential) {
+            const current = database
+              .query<{ id: string }, [string, string, number, number]>(
+                `SELECT passkey_credentials.id FROM passkey_credentials
+                 JOIN members ON members.id = passkey_credentials.member_id
+                 WHERE passkey_credentials.id = ? AND passkey_credentials.member_id = ?
+                   AND passkey_credentials.revision = ? AND passkey_credentials.revoked_at IS NULL
+                   AND members.status = 'ACTIVE' AND members.revision = ?`,
+              )
+              .get(
+                credential.id,
+                credential.member_id,
+                credential.revision,
+                credentialMemberRevision ?? -1,
+              );
+            if (!current)
+              return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+          }
+          database
+            .query<
+              void,
+              [string, Uint8Array, string | null, string | null, string, string, number, number]
+            >(
+              `INSERT INTO webauthn_challenges(id, purpose, challenge_hash, member_id,
+               passkey_credential_id, rp_id, expected_origin, revision, created_at, expires_at)
+               VALUES (?, 'PASSKEY_AUTHENTICATION', ?, ?, ?, ?, ?, 1, ?, ?)`,
+            )
+            .run(
+              challengeId,
+              hash,
+              credential?.member_id ?? null,
+              credential?.id ?? null,
+              dependencies.rpId,
+              dependencies.publicOrigin,
+              now,
+              now + CHALLENGE_LIFETIME,
+            );
+          idempotency.storeSecretIssued(
+            ticket.value,
+            "SECRET_ALREADY_ISSUED",
+            "Passkey challenge was already issued.",
+          );
+          return {
+            ok: true,
+            value: {
+              challengeId,
+              challenge: rawChallenge,
+              expiresAt: (now + CHALLENGE_LIFETIME) as never,
+              options,
+            },
+          };
+        });
       } catch {
-        database
-          .query<void, [string]>("DELETE FROM webauthn_challenges WHERE id = ?")
-          .run(challengeId);
+        auditFailure("PASSKEY_AUTHENTICATION_BEGIN", "PASSKEY_OPERATION_FAILED");
         return error("PASSKEY_OPERATION_FAILED", "Passkey operation failed.");
       }
     },
@@ -664,18 +945,48 @@ export function createIdentityAuthority(
     async authenticate(command) {
       if (!validIdempotencyKey(command.idempotencyKey))
         return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        `AUTH_CHALLENGE_${command.challengeId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<MemberSession>(ticket.value);
+      if (replay) return replay;
       const status = challengeStatus(challenge(command.challengeId), "PASSKEY_AUTHENTICATION");
-      if (!status.ok) return status;
+      if (!status.ok) {
+        auditFailure("PASSKEY_AUTHENTICATION", status.error.code);
+        return status;
+      }
       const response = command.response as { id?: string; credentialId?: string };
       const publicId = response.id ?? response.credentialId;
-      if (!publicId || publicId.length > 1366)
+      if (!publicId || publicId.length > 1366) {
+        auditFailure("PASSKEY_AUTHENTICATION", "PASSKEY_VERIFICATION_FAILED");
         return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
+      }
       const credential = database
         .query<CredentialRow, [string]>(
           "SELECT * FROM passkey_credentials WHERE credential_id = ? AND revoked_at IS NULL",
         )
         .get(publicId);
-      if (!credential) return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
+      if (
+        !credential ||
+        (status.value.passkey_credential_id !== null &&
+          status.value.passkey_credential_id !== credential.id) ||
+        (status.value.member_id !== null && status.value.member_id !== credential.member_id)
+      ) {
+        auditFailure("PASSKEY_AUTHENTICATION", "PASSKEY_VERIFICATION_FAILED");
+        return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
+      }
+      const memberSnapshot = database
+        .query<{ revision: number }, [string]>(
+          "SELECT revision FROM members WHERE id = ? AND status = 'ACTIVE'",
+        )
+        .get(credential.member_id);
+      if (!memberSnapshot) {
+        auditFailure("PASSKEY_AUTHENTICATION", "MEMBER_REVOKED");
+        return error("MEMBER_REVOKED", "Member is not active.");
+      }
       const transports = database
         .query<{ transport: string }, [string]>(
           "SELECT transport FROM passkey_credential_transports WHERE passkey_credential_id = ?",
@@ -695,19 +1006,39 @@ export function createIdentityAuthority(
             transports,
           },
         });
-        if (!verified.verified)
+        if (!verified.verified) {
+          auditFailure("PASSKEY_AUTHENTICATION", "PASSKEY_VERIFICATION_FAILED");
           return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
-        return inImmediateTransaction(database, () => {
+        }
+        return auditedTransaction("PASSKEY_AUTHENTICATION", () => {
+          const committedReplay = idempotency.replay<MemberSession>(ticket.value);
+          if (committedReplay) return committedReplay;
           const current = challengeStatus(challenge(command.challengeId), "PASSKEY_AUTHENTICATION");
           if (!current.ok) return current;
+          if (current.value.revision !== status.value.revision)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+          if (
+            (current.value.passkey_credential_id !== null &&
+              current.value.passkey_credential_id !== credential.id) ||
+            (current.value.member_id !== null && current.value.member_id !== credential.member_id)
+          )
+            return error("CHALLENGE_INVALID", "Passkey challenge is invalid.");
+          const active = database
+            .query<{ id: string }, [string, number]>(
+              "SELECT id FROM members WHERE id = ? AND status = 'ACTIVE' AND revision = ?",
+            )
+            .get(credential.member_id, memberSnapshot.revision);
+          if (!active) return error("MEMBER_REVOKED", "Member is not active.");
           const now = clock();
           const update = database
-            .query<void, [number, number, number, string, number]>(
-              "UPDATE passkey_credentials SET signature_counter = ?, backup_state = ?, last_used_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND revoked_at IS NULL",
+            .query<void, [number, number, number, string, number, string, number]>(
+              "UPDATE passkey_credentials SET signature_counter = ?, backup_eligible = ?, backup_state = ?, device_type = ?, last_used_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND revoked_at IS NULL",
             )
             .run(
               verified.newCounter,
+              verified.deviceType === "MULTI_DEVICE" ? 1 : 0,
               verified.backedUp ? 1 : 0,
+              verified.deviceType,
               now,
               credential.id,
               credential.revision,
@@ -732,21 +1063,43 @@ export function createIdentityAuthority(
           audit("PASSKEY_AUTHENTICATED", "PASSKEY", credential.member_id, credential.id, {
             counterUpdated: true,
           });
-          return {
+          const result = {
             ok: true,
             value: sessionView(sessionId, credential.member_id, now + BROWSER_SESSION_LIFETIME),
-          };
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
+        auditFailure("PASSKEY_AUTHENTICATION", "PASSKEY_VERIFICATION_FAILED");
         return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
       }
     },
 
     async revokePasskey(command) {
-      if (!activeMember(command.actor))
-        return error("SESSION_INVALID", "Member session is invalid.");
+      if (!validIdempotencyKey(command.idempotencyKey))
+        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        `MEMBER_${command.actor.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
+      const authority = activeMember(command.actor);
+      if (!authority) return error("SESSION_INVALID", "Member session is invalid.");
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("PASSKEY_REVOKE", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
+          const currentAuthority = activeMember(command.actor);
+          if (
+            !currentAuthority ||
+            currentAuthority.memberRevision !== authority.memberRevision ||
+            currentAuthority.sessionRevision !== authority.sessionRevision
+          )
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const now = clock();
           const update = database
             .query<void, [number, string, string, number]>(
@@ -755,14 +1108,16 @@ export function createIdentityAuthority(
             .run(now, command.credentialId, command.actor.memberId, command.expectedRevision);
           if (update.changes !== 1) return error("PASSKEY_STALE", "Passkey state changed.");
           audit("PASSKEY_REVOKED", "MEMBER", command.actor.memberId, command.credentialId, {});
-          return {
+          const result = {
             ok: true,
             value: {
               credentialId: command.credentialId,
               revokedAt: now as never,
               revision: command.expectedRevision + 1,
             },
-          };
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
         return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
@@ -797,23 +1152,34 @@ export function createIdentityAuthority(
 
     async invite(command) {
       if (!validIdempotencyKey(command.idempotencyKey))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
-      if (!requireOwner(command.actor).ok)
-        return error("OWNER_REQUIRED", "Owner authorization is required.");
+        return reject("INVITATION_CREATE", "IDENTITY_INPUT_INVALID", "Identity input is invalid.");
       if (command.label !== undefined && !validText(command.label))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+        return reject("INVITATION_CREATE", "IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        `MEMBER_${command.actor.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
+      const authority = activeMember(command.actor);
+      if (authority?.role !== "OWNER")
+        return reject("INVITATION_CREATE", "OWNER_REQUIRED", "Owner authorization is required.");
       const rawSecret = base64Url(randomBytes(32));
       const tokenHash = await digest(rawSecret);
       const now = clock();
       try {
-        return inImmediateTransaction(database, () => {
-          const replay = database
-            .query<{ result_json: string }, [string, string]>(
-              "SELECT result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
-            )
-            .get(command.actor.memberId, command.idempotencyKey);
-          if (replay)
-            return error("SECRET_ALREADY_ISSUED", "Invitation secret was already issued.");
+        return auditedTransaction("INVITATION_CREATE", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
+          const currentAuthority = activeMember(command.actor);
+          if (
+            currentAuthority?.role !== "OWNER" ||
+            currentAuthority.memberRevision !== authority.memberRevision ||
+            currentAuthority.sessionRevision !== authority.sessionRevision
+          )
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const invitationId = id("invitation");
           const deployment = database
             .query<{ id: string; team_id: string }, []>(
@@ -839,17 +1205,11 @@ export function createIdentityAuthority(
               now + INVITATION_LIFETIME,
               now,
             );
-          database
-            .query<void, [string, string, string, string, number]>(
-              "INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            )
-            .run(
-              command.actor.memberId,
-              command.idempotencyKey,
-              "INVITATION_CREATE",
-              JSON.stringify({ invitationId, secretIssued: true }),
-              now,
-            );
+          idempotency.storeSecretIssued(
+            ticket.value,
+            "SECRET_ALREADY_ISSUED",
+            "Invitation secret was already issued.",
+          );
           audit("INVITATION_CREATED", "MEMBER", command.actor.memberId, invitationId, {
             role: "MEMBER",
           });
@@ -867,18 +1227,26 @@ export function createIdentityAuthority(
               state: "PENDING",
               secret: rawSecret,
             },
-          };
+          } as const;
         });
       } catch {
-        return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
+        return reject(
+          "INVITATION_CREATE",
+          "IDENTITY_OPERATION_FAILED",
+          "Identity operation failed.",
+        );
       }
     },
 
     async exchangeInvitation(command) {
       if (!validIdempotencyKey(command.idempotencyKey))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+        return reject(
+          "INVITATION_EXCHANGE",
+          "IDENTITY_INPUT_INVALID",
+          "Identity input is invalid.",
+        );
       if (command.secret.length < 32 || command.secret.length > 512)
-        return error("INVITATION_INVALID", "Invitation is invalid.");
+        return reject("INVITATION_EXCHANGE", "INVITATION_INVALID", "Invitation is invalid.");
       const tokenHash = await digest(command.secret);
       const invitation = database
         .query<InvitationRow, [Uint8Array]>(
@@ -892,21 +1260,44 @@ export function createIdentityAuthority(
            WHERE invitations.token_hash = ?`,
         )
         .get(tokenHash);
-      if (!invitation) return error("INVITATION_INVALID", "Invitation is invalid.");
+      if (!invitation)
+        return reject("INVITATION_EXCHANGE", "INVITATION_INVALID", "Invitation is invalid.");
+      const ticket = await idempotency.ticket(
+        `INVITATION_${invitation.id}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
       if (invitation.consumed_at !== null)
-        return error("INVITATION_USED", "Invitation was already used.");
+        return reject("INVITATION_EXCHANGE", "INVITATION_USED", "Invitation was already used.");
       if (invitation.revoked_at !== null)
-        return error("INVITATION_REVOKED", "Invitation was revoked.");
+        return reject("INVITATION_EXCHANGE", "INVITATION_REVOKED", "Invitation was revoked.");
       if (clock() >= invitation.expires_at)
-        return error("INVITATION_EXPIRED", "Invitation expired.");
+        return reject("INVITATION_EXCHANGE", "INVITATION_EXPIRED", "Invitation expired.");
       if (invitation.exchange_id)
-        return error("INVITATION_EXCHANGED", "Invitation was already exchanged.");
+        return reject(
+          "INVITATION_EXCHANGE",
+          "INVITATION_EXCHANGED",
+          "Invitation was already exchanged.",
+        );
       const rawSession = base64Url(randomBytes(32));
       const sessionHash = await digest(rawSession);
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("INVITATION_EXCHANGE", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
           const current = getInvitation(invitation.id);
-          if (current?.exchange_id)
+          if (
+            !current ||
+            current.revision !== invitation.revision ||
+            current.consumed_at !== null ||
+            current.revoked_at !== null ||
+            clock() >= current.expires_at
+          )
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+          if (current.exchange_id)
             return error("INVITATION_EXCHANGED", "Invitation was already exchanged.");
           const now = clock();
           const exchangeId = id("invitation_session");
@@ -915,17 +1306,11 @@ export function createIdentityAuthority(
               "INSERT INTO invitation_exchange_sessions(id, invitation_id, session_hash, revision, created_at, expires_at) VALUES (?, ?, ?, 1, ?, ?)",
             )
             .run(exchangeId, invitation.id, sessionHash, now, now + INVITATION_SESSION_LIFETIME);
-          database
-            .query<void, [string, string, string, string, number]>(
-              "INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            )
-            .run(
-              `INVITATION_${invitation.id}`,
-              command.idempotencyKey,
-              "INVITATION_EXCHANGE",
-              JSON.stringify({ invitationId: invitation.id, sessionIssued: true }),
-              now,
-            );
+          idempotency.storeSecretIssued(
+            ticket.value,
+            "SECRET_ALREADY_ISSUED",
+            "Invitation session secret was already issued.",
+          );
           audit("INVITATION_EXCHANGED", "INVITATION", invitation.id, exchangeId, {});
           return {
             ok: true,
@@ -938,7 +1323,11 @@ export function createIdentityAuthority(
           };
         });
       } catch {
-        return error("INVITATION_EXCHANGED", "Invitation was already exchanged.");
+        return reject(
+          "INVITATION_EXCHANGE",
+          "INVITATION_EXCHANGED",
+          "Invitation was already exchanged.",
+        );
       }
     },
 
@@ -952,15 +1341,39 @@ export function createIdentityAuthority(
     },
 
     async revokeInvitation(command) {
-      if (!requireOwner(command.actor).ok)
-        return error("OWNER_REQUIRED", "Owner authorization is required.");
+      if (!validIdempotencyKey(command.idempotencyKey))
+        return reject("INVITATION_REVOKE", "IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        `MEMBER_${command.actor.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<TeamInvitation>(ticket.value);
+      if (replay) return replay;
+      const authority = activeMember(command.actor);
+      if (authority?.role !== "OWNER")
+        return reject("INVITATION_REVOKE", "OWNER_REQUIRED", "Owner authorization is required.");
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("INVITATION_REVOKE", () => {
+          const committedReplay = idempotency.replay<TeamInvitation>(ticket.value);
+          if (committedReplay) return committedReplay;
+          const currentAuthority = activeMember(command.actor);
+          if (
+            currentAuthority?.role !== "OWNER" ||
+            currentAuthority.memberRevision !== authority.memberRevision ||
+            currentAuthority.sessionRevision !== authority.sessionRevision
+          )
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const row = getInvitation(command.invitationId);
           if (!row) return error("INVITATION_NOT_FOUND", "Invitation was not found.");
           if (row.consumed_at !== null)
             return error("INVITATION_USED", "Invitation was already used.");
-          if (row.revoked_at !== null) return { ok: true, value: invitationView(row) };
+          if (row.revoked_at !== null) {
+            const result = { ok: true, value: invitationView(row) } as const;
+            idempotency.storeResult(ticket.value, result);
+            return result;
+          }
           const now = clock();
           database
             .query<void, [number, string]>(
@@ -973,33 +1386,79 @@ export function createIdentityAuthority(
             )
             .run(now, row.id);
           audit("INVITATION_REVOKED", "MEMBER", command.actor.memberId, row.id, {});
-          return { ok: true, value: { ...invitationView(row), state: "REVOKED" } };
+          const result = {
+            ok: true,
+            value: { ...invitationView(row), state: "REVOKED" as const },
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
-        return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
+        return reject(
+          "INVITATION_REVOKE",
+          "IDENTITY_OPERATION_FAILED",
+          "Identity operation failed.",
+        );
       }
     },
 
     async accept(command: AcceptInvitationWithVerifiedIdentity) {
       if (!validIdempotencyKey(command.idempotencyKey))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+        return reject("INVITATION_ACCEPT", "IDENTITY_INPUT_INVALID", "Identity input is invalid.");
       if (!validText(command.displayName) || !validText(command.credentialName))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+        return reject("INVITATION_ACCEPT", "IDENTITY_INPUT_INVALID", "Identity input is invalid.");
       const exchange = await exchangeBySecret(command.invitationSessionSecret);
-      if (!exchange) return error("INVITATION_SESSION_INVALID", "Invitation session is invalid.");
+      if (!exchange)
+        return reject(
+          "INVITATION_ACCEPT",
+          "INVITATION_SESSION_INVALID",
+          "Invitation session is invalid.",
+        );
+      const ticket = await idempotency.ticket(
+        `INVITATION_${exchange.id}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<MemberSession>(ticket.value);
+      if (replay) return replay;
       if (exchange.consumed_at !== null)
-        return error("INVITATION_USED", "Invitation was already used.");
+        return reject("INVITATION_ACCEPT", "INVITATION_USED", "Invitation was already used.");
       if (exchange.revoked_at !== null || clock() >= exchange.expires_at)
-        return error("INVITATION_SESSION_INVALID", "Invitation session is invalid.");
+        return reject(
+          "INVITATION_ACCEPT",
+          "INVITATION_SESSION_INVALID",
+          "Invitation session is invalid.",
+        );
+      const invitationSnapshot = getInvitation(exchange.invitation_id);
+      if (
+        !invitationSnapshot ||
+        invitationSnapshot.consumed_at !== null ||
+        invitationSnapshot.revoked_at !== null ||
+        clock() >= invitationSnapshot.expires_at
+      )
+        return reject(
+          "INVITATION_ACCEPT",
+          "INVITATION_SESSION_INVALID",
+          "Invitation session is invalid.",
+        );
       const status = challengeStatus(challenge(command.challengeId), "PASSKEY_REGISTRATION");
-      if (!status.ok) return status;
+      if (!status.ok) {
+        auditFailure("INVITATION_ACCEPT", status.error.code);
+        return status;
+      }
       if (status.value.invitation_exchange_session_id !== exchange.id)
-        return error("CHALLENGE_INVALID", "Passkey challenge is invalid.");
+        return reject("INVITATION_ACCEPT", "CHALLENGE_INVALID", "Passkey challenge is invalid.");
       const verified = await verifyRegistration(status.value, command.response);
-      if (!verified.ok) return verified;
+      if (!verified.ok) {
+        auditFailure("INVITATION_ACCEPT", verified.error.code);
+        return verified;
+      }
       const opaqueUserId = (await digest(`invitation:${exchange.id}`)).slice(0, 32);
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("INVITATION_ACCEPT", () => {
+          const committedReplay = idempotency.replay<MemberSession>(ticket.value);
+          if (committedReplay) return committedReplay;
           const currentExchange = database
             .query<ExchangeRow, [string]>(
               "SELECT id, invitation_id, revision, expires_at, consumed_at, revoked_at FROM invitation_exchange_sessions WHERE id = ?",
@@ -1008,8 +1467,10 @@ export function createIdentityAuthority(
           const currentInvitation = getInvitation(exchange.invitation_id);
           if (
             !currentExchange ||
+            currentExchange.revision !== exchange.revision ||
             currentExchange.consumed_at !== null ||
-            currentInvitation?.consumed_at !== null
+            currentInvitation?.consumed_at !== null ||
+            currentInvitation?.revision !== invitationSnapshot.revision
           )
             return error("INVITATION_USED", "Invitation was already used.");
           if (
@@ -1024,6 +1485,8 @@ export function createIdentityAuthority(
             "PASSKEY_REGISTRATION",
           );
           if (!currentChallenge.ok) return currentChallenge;
+          if (currentChallenge.value.revision !== status.value.revision)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const now = clock();
           const memberId = id("member");
           const sessionId = id("session");
@@ -1056,34 +1519,52 @@ export function createIdentityAuthority(
           audit("INVITATION_ACCEPTED", "INVITATION", exchange.invitation_id, memberId, {
             role: "MEMBER",
           });
-          return {
+          const result = {
             ok: true,
             value: sessionView(sessionId, memberId, now + BROWSER_SESSION_LIFETIME),
-          };
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
-        return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
+        return reject(
+          "INVITATION_ACCEPT",
+          "IDENTITY_OPERATION_FAILED",
+          "Identity operation failed.",
+        );
       }
     },
 
     async generateRecoveryCodes(command) {
       if (!validIdempotencyKey(command.idempotencyKey))
-        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
-      if (!activeMember(command.actor))
-        return error("SESSION_INVALID", "Member session is invalid.");
+        return reject("RECOVERY_GENERATE", "IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        `MEMBER_${command.actor.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
+      const authority = activeMember(command.actor);
+      if (!authority)
+        return reject("RECOVERY_GENERATE", "SESSION_INVALID", "Member session is invalid.");
       const codes = Array.from({ length: RECOVERY_CODE_COUNT }, () => base64Url(randomBytes(24)));
       const salts = Array.from({ length: RECOVERY_CODE_COUNT }, () => randomBytes(16));
       const hashes = await Promise.all(
         codes.map((code, index) => deriveSecret(code, salts[index] as Uint8Array)),
       );
       try {
-        return inImmediateTransaction(database, () => {
-          const replay = database
-            .query<{ result_json: string }, [string, string]>(
-              "SELECT result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
-            )
-            .get(command.actor.memberId, command.idempotencyKey);
-          if (replay) return error("SECRET_ALREADY_ISSUED", "Recovery codes were already issued.");
+        return auditedTransaction("RECOVERY_GENERATE", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
+          const currentAuthority = activeMember(command.actor);
+          if (
+            !currentAuthority ||
+            currentAuthority.memberRevision !== authority.memberRevision ||
+            currentAuthority.sessionRevision !== authority.sessionRevision
+          )
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const now = clock();
           const prior = database
             .query<{ generation: number }, [string]>(
@@ -1116,30 +1597,49 @@ export function createIdentityAuthority(
           hashes.forEach((hash, index) => {
             insert.run(id("recovery_code"), setId, index, salts[index] as Uint8Array, hash, now);
           });
-          database
-            .query<void, [string, string, string, string, number]>(
-              "INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            )
-            .run(
-              command.actor.memberId,
-              command.idempotencyKey,
-              "RECOVERY_GENERATE",
-              JSON.stringify({ generation, codesIssued: true }),
-              now,
-            );
+          idempotency.storeSecretIssued(
+            ticket.value,
+            "SECRET_ALREADY_ISSUED",
+            "Recovery codes were already issued.",
+          );
           audit("RECOVERY_CODES_GENERATED", "MEMBER", command.actor.memberId, setId, {
             generation,
           });
           return { ok: true, value: { generation, codes, createdAt: now as never } };
         });
       } catch {
-        return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
+        return reject(
+          "RECOVERY_GENERATE",
+          "IDENTITY_OPERATION_FAILED",
+          "Identity operation failed.",
+        );
       }
     },
 
     async redeemRecoveryCode(command) {
-      if (command.code.length < 24 || command.code.length > 512)
+      if (
+        !validIdempotencyKey(command.idempotencyKey) ||
+        command.code.length < 24 ||
+        command.code.length > 512
+      )
+        return reject("RECOVERY_REDEEM", "RECOVERY_CODE_INVALID", "Recovery code is invalid.");
+      const ticket = await idempotency.ticket(
+        `RECOVERY_MEMBER_${command.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
+      const memberSnapshot = database
+        .query<{ revision: number }, [string]>(
+          "SELECT revision FROM members WHERE id = ? AND status = 'ACTIVE'",
+        )
+        .get(command.memberId);
+      if (!memberSnapshot) {
+        auditFailure("RECOVERY_REDEEM", "RECOVERY_CODE_INVALID");
         return error("RECOVERY_CODE_INVALID", "Recovery code is invalid.");
+      }
       const candidates = database
         .query<
           Readonly<{
@@ -1149,10 +1649,17 @@ export function createIdentityAuthority(
             revision: number;
             consumed_at: number | null;
             revoked_at: number | null;
+            set_id: string;
+            set_revision: number;
           }>,
           [string]
         >(
-          `SELECT recovery_codes.id, recovery_codes.salt, recovery_codes.code_hash, recovery_codes.revision, recovery_codes.consumed_at, recovery_codes.revoked_at FROM recovery_codes JOIN recovery_code_sets ON recovery_code_sets.id = recovery_codes.recovery_code_set_id WHERE recovery_code_sets.member_id = ? AND recovery_code_sets.revoked_at IS NULL`,
+          `SELECT recovery_codes.id, recovery_codes.salt, recovery_codes.code_hash,
+                  recovery_codes.revision, recovery_codes.consumed_at, recovery_codes.revoked_at,
+                  recovery_code_sets.id AS set_id, recovery_code_sets.revision AS set_revision
+           FROM recovery_codes JOIN recovery_code_sets
+             ON recovery_code_sets.id = recovery_codes.recovery_code_set_id
+           WHERE recovery_code_sets.member_id = ? AND recovery_code_sets.revoked_at IS NULL`,
         )
         .all(command.memberId);
       let matched: (typeof candidates)[number] | undefined;
@@ -1161,13 +1668,30 @@ export function createIdentityAuthority(
           constantTimeEqual(await deriveSecret(command.code, candidate.salt), candidate.code_hash)
         )
           matched = candidate;
-      if (!matched) return error("RECOVERY_CODE_INVALID", "Recovery code is invalid.");
-      if (matched.consumed_at !== null)
-        return error("RECOVERY_CODE_USED", "Recovery code was already used.");
-      if (matched.revoked_at !== null)
+      if (!matched) {
+        auditFailure("RECOVERY_REDEEM", "RECOVERY_CODE_INVALID");
         return error("RECOVERY_CODE_INVALID", "Recovery code is invalid.");
+      }
+      if (matched.consumed_at !== null)
+        return reject("RECOVERY_REDEEM", "RECOVERY_CODE_USED", "Recovery code was already used.");
+      if (matched.revoked_at !== null)
+        return reject("RECOVERY_REDEEM", "RECOVERY_CODE_INVALID", "Recovery code is invalid.");
       try {
-        return inImmediateTransaction(database, () => {
+        return auditedTransaction("RECOVERY_REDEEM", () => {
+          const committedReplay = idempotency.replay<never>(ticket.value);
+          if (committedReplay) return committedReplay;
+          const activeMemberRow = database
+            .query<{ id: string }, [string, number]>(
+              "SELECT id FROM members WHERE id = ? AND status = 'ACTIVE' AND revision = ?",
+            )
+            .get(command.memberId, memberSnapshot.revision);
+          const activeSet = database
+            .query<{ id: string }, [string, number]>(
+              "SELECT id FROM recovery_code_sets WHERE id = ? AND revision = ? AND revoked_at IS NULL",
+            )
+            .get(matched.set_id, matched.set_revision);
+          if (!activeMemberRow || !activeSet)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
           const now = clock();
           const update = database
             .query<void, [number, string, number]>(
@@ -1183,7 +1707,7 @@ export function createIdentityAuthority(
             )
             .run(sessionId, command.memberId, now + RECOVERY_SESSION_LIFETIME);
           audit("RECOVERY_CODE_REDEEMED", "RECOVERY_CODE", command.memberId, sessionId, {});
-          return {
+          const result = {
             ok: true,
             value: {
               kind: "RECOVERY" as const,
@@ -1191,10 +1715,12 @@ export function createIdentityAuthority(
               memberId: command.memberId,
               expiresAt: (now + RECOVERY_SESSION_LIFETIME) as never,
             },
-          };
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
         });
       } catch {
-        return error("IDENTITY_OPERATION_FAILED", "Identity operation failed.");
+        return reject("RECOVERY_REDEEM", "IDENTITY_OPERATION_FAILED", "Identity operation failed.");
       }
     },
   };

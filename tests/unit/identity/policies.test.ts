@@ -18,6 +18,7 @@ describe("identity policies", () => {
   test("rejects a wrong bootstrap secret without persisting it", async () => {
     const value = fixture();
     const result = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "wrong-bootstrap-begin",
       principal: { kind: "BOOTSTRAP", secret: "wrong-bootstrap-secret-that-is-long-enough" },
       displayName: "Mallory",
     });
@@ -74,6 +75,7 @@ describe("identity policies", () => {
   test("maps WebAuthn failures to a stable bounded error", async () => {
     const value = fixture();
     const begun = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "failed-webauthn-begin",
       principal: { kind: "BOOTSTRAP", secret: value.bootstrapSecret },
       displayName: "Ada",
     });
@@ -110,6 +112,7 @@ describe("identity policies", () => {
     ]) {
       const value = fixture();
       const begun = await value.identity.beginPasskeyRegistration({
+        idempotencyKey: `binding-begin-${fixtures.length}`,
         principal: { kind: "BOOTSTRAP", secret: value.bootstrapSecret },
         displayName: "Ada",
       });

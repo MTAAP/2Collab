@@ -56,6 +56,12 @@ export function verifyFoundationSchema(db: Database): void {
   );
   expect(
     db
+      .query<{ name: string }, []>("PRAGMA table_info(webauthn_challenges)")
+      .all()
+      .map((row) => row.name),
+  ).toContain("passkey_credential_id");
+  expect(
+    db
       .query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'one_active_recovery_code_set_per_member'",
       )

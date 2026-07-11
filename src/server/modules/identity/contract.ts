@@ -10,6 +10,7 @@ import type {
   FinishPasskeyRegistration,
   GenerateRecoveryCodes,
   InspectInvitation,
+  InvitationIssue,
   InvitationSession,
   ListPasskeys,
   MemberSession,
@@ -36,7 +37,7 @@ export interface IdentityAuthority {
   listPasskeys(query: ListPasskeys): Promise<Result<readonly PasskeyCredential[]>>;
   generateRecoveryCodes(command: GenerateRecoveryCodes): Promise<Result<RecoveryCodeSet>>;
   redeemRecoveryCode(command: RedeemRecoveryCode): Promise<Result<RecoverySession>>;
-  invite(command: CreateInvitation): Promise<Result<TeamInvitation & { secret: string }>>;
+  invite(command: CreateInvitation): Promise<Result<InvitationIssue>>;
   exchangeInvitation(command: ExchangeInvitationSecret): Promise<Result<InvitationSession>>;
   inspectInvitation(query: InspectInvitation): Promise<Result<TeamInvitation>>;
   revokeInvitation(command: RevokeInvitation): Promise<Result<TeamInvitation>>;

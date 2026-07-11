@@ -42,6 +42,7 @@ export type BootstrapDeployment = Readonly<{
 }>;
 
 export type BeginPasskeyRegistration = Readonly<{
+  idempotencyKey: string;
   principal: RegistrationPrincipal;
   displayName: string;
 }>;
@@ -54,6 +55,7 @@ export type PasskeyChallenge = Readonly<{
 }>;
 
 export type FinishPasskeyRegistration = Readonly<{
+  idempotencyKey: string;
   principal: MemberActor | Readonly<{ kind: "RECOVERY"; sessionId: SessionId }>;
   challengeId: string;
   credentialName: string;
@@ -71,7 +73,10 @@ export type PasskeyCredential = Readonly<{
   revokedAt?: Instant;
 }>;
 
-export type BeginPasskeyAuthentication = Readonly<{ credentialId?: string }>;
+export type BeginPasskeyAuthentication = Readonly<{
+  idempotencyKey: string;
+  credentialId?: string;
+}>;
 export type AuthenticatePasskey = Readonly<{
   idempotencyKey: string;
   challengeId: string;
@@ -80,6 +85,7 @@ export type AuthenticatePasskey = Readonly<{
 
 export type RevokePasskey = Readonly<{
   actor: MemberActor;
+  idempotencyKey: string;
   credentialId: string;
   expectedRevision: number;
 }>;
@@ -102,7 +108,11 @@ export type RecoveryCodeSet = Readonly<{
   createdAt: Instant;
 }>;
 
-export type RedeemRecoveryCode = Readonly<{ memberId: MemberId; code: string }>;
+export type RedeemRecoveryCode = Readonly<{
+  idempotencyKey: string;
+  memberId: MemberId;
+  code: string;
+}>;
 export type RecoverySession = Readonly<{
   kind: "RECOVERY";
   id: SessionId;
@@ -126,8 +136,9 @@ export type TeamInvitation = Readonly<{
   label?: string;
   expiresAt: Instant;
   state: "PENDING" | "EXCHANGED" | "ACCEPTED" | "REVOKED" | "EXPIRED";
-  secret?: string;
 }>;
+
+export type InvitationIssue = TeamInvitation & Readonly<{ secret: string }>;
 
 export type ExchangeInvitationSecret = Readonly<{ secret: string; idempotencyKey: string }>;
 export type InvitationSession = Readonly<{
@@ -137,7 +148,11 @@ export type InvitationSession = Readonly<{
   httpOnly: true;
 }>;
 export type InspectInvitation = Readonly<{ actor: MemberActor; invitationId: string }>;
-export type RevokeInvitation = InspectInvitation;
+export type RevokeInvitation = Readonly<{
+  actor: MemberActor;
+  idempotencyKey: string;
+  invitationId: string;
+}>;
 export type AcceptInvitationWithVerifiedIdentity = Readonly<{
   idempotencyKey: string;
   invitationSessionSecret: string;
@@ -188,7 +203,11 @@ export const BootstrapDeploymentSchema = z
   .strict();
 
 export const BeginPasskeyRegistrationSchema = z
-  .object({ principal: RegistrationPrincipalSchema, displayName: DisplayNameSchema })
+  .object({
+    idempotencyKey: IdempotencyKeySchema,
+    principal: RegistrationPrincipalSchema,
+    displayName: DisplayNameSchema,
+  })
   .strict();
 
 export const FinishPasskeyRegistrationSchema = z
@@ -197,6 +216,7 @@ export const FinishPasskeyRegistrationSchema = z
       MemberActorSchema,
       z.object({ kind: z.literal("RECOVERY"), sessionId: IdentifierSchema }).strict(),
     ]),
+    idempotencyKey: IdempotencyKeySchema,
     challengeId: IdentifierSchema,
     credentialName: DisplayNameSchema,
     response: z.unknown(),
@@ -216,6 +236,76 @@ export const PasskeyCredentialSchema = z
   })
   .strict();
 
+export const PasskeyCredentialListSchema = z.array(PasskeyCredentialSchema);
+
+export const PasskeyChallengeSchema = z
+  .object({
+    challengeId: IdentifierSchema,
+    challenge: OneTimeSecretSchema,
+    expiresAt: InstantSchema,
+    options: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+export const BeginPasskeyAuthenticationSchema = z
+  .object({
+    idempotencyKey: IdempotencyKeySchema,
+    credentialId: z
+      .string()
+      .min(1)
+      .max(1366)
+      .regex(/^[A-Za-z0-9_-]+$/)
+      .optional(),
+  })
+  .strict();
+
+export const AuthenticatePasskeySchema = z
+  .object({
+    idempotencyKey: IdempotencyKeySchema,
+    challengeId: IdentifierSchema,
+    response: z.unknown(),
+  })
+  .strict();
+
+export const RevokePasskeySchema = z
+  .object({
+    actor: MemberActorSchema,
+    idempotencyKey: IdempotencyKeySchema,
+    credentialId: IdentifierSchema,
+    expectedRevision: RevisionSchema,
+  })
+  .strict();
+
+export const ListPasskeysSchema = z.object({ actor: MemberActorSchema }).strict();
+
+export const PasskeyRevocationSchema = z
+  .object({
+    credentialId: IdentifierSchema,
+    revokedAt: InstantSchema,
+    revision: RevisionSchema,
+  })
+  .strict();
+
+export const GenerateRecoveryCodesSchema = z
+  .object({ actor: MemberActorSchema, idempotencyKey: IdempotencyKeySchema })
+  .strict();
+
+export const RecoveryCodeSetSchema = z
+  .object({
+    generation: z.number().int().positive(),
+    codes: z.array(OneTimeSecretSchema).min(1).max(32),
+    createdAt: InstantSchema,
+  })
+  .strict();
+
+export const RedeemRecoveryCodeSchema = z
+  .object({
+    idempotencyKey: IdempotencyKeySchema,
+    memberId: IdentifierSchema,
+    code: OneTimeSecretSchema,
+  })
+  .strict();
+
 export const TeamInvitationSchema = z
   .object({
     id: IdentifierSchema,
@@ -227,7 +317,18 @@ export const TeamInvitationSchema = z
     label: DisplayNameSchema.optional(),
     expiresAt: InstantSchema,
     state: z.enum(["PENDING", "EXCHANGED", "ACCEPTED", "REVOKED", "EXPIRED"]),
-    secret: OneTimeSecretSchema.optional(),
+  })
+  .strict();
+
+export const InvitationIssueSchema = TeamInvitationSchema.extend({
+  secret: OneTimeSecretSchema,
+}).strict();
+
+export const CreateInvitationSchema = z
+  .object({
+    actor: MemberActorSchema,
+    idempotencyKey: IdempotencyKeySchema,
+    label: DisplayNameSchema.optional(),
   })
   .strict();
 
@@ -250,5 +351,28 @@ export const RecoverySessionSchema = z
     id: IdentifierSchema,
     memberId: IdentifierSchema,
     expiresAt: InstantSchema,
+  })
+  .strict();
+
+export const InspectInvitationSchema = z
+  .object({ actor: MemberActorSchema, invitationId: IdentifierSchema })
+  .strict();
+
+export const RevokeInvitationSchema = z
+  .object({
+    actor: MemberActorSchema,
+    idempotencyKey: IdempotencyKeySchema,
+    invitationId: IdentifierSchema,
+  })
+  .strict();
+
+export const AcceptInvitationWithVerifiedIdentitySchema = z
+  .object({
+    idempotencyKey: IdempotencyKeySchema,
+    invitationSessionSecret: OneTimeSecretSchema,
+    displayName: DisplayNameSchema,
+    credentialName: DisplayNameSchema,
+    challengeId: IdentifierSchema,
+    response: z.unknown(),
   })
   .strict();

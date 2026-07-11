@@ -38,7 +38,7 @@ type CredentialDescriptor = Readonly<{ id: string; transports: readonly string[]
 export interface WebAuthnPort {
   generateRegistrationOptions(
     input: Readonly<{
-      challenge: string;
+      challenge: Uint8Array;
       rpName: string;
       rpId: string;
       userId: Uint8Array;
@@ -57,9 +57,9 @@ export interface WebAuthnPort {
   ): Promise<RegistrationVerification>;
   generateAuthenticationOptions(
     input: Readonly<{
-      challenge: string;
+      challenge: Uint8Array;
       rpId: string;
-      allowCredentials: readonly CredentialDescriptor[];
+      allowCredentials?: readonly CredentialDescriptor[];
     }>,
   ): Promise<Readonly<Record<string, unknown>>>;
   verifyAuthentication(
@@ -79,13 +79,13 @@ export interface WebAuthnPort {
 }
 
 function transport(value: string): AuthenticatorTransportFuture {
-  return value.toLowerCase() as AuthenticatorTransportFuture;
+  return value.toLowerCase().replaceAll("_", "-") as AuthenticatorTransportFuture;
 }
 
 export const simpleWebAuthnPort: WebAuthnPort = {
   async generateRegistrationOptions(input) {
     return generateRegistrationOptions({
-      challenge: input.challenge,
+      challenge: new Uint8Array(input.challenge) as Uint8Array<ArrayBuffer>,
       rpName: input.rpName,
       rpID: input.rpId,
       userID: new Uint8Array(input.userId) as Uint8Array<ArrayBuffer>,
@@ -115,7 +115,8 @@ export const simpleWebAuthnPort: WebAuthnPort = {
         credentialId: credential.id,
         publicKey: new Uint8Array(credential.publicKey),
         counter: credential.counter,
-        transports: credential.transports?.map((value) => value.toUpperCase()) ?? [],
+        transports:
+          credential.transports?.map((value) => value.toUpperCase().replaceAll("-", "_")) ?? [],
         deviceType:
           result.registrationInfo.credentialDeviceType === "singleDevice"
             ? "SINGLE_DEVICE"
@@ -126,12 +127,16 @@ export const simpleWebAuthnPort: WebAuthnPort = {
   },
   async generateAuthenticationOptions(input) {
     return generateAuthenticationOptions({
-      challenge: input.challenge,
+      challenge: new Uint8Array(input.challenge) as Uint8Array<ArrayBuffer>,
       rpID: input.rpId,
-      allowCredentials: input.allowCredentials.map((credential) => ({
-        id: credential.id,
-        transports: credential.transports.map(transport),
-      })),
+      ...(input.allowCredentials
+        ? {
+            allowCredentials: input.allowCredentials.map((credential) => ({
+              id: credential.id,
+              transports: credential.transports.map(transport),
+            })),
+          }
+        : {}),
       userVerification: "required",
     }) as unknown as Readonly<Record<string, unknown>>;
   },

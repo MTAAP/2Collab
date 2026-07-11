@@ -37,6 +37,7 @@ type AuthenticationResponse = Readonly<{
   origin?: string;
   rpId?: string;
   userVerified?: boolean;
+  deviceType?: "SINGLE_DEVICE" | "MULTI_DEVICE";
 }>;
 
 export class StrictFakeWebAuthn implements WebAuthnPort {
@@ -44,10 +45,11 @@ export class StrictFakeWebAuthn implements WebAuthnPort {
   readonly authenticationInputs: unknown[] = [];
   failRegistration = false;
   failAuthentication = false;
-  beforeAuthenticationResult?: () => void;
+  beforeRegistrationResult?: () => void | Promise<void>;
+  beforeAuthenticationResult?: () => void | Promise<void>;
 
   async generateRegistrationOptions(input: {
-    challenge: string;
+    challenge: Uint8Array;
     rpName: string;
     rpId: string;
     userId: Uint8Array;
@@ -57,7 +59,7 @@ export class StrictFakeWebAuthn implements WebAuthnPort {
   }): Promise<Readonly<Record<string, unknown>>> {
     this.registrationInputs.push(input);
     return {
-      challenge: input.challenge,
+      challenge: Buffer.from(input.challenge).toString("base64url"),
       rp: { id: input.rpId, name: input.rpName },
       user: { id: "opaque", name: input.userName, displayName: input.userDisplayName },
       authenticatorSelection: { userVerification: "required" },
@@ -81,6 +83,7 @@ export class StrictFakeWebAuthn implements WebAuthnPort {
     ) {
       return { verified: false };
     }
+    await this.beforeRegistrationResult?.();
     return {
       verified: true,
       credential: {
@@ -95,15 +98,15 @@ export class StrictFakeWebAuthn implements WebAuthnPort {
   }
 
   async generateAuthenticationOptions(input: {
-    challenge: string;
+    challenge: Uint8Array;
     rpId: string;
-    allowCredentials: readonly Readonly<{ id: string; transports: readonly string[] }>[];
+    allowCredentials?: readonly Readonly<{ id: string; transports: readonly string[] }>[];
   }): Promise<Readonly<Record<string, unknown>>> {
     this.authenticationInputs.push(input);
     return {
-      challenge: input.challenge,
+      challenge: Buffer.from(input.challenge).toString("base64url"),
       rpId: input.rpId,
-      allowCredentials: input.allowCredentials,
+      ...(input.allowCredentials ? { allowCredentials: input.allowCredentials } : {}),
       userVerification: "required",
     };
   }
@@ -134,12 +137,12 @@ export class StrictFakeWebAuthn implements WebAuthnPort {
     ) {
       return { verified: false };
     }
-    this.beforeAuthenticationResult?.();
+    await this.beforeAuthenticationResult?.();
     return {
       verified: true,
       newCounter: nextCounter,
       backedUp: response.backedUp ?? true,
-      deviceType: "MULTI_DEVICE",
+      deviceType: response.deviceType ?? "MULTI_DEVICE",
     };
   }
 }
@@ -174,6 +177,7 @@ export function createIdentityFixture(overrides: Partial<IdentityAuthorityDepend
 
   async function bootstrap(displayName = "Ada") {
     const begun = await identity.beginPasskeyRegistration({
+      idempotencyKey: `begin-bootstrap-${key(displayName)}`,
       principal: { kind: "BOOTSTRAP", secret: bootstrapSecret },
       displayName,
     });
@@ -206,6 +210,7 @@ export function createIdentityFixture(overrides: Partial<IdentityAuthorityDepend
     });
     if (!exchange.ok) return exchange;
     const begun = await identity.beginPasskeyRegistration({
+      idempotencyKey: `begin-invitation-${key(displayName)}`,
       principal: { kind: "INVITATION", secret: exchange.value.secret },
       displayName,
     });
@@ -247,5 +252,6 @@ export function createIdentityFixture(overrides: Partial<IdentityAuthorityDepend
         challengeId,
         response: { challenge, credentialId, newCounter: 1 },
       }) as AuthenticatePasskey,
+    idempotencyKey: (prefix = "test") => `${key(prefix)}-${++sequence}`,
   };
 }
