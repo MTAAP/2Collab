@@ -20,9 +20,11 @@ import coordinationSourceMappingMigration from "./migrations/0008_coordination_s
   type: "text",
 };
 import { verifyCoordinationSourceMappingSchema } from "./migrations/0008_coordination_source_mapping.verify.ts";
+import githubAttentionMigration from "./migrations/0009_github_attention.sql" with { type: "text" };
+import { verifyGitHubAttentionSchema } from "./migrations/0009_github_attention.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-export const LATEST_SCHEMA_VERSION = 8;
+export const LATEST_SCHEMA_VERSION = 9;
 const MIGRATION_SOURCES = [
   foundationMigration,
   projectsMigration,
@@ -32,6 +34,7 @@ const MIGRATION_SOURCES = [
   foundationConfigurationCorrectionsMigration,
   githubMigration,
   coordinationSourceMappingMigration,
+  githubAttentionMigration,
 ] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
@@ -133,6 +136,7 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 8) {
     verifyCoordinationSourceMappingSchema(database);
   }
+  if (version >= 9) verifyGitHubAttentionSchema(database);
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -242,6 +246,10 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 7) {
       database.exec(coordinationSourceMappingMigration);
+      currentVersion = 8;
+    }
+    if (currentVersion === 8) {
+      database.exec(githubAttentionMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);
