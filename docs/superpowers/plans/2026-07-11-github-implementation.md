@@ -69,18 +69,18 @@ export interface GitHubPort
 
 export type GitHubMutation =
   | { kind: "CREATE_ISSUE"; repository: GitHubRepositoryRef; title: string; body: string }
-  | { kind: "EDIT_ISSUE"; issue: GitHubIssueRef; expectedRevision: string; title?: string; body?: string }
-  | { kind: "ADD_COMMENT"; issue: GitHubIssueRef; body: string; actionDigest: string }
-  | { kind: "SET_LABELS"; issue: GitHubIssueRef; expectedRevision: string; labels: readonly string[] }
-  | { kind: "SET_ASSIGNEES"; issue: GitHubIssueRef; expectedRevision: string; logins: readonly string[] }
-  | { kind: "SET_MILESTONE"; item: GitHubWorkItemReference; expectedRevision: string; milestoneNumber: number | null }
-  | { kind: "SET_ISSUE_STATE"; issue: GitHubIssueRef; expectedRevision: string; state: "OPEN" | "CLOSED"; reason: "COMPLETED" | "NOT_PLANNED" | "DUPLICATE" | "REOPENED" }
+  | { kind: "EDIT_ISSUE"; issue: GitHubIssueRef; title?: string; body?: string }
+  | { kind: "ADD_COMMENT"; issue: GitHubIssueRef; body: string }
+  | { kind: "SET_LABELS"; issue: GitHubIssueRef; labels: readonly string[] }
+  | { kind: "SET_ASSIGNEES"; issue: GitHubIssueRef; logins: readonly string[] }
+  | { kind: "SET_MILESTONE"; item: GitHubWorkItemReference; milestoneNumber: number | null }
+  | { kind: "SET_ISSUE_STATE"; issue: GitHubIssueRef; state: "OPEN" | "CLOSED"; reason: "COMPLETED" | "NOT_PLANNED" | "DUPLICATE" | "REOPENED" }
   | { kind: "CREATE_MILESTONE"; repository: GitHubRepositoryRef; title: string; description: string; dueOn: string | null }
-  | { kind: "EDIT_MILESTONE"; milestone: GitHubMilestoneRef; expectedRevision: string; title?: string; description?: string; dueOn?: string | null; state?: "OPEN" | "CLOSED" }
+  | { kind: "EDIT_MILESTONE"; milestone: GitHubMilestoneRef; title?: string; description?: string; dueOn?: string | null; state?: "OPEN" | "CLOSED" }
   | { kind: "ADD_PROJECT_ITEM"; project: GitHubProjectRef; item: GitHubWorkItemReference }
-  | { kind: "REMOVE_PROJECT_ITEM"; project: GitHubProjectRef; itemId: string; expectedRevision: string }
-  | { kind: "SET_PROJECT_FIELD"; project: GitHubProjectRef; itemId: string; fieldId: string; expectedRevision: string; value: GitHubProjectFieldValue }
-  | { kind: "MOVE_PROJECT_ITEM"; project: GitHubProjectRef; itemId: string; expectedRevision: string; afterItemId: string | null };
+  | { kind: "REMOVE_PROJECT_ITEM"; project: GitHubProjectRef; itemId: string }
+  | { kind: "SET_PROJECT_FIELD"; project: GitHubProjectRef; itemId: string; fieldId: string; value: GitHubProjectFieldValue }
+  | { kind: "MOVE_PROJECT_ITEM"; project: GitHubProjectRef; itemId: string; afterItemId: string | null };
 ```
 
 `GitHubPort` is immutably bound to an exact authorized project/connector scope and current connector
