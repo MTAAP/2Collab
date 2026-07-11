@@ -26,7 +26,9 @@ import outlineMigration from "./migrations/0010_outline.sql" with { type: "text"
 import { verifyOutlineSchema } from "./migrations/0010_outline.verify.ts";
 import outlineGrantsMigration from "./migrations/0011_outline_grants.sql" with { type: "text" };
 import { verifyOutlineGrantSchema } from "./migrations/0011_outline_grants.verify.ts";
-import outlineProposalsMigration from "./migrations/0012_outline_proposals.sql" with { type: "text" };
+import outlineProposalsMigration from "./migrations/0012_outline_proposals.sql" with {
+  type: "text",
+};
 import { verifyOutlineProposalSchema } from "./migrations/0012_outline_proposals.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
@@ -186,7 +188,9 @@ export const migrationCatalog: MigrationCatalog = {
     );
   },
   supportsRestoreFrom(version) {
-    return Number.isInteger(version) && version >= 1 && version <= LATEST_SCHEMA_VERSION;
+    // v1 cannot safely migrate a nonempty projects table through 0002. Rejecting every v1
+    // archive is conservative but keeps the restore support claim honest.
+    return Number.isInteger(version) && version >= 2 && version <= LATEST_SCHEMA_VERSION;
   },
   migrateAndVerify(database) {
     migrate(database);

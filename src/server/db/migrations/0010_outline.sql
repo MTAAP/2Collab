@@ -89,5 +89,50 @@ CREATE TABLE outline_access_provenance (
 CREATE INDEX outline_access_provenance_actor
   ON outline_access_provenance(project_id, connector_id, actor_kind, occurred_at);
 
+CREATE TABLE connector_provider_bindings (
+  connector_id TEXT PRIMARY KEY REFERENCES connector_epochs(connector_id),
+  provider TEXT NOT NULL CHECK(provider IN ('GITHUB','OUTLINE')),
+  bound_at INTEGER NOT NULL CHECK(bound_at >= 0)
+) STRICT;
+
+INSERT INTO connector_provider_bindings(connector_id, provider, bound_at)
+SELECT connector_id, 'GITHUB', created_at FROM github_installations;
+INSERT INTO connector_provider_bindings(connector_id, provider, bound_at)
+SELECT connector_id, 'OUTLINE', created_at FROM outline_connections;
+
+CREATE TRIGGER github_connector_provider_insert
+BEFORE INSERT ON github_installations
+BEGIN
+  SELECT CASE WHEN EXISTS(
+    SELECT 1 FROM connector_provider_bindings
+    WHERE connector_id = NEW.connector_id AND provider <> 'GITHUB'
+  ) THEN RAISE(ABORT, 'CONNECTOR_PROVIDER_COLLISION') END;
+  INSERT OR IGNORE INTO connector_provider_bindings(connector_id, provider, bound_at)
+  VALUES(NEW.connector_id, 'GITHUB', NEW.created_at);
+END;
+
+CREATE TRIGGER outline_connector_provider_insert
+BEFORE INSERT ON outline_connections
+BEGIN
+  SELECT CASE WHEN EXISTS(
+    SELECT 1 FROM connector_provider_bindings
+    WHERE connector_id = NEW.connector_id AND provider <> 'OUTLINE'
+  ) THEN RAISE(ABORT, 'CONNECTOR_PROVIDER_COLLISION') END;
+  INSERT OR IGNORE INTO connector_provider_bindings(connector_id, provider, bound_at)
+  VALUES(NEW.connector_id, 'OUTLINE', NEW.created_at);
+END;
+
+CREATE TRIGGER connector_provider_binding_immutable_update
+BEFORE UPDATE ON connector_provider_bindings
+BEGIN
+  SELECT RAISE(ABORT, 'CONNECTOR_PROVIDER_BINDING_IMMUTABLE');
+END;
+
+CREATE TRIGGER connector_provider_binding_immutable_delete
+BEFORE DELETE ON connector_provider_bindings
+BEGIN
+  SELECT RAISE(ABORT, 'CONNECTOR_PROVIDER_BINDING_IMMUTABLE');
+END;
+
 INSERT INTO schema_migrations(version, applied_at)
 VALUES (10, CAST(strftime('%s', 'now') AS INTEGER) * 1000);

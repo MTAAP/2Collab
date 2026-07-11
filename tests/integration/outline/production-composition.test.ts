@@ -17,6 +17,7 @@ test("production HTTP composition mounts injected Outline connector, search, and
     rateLimits: { allow: () => true },
     runs: {} as never,
     outline: {
+      authorization: { authorizeProject: denied },
       connector: { begin: denied, finish: denied, revoke: denied },
       search: { authorize: denied, search: denied },
       documents: { create: denied, edit: denied },

@@ -10,8 +10,8 @@ type Dependencies = Readonly<{
   }>;
   runs: PublicRunOperations;
   outlineMcp?: Readonly<{
-    search(input: unknown): Promise<unknown>;
-    read(input: unknown): Promise<unknown>;
+    search(actor: MemberActor, input: unknown): Promise<unknown>;
+    read(actor: MemberActor, input: unknown): Promise<unknown>;
   }>;
 }>;
 

@@ -42,7 +42,8 @@
     "outline:evidence": "bun run scripts/outline-evidence.ts",
     "outline:evidence:validate": "bun run outline:evidence validate docs/evidence/outline/LOCAL-EVIDENCE.json",
     "github:evidence": "bun run scripts/github-evidence.ts",
-    "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify && bun run evidence:verify && bun run evidence:validate && bun run outline:evidence:validate"
+    "github:evidence:validate": "bun run github:evidence validate docs/evidence/github/LOCAL-EVIDENCE.json",
+    "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify && bun run evidence:verify && bun run evidence:validate && bun run github:evidence:validate && bun run outline:evidence:validate"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

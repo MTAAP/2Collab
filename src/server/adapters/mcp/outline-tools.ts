@@ -1,13 +1,15 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import { OutlineReferenceSchema } from "../../../shared/contracts/outline.ts";
 import { ScopedSearchSchema } from "../../modules/connectors/contract.ts";
 
 export function registerOutlineTools(
   server: McpServer,
+  actor: MemberActor,
   dependencies: Readonly<{
-    search(input: unknown): Promise<unknown>;
-    read(input: unknown): Promise<unknown>;
+    search(actor: MemberActor, input: unknown): Promise<unknown>;
+    read(actor: MemberActor, input: unknown): Promise<unknown>;
   }>,
 ): void {
   server.registerTool(
@@ -18,7 +20,9 @@ export function registerOutlineTools(
       inputSchema: z.object({ query: ScopedSearchSchema }).strict(),
     },
     async (input) => ({
-      content: [{ type: "text" as const, text: JSON.stringify(await dependencies.search(input)) }],
+      content: [
+        { type: "text" as const, text: JSON.stringify(await dependencies.search(actor, input)) },
+      ],
     }),
   );
   server.registerTool(
@@ -29,7 +33,9 @@ export function registerOutlineTools(
       inputSchema: z.object({ reference: OutlineReferenceSchema }).strict(),
     },
     async (input) => ({
-      content: [{ type: "text" as const, text: JSON.stringify(await dependencies.read(input)) }],
+      content: [
+        { type: "text" as const, text: JSON.stringify(await dependencies.read(actor, input)) },
+      ],
     }),
   );
 }

@@ -54,4 +54,16 @@ describe("GitHub schema migration 0007", () => {
     ).toThrow();
     database.close();
   });
+
+  test("rejects claimed schema drift in columns, constraints, foreign keys, or indexes", () => {
+    const database = new Database(":memory:", { strict: true });
+    migrate(database);
+    database.exec(`
+      PRAGMA foreign_keys=OFF;
+      ALTER TABLE github_installations RENAME TO github_installations_drifted;
+      CREATE TABLE github_installations(connector_id TEXT PRIMARY KEY) STRICT;
+    `);
+    expect(() => verifyGitHubSchema(database)).toThrow("SCHEMA_INTEGRITY_INVALID");
+    database.close();
+  });
 });

@@ -78,7 +78,21 @@ test("binds OAuth callback to state, member, session, redirect, connector, and e
 });
 
 test("exposes safe identity health without returning provider tokens", async () => {
+  const actor = {
+    kind: "MEMBER" as const,
+    memberId: "member_1" as never,
+    sessionId: "session_1" as never,
+    sessionProof: "proof-with-at-least-thirty-two-bytes",
+  };
   const app = createOutlineConnectorRoutes({
+    configuredOrigin: "https://collab.test",
+    rateLimits: { allow: () => true },
+    authentication: {
+      authenticateBrowser: async () => ({ ok: true as const, value: actor }),
+      authenticateDevice: async () => ({ ok: true as const, value: actor }),
+      verifyBrowserMutation: () => true,
+    },
+    authorizeProject: async () => ({ ok: true, value: { authorized: true } }),
     async begin() {
       return { ok: true, value: { authorizationUrl: "https://outline.test/oauth/authorize" } };
     },
@@ -99,7 +113,11 @@ test("exposes safe identity health without returning provider tokens", async () 
       return { ok: true, value: { revoked: true } };
     },
   });
-  const response = await app.request("/oauth/callback", { method: "POST" });
+  const response = await app.request("/oauth/callback", {
+    method: "POST",
+    headers: { authorization: "DPoP device", "content-type": "application/json" },
+    body: JSON.stringify({ projectId: "project_1" }),
+  });
   const body = await response.text();
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(body).not.toContain("accessToken");

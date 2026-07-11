@@ -2,9 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../../../src/server/db/connection.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
 import { createMemberRevocationAuthority } from "../../../src/server/modules/identity/revocation.ts";
-import outlineMigration from "../../../src/server/db/migrations/0010_outline.sql" with {
-  type: "text",
-};
 
 function fixture(dispatchSucceeds = true, providerRevocations?: string[]) {
   const database = openDatabase(":memory:");
@@ -232,9 +229,9 @@ describe("member offboarding", () => {
     const providerRevocations: string[] = [];
     const f = fixture(true, providerRevocations);
     try {
-      f.database.exec("INSERT INTO schema_migrations(version,applied_at)VALUES(7,0),(8,0),(9,0)");
-      f.database.exec(outlineMigration);
       f.database.exec(`
+        INSERT INTO members(id,display_name,role,status,authority_epoch,revision,created_at)
+          VALUES('member_2','Linus','MEMBER','ACTIVE',1,1,0);
         INSERT INTO connector_epochs(connector_id,epoch,review_state,revision) VALUES('outline_1',1,'READY',1);
         INSERT INTO connector_scopes(id,project_id,connector_id,connector_epoch,revision,created_at)
           VALUES('scope_outline','project_1','outline_1',1,1,0);
@@ -242,11 +239,28 @@ describe("member offboarding", () => {
         INSERT INTO connector_scope_operations(scope_id,operation) VALUES('scope_outline','EDIT_CONTENT');
         INSERT INTO encrypted_credentials(id,credential_class,owner_kind,owner_id,connector_id,credential_owner_id,key_id,key_version,algorithm,nonce,ciphertext,auth_tag,revision,created_at,updated_at)
           VALUES('outline_bot','PROVIDER','CONNECTOR','outline_1','outline_1','bot','k',1,'AES_256_GCM',zeroblob(12),X'01',zeroblob(16),1,0,0),
-                ('outline_member','MEMBER_OAUTH','MEMBER','member_1','outline_1','member_1','k',1,'AES_256_GCM',zeroblob(12),X'02',zeroblob(16),1,0,0);
+                ('outline_member','MEMBER_OAUTH','MEMBER','member_1','outline_1','member_1','k',1,'AES_256_GCM',zeroblob(12),X'02',zeroblob(16),1,0,0),
+                ('outline_member_2','MEMBER_OAUTH','MEMBER','member_2','outline_1','member_2','k',1,'AES_256_GCM',zeroblob(12),X'03',zeroblob(16),1,0,0);
         INSERT INTO outline_connections(connector_id,origin,workspace_id,bot_provider_user_id,bot_credential_id,oauth_client_id,oauth_metadata_digest,revision,created_at,updated_at)
           VALUES('outline_1','https://outline.test','workspace','bot-user','outline_bot','client','${"a".repeat(64)}',1,0,0);
         INSERT INTO outline_member_oauth_grants(id,connector_id,member_id,outline_user_id,credential_id,granted_scope_digest,access_expires_at,refresh_status,credential_revision,revision,created_at,updated_at)
-          VALUES('outline_grant','outline_1','member_1','member-user','outline_member','${"b".repeat(64)}',10000,'READY',1,1,0,0);
+          VALUES('outline_grant','outline_1','member_1','member-user','outline_member','${"b".repeat(64)}',10000,'READY',1,1,0,0),
+                ('outline_grant_2','outline_1','member_2','member-user-2','outline_member_2','${"c".repeat(64)}',10000,'READY',1,1,0,0);
+        INSERT INTO coordination_records(id,project_id,title,revision,created_at,updated_at)
+          VALUES('record_1','project_1','Record',1,0,0);
+        INSERT INTO agent_runs(id,coordination_record_id,project_id,state,goal,repository_id,repository_mode,
+          repository_assurance,base_origin,base_commit,base_branch,intended_branch,worktree_identity,
+          effective_configuration_id,effective_configuration_version,effective_configuration_digest,
+          dispatcher_kind,dispatcher_id,revision,created_at)
+          VALUES('run_1','record_1','project_1','QUEUED','Goal','repo_1','MUTATING','ENFORCED','EXACT','${"a".repeat(40)}','main','run-1','worktree_1','config_1',1,'${"d".repeat(64)}','MEMBER','member_1',1,0),
+                ('run_2','record_1','project_1','QUEUED','Goal','repo_1','MUTATING','ENFORCED','EXACT','${"a".repeat(40)}','main','run-2','worktree_2','config_1',1,'${"d".repeat(64)}','MEMBER','member_2',1,0);
+        INSERT INTO document_write_grants(grant_id,project_id,connector_id,run_id,grantor_member_id,
+          connector_epoch,grant_revision,created_at,expires_at)
+          VALUES('write_1','project_1','outline_1','run_1','member_1',1,1,0,10000),
+                ('write_2','project_1','outline_1','run_2','member_2',1,1,0,10000);
+        INSERT INTO additional_document_requests(request_id,grant_id,document_id,requested_by_run_id,status,request_revision,created_at)
+          VALUES('request_1','write_1','doc_1','run_1','PENDING',1,0),
+                ('request_2','write_2','doc_2','run_2','PENDING',1,0);
       `);
       const result = await f.authority.remove({
         idempotencyKey: "remove_outline",
@@ -275,6 +289,26 @@ describe("member offboarding", () => {
           )
           .get()?.epoch,
       ).toBe(2);
+      expect(
+        f.database
+          .query<{ grant_id: string; revoked_at: number | null }, []>(
+            "SELECT grant_id,revoked_at FROM document_write_grants ORDER BY grant_id",
+          )
+          .all(),
+      ).toEqual([
+        { grant_id: "write_1", revoked_at: 1000 },
+        { grant_id: "write_2", revoked_at: null },
+      ]);
+      expect(
+        f.database
+          .query<{ request_id: string; revoked_at: number | null }, []>(
+            "SELECT request_id,revoked_at FROM additional_document_requests ORDER BY request_id",
+          )
+          .all(),
+      ).toEqual([
+        { request_id: "request_1", revoked_at: 1000 },
+        { request_id: "request_2", revoked_at: null },
+      ]);
       expect(
         f.database
           .query<{ connector_epoch: number }, []>(

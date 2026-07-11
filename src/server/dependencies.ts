@@ -34,8 +34,14 @@ export type ServerResources = Readonly<{
   outline?: NonNullable<FoundationHttpDependencies["outline"]> &
     Readonly<{
       mcp: Readonly<{
-        search(input: unknown): Promise<unknown>;
-        read(input: unknown): Promise<unknown>;
+        search(
+          actor: import("../shared/contracts/actors.ts").MemberActor,
+          input: unknown,
+        ): Promise<unknown>;
+        read(
+          actor: import("../shared/contracts/actors.ts").MemberActor,
+          input: unknown,
+        ): Promise<unknown>;
       }>;
     }>;
 }>;
