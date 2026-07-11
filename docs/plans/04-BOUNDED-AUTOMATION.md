@@ -8,6 +8,8 @@
 
 **Phase requirements:** `AUT-001` through `AUT-014`.
 
+**Migration range:** `0013-0015`, following Outline `0010-0012`.
+
 ## Entry gate
 
 - Foundation and GitHub coordination phases pass completely.
@@ -62,7 +64,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0012_workflows.sql` and verifier.
+- Create `src/server/db/migrations/0013_workflows.sql` and verifier.
 - Create `src/shared/contracts/{templates,workflow}.ts`.
 - Create `src/server/modules/templates/{contract,run-templates,versioning,bindings}.ts`.
 - Create `src/server/adapters/http/routes/templates.ts` and MCP tools `src/server/adapters/mcp/template-tools.ts`.
@@ -105,7 +107,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0013_workflow_execution.sql` and verifier.
+- Create `src/server/db/migrations/0014_workflow_execution.sql` and verifier.
 - Create `src/server/modules/templates/workflow-presets.ts`.
 - Create `src/server/modules/workflows/{workflow-engine,scheduler,idempotency,deadlines}.ts`.
 - Create `src/server/modules/workflows/step-run-factory.ts`.
@@ -164,7 +166,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0014_gates_telemetry.sql` and verifier.
+- Create `src/server/db/migrations/0015_gates_telemetry.sql` and verifier.
 - Create `src/shared/contracts/{gates,stop-policies}.ts`.
 - Create `src/server/modules/gates/{contract,manifest,fingerprints,evaluations}.ts`.
 - Create `src/runner/gates/{manifest-loader,local-evaluator}.ts`.

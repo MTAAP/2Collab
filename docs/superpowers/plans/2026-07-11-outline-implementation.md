@@ -13,6 +13,8 @@ source-reference, and `ExecutionAuthority` primitives.
 
 **Tech Stack:** Bun 1.3.10, TypeScript 7.0.2, Hono 4.12.29, React 19.2.7, Zod 4.4.3, `bun:sqlite`, OAuth 2.0 with PKCE, Bun test, Playwright 1.61.1, Outline API.
 
+**Migration reconciliation:** Foundation corrective migration `0006` shifts GitHub to `0007-0009`. Outline migrations therefore occupy `0010-0012`; Automation continues from `0013`.
+
 ## Global Constraints
 
 - Use Bun 1.3.10, one root `package.json`, and one `bun.lock`; pin every dependency exactly.
@@ -34,9 +36,9 @@ source-reference, and `ExecutionAuthority` primitives.
 - `src/shared/contracts/outline.ts`: Outline references, projections, identities, scopes, reads, exact mutations, and Zod schemas.
 - `src/shared/contracts/document-grants.ts`: exact grant and additional-document request schemas.
 - `src/shared/contracts/document-proposals.ts`: authored patches, conflict references, decisions, and working-document dispositions.
-- `src/server/db/migrations/0009_outline.sql`: bot connection, delegated OAuth metadata, Context Read Scopes, document references, and access provenance.
-- `src/server/db/migrations/0010_outline_grants.sql`: exact write grants and additional-document requests.
-- `src/server/db/migrations/0011_outline_proposals.sql`: proposals, conflicts, and working-document references/dispositions without fetched bodies.
+- `src/server/db/migrations/0010_outline.sql`: bot connection, delegated OAuth metadata, Context Read Scopes, document references, and access provenance.
+- `src/server/db/migrations/0011_outline_grants.sql`: exact write grants and additional-document requests.
+- `src/server/db/migrations/0012_outline_proposals.sql`: proposals, conflicts, and working-document references/dispositions without fetched bodies.
 - `src/server/adapters/outline/{contract,oauth-provider-contract}.ts`: body-safe content and internal OAuth provider ports.
 - `src/server/adapters/outline/{oauth,bot-auth,client,scope,search,documents,human-editing,revision-cas}.ts`: production provider adapter.
 - `src/server/modules/documents/{human-editing,write-grants,additional-document-requests,agent-operations,proposals,conflicts,working-documents,revocation}.ts`: document collaboration policy over Foundation authority.
@@ -55,13 +57,13 @@ source-reference, and `ExecutionAuthority` primitives.
 - Create: `src/shared/contracts/outline.ts`
 - Create: `src/server/adapters/outline/{contract,oauth-provider-contract}.ts`
 - Create: `src/server/modules/connectors/outline-credentials.ts`
-- Create: `src/server/db/migrations/0009_outline.sql`
-- Create: `src/server/db/migrations/0009_outline.verify.ts`
+- Create: `src/server/db/migrations/0010_outline.sql`
+- Create: `src/server/db/migrations/0010_outline.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
 - Test: `tests/unit/outline/contracts.test.ts`
-- Test: `tests/integration/outline/migration-0009.test.ts`
+- Test: `tests/integration/outline/migration-0010.test.ts`
 - Test: `tests/integration/outline/{oauth-transaction,projection-storage-safety}.test.ts`
 - Test: `tests/drills/backup-restore.test.ts`
 
@@ -257,10 +259,10 @@ patches are deliberate bounded deltas and cannot contain a disguised full fetche
 
 - [ ] **Step 5: Run GREEN**
 
-Run: `bun test tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0009.test.ts tests/integration/outline/oauth-transaction.test.ts tests/integration/outline/projection-storage-safety.test.ts src/server/db/migrations/0009_outline.verify.ts tests/drills/backup-restore.test.ts && bun run typecheck`
+Run: `bun test tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0010.test.ts tests/integration/outline/oauth-transaction.test.ts tests/integration/outline/projection-storage-safety.test.ts src/server/db/migrations/0010_outline.verify.ts tests/drills/backup-restore.test.ts && bun run typecheck`
 
-Expected: PASS and exit 0. Verify empty-to-v9 and v8-to-v9 upgrade, rollback/history/integrity/FKs,
-preserved Foundation/GitHub data, and authenticated schema-8 backup restore through isolated staged
+Expected: PASS and exit 0. Verify empty-to-v10 and v9-to-v10 upgrade, rollback/history/integrity/FKs,
+preserved Foundation/GitHub data, and authenticated schema-9 backup restore through isolated staged
 migration. Restore advances the Outline connector epoch, marks it `REVIEW_REQUIRED`, invalidates member
 OAuth/bot operation authorizations, holds pending writes, and never resumes an old grant/token. Body
 canaries are absent from projections, idempotency, intents, audit, SQLite/WAL/SHM and restored logical
@@ -269,7 +271,7 @@ backup data.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/outline.ts src/server/adapters/outline/contract.ts src/server/adapters/outline/oauth-provider-contract.ts src/server/modules/connectors/outline-credentials.ts src/server/db/migrations/0009_outline.sql src/server/db/migrations/0009_outline.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0009.test.ts tests/integration/outline/oauth-transaction.test.ts tests/integration/outline/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts
+git add src/shared/contracts/outline.ts src/server/adapters/outline/contract.ts src/server/adapters/outline/oauth-provider-contract.ts src/server/modules/connectors/outline-credentials.ts src/server/db/migrations/0010_outline.sql src/server/db/migrations/0010_outline.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0010.test.ts tests/integration/outline/oauth-transaction.test.ts tests/integration/outline/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts
 git commit -m "feat(outline): define split-identity contracts"
 ```
 
@@ -542,8 +544,8 @@ git commit -m "feat(outline): add exact member coediting"
 **Requirements:** `OUT-005`.
 
 **Files:**
-- Create: `src/server/db/migrations/0010_outline_grants.sql`
-- Create: `src/server/db/migrations/0010_outline_grants.verify.ts`
+- Create: `src/server/db/migrations/0011_outline_grants.sql`
+- Create: `src/server/db/migrations/0011_outline_grants.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/document-grants.ts`
 - Create: `src/server/modules/documents/{write-grants,additional-document-requests,agent-operations}.ts`
@@ -656,16 +658,16 @@ document revision/digest and current fence. Revocation racing an issued proof fa
 
 - [ ] **Step 6: Run GREEN**
 
-Run: `bun test tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts src/server/db/migrations/0010_outline_grants.verify.ts tests/drills/backup-restore.test.ts && bun run typecheck`
+Run: `bun test tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts src/server/db/migrations/0011_outline_grants.verify.ts tests/drills/backup-restore.test.ts && bun run typecheck`
 
-Expected: PASS; requests confer no authority until an explicit member decision. Verify v9-to-v10,
+Expected: PASS; requests confer no authority until an explicit member decision. Verify v10-to-v11,
 rollback/history/FKs/integrity, and staged authenticated restore; restore revokes grants/reserved
 operations, requires connector/OAuth/bot review, and never resumes old grant work.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0010_outline_grants.sql src/server/db/migrations/0010_outline_grants.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/shared/contracts/document-grants.ts src/server/modules/documents/write-grants.ts src/server/modules/documents/additional-document-requests.ts src/server/modules/documents/agent-operations.ts src/server/adapters/mcp/document-tools.ts tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts tests/drills/backup-restore.test.ts
+git add src/server/db/migrations/0011_outline_grants.sql src/server/db/migrations/0011_outline_grants.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/shared/contracts/document-grants.ts src/server/modules/documents/write-grants.ts src/server/modules/documents/additional-document-requests.ts src/server/modules/documents/agent-operations.ts src/server/adapters/mcp/document-tools.ts tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts tests/drills/backup-restore.test.ts
 git commit -m "feat(outline): authorize exact agent document grants"
 ```
 
@@ -674,8 +676,8 @@ git commit -m "feat(outline): authorize exact agent document grants"
 **Requirements:** `OUT-006`, `OUT-007`.
 
 **Files:**
-- Create: `src/server/db/migrations/0011_outline_proposals.sql`
-- Create: `src/server/db/migrations/0011_outline_proposals.verify.ts`
+- Create: `src/server/db/migrations/0012_outline_proposals.sql`
+- Create: `src/server/db/migrations/0012_outline_proposals.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
 - Create: `src/shared/contracts/document-proposals.ts`
@@ -807,16 +809,16 @@ scope/revision and lifecycle CAS.
 
 - [ ] **Step 6: Run GREEN and browser proof**
 
-Run: `bun test tests/unit/documents/proposals.test.ts tests/integration/outline/{proposal-conflict,working-document}.test.ts src/server/db/migrations/0011_outline_proposals.verify.ts tests/drills/backup-restore.test.ts && bun run test:e2e:run outline-proposals.spec.ts`
+Run: `bun test tests/unit/documents/proposals.test.ts tests/integration/outline/{proposal-conflict,working-document}.test.ts src/server/db/migrations/0012_outline_proposals.verify.ts tests/drills/backup-restore.test.ts && bun run test:e2e:run outline-proposals.spec.ts`
 
 Expected: PASS; no-action disposition is `KEEP`, and Promote/Archive require separate authorization.
-Verify v10-to-v11 and older supported backup restore through v11; bounded immutable proposals/history
+Verify v11-to-v12 and older supported backup restore through v12; bounded immutable proposals/history
 survive, while restore never auto-applies a proposal or resumes a working-document mutation.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0011_outline_proposals.sql src/server/db/migrations/0011_outline_proposals.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/shared/contracts/document-proposals.ts src/server/modules/documents/proposals.ts src/server/modules/documents/conflicts.ts src/server/modules/documents/working-documents.ts src/web/features/outline/proposals src/web/features/outline/working-documents tests/unit/documents/proposals.test.ts tests/integration/outline/proposal-conflict.test.ts tests/integration/outline/working-document.test.ts tests/drills/backup-restore.test.ts tests/e2e/outline-proposals.spec.ts
+git add src/server/db/migrations/0012_outline_proposals.sql src/server/db/migrations/0012_outline_proposals.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/shared/contracts/document-proposals.ts src/server/modules/documents/proposals.ts src/server/modules/documents/conflicts.ts src/server/modules/documents/working-documents.ts src/web/features/outline/proposals src/web/features/outline/working-documents tests/unit/documents/proposals.test.ts tests/integration/outline/proposal-conflict.test.ts tests/integration/outline/working-document.test.ts tests/drills/backup-restore.test.ts tests/e2e/outline-proposals.spec.ts
 git commit -m "feat(outline): preserve authored conflict proposals"
 ```
 

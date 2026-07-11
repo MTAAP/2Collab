@@ -10,6 +10,8 @@
 
 **Tech Stack:** Bun 1.3+, TypeScript 7, Hono 4, React 19, Vite 8, React Flow 12, Zod 4, `bun:sqlite`, WebAuthn, Bun test, Playwright, Docker Compose.
 
+**Migration reconciliation:** The immutable Foundation history includes corrective migration `0006_foundation_configuration_corrections`. The remaining phase ranges are therefore GitHub `0007-0009`, Outline `0010-0012`, and Automation `0013-0015`.
+
 ## Global constraints
 
 - The [Acceptance Matrix](../acceptance/ACCEPTANCE-MATRIX.md) IDs are stable. Never renumber an accepted requirement; mark supersession explicitly.
@@ -108,10 +110,10 @@ The full authority command types live in `src/shared/contracts/execution-authori
 
 | Phase | Migration files | Owned schema groups |
 |---|---|---|
-| Foundation | `src/server/db/migrations/0001_foundation.sql` through `0005_foundation_operations.sql` | deployment, members, credentials, sessions, upgrade-safe Projects/base branches, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
-| GitHub | `src/server/db/migrations/0006_github.sql` through `0008_github_attention.sql` | connector installations/scopes, source projections, canonical aliases/source links, mutation provenance, collision summaries, inbox |
-| Outline | `src/server/db/migrations/0009_outline.sql` through `0011_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
-| Automation | `src/server/db/migrations/0012_workflows.sql` through `0014_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
+| Foundation | `src/server/db/migrations/0001_foundation.sql` through corrective `0006_foundation_configuration_corrections.sql` | deployment, members, credentials, sessions, upgrade-safe Projects/base branches, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts and causes, permits, authority sessions, checkpoints, evidence, immutable configuration snapshots, presets, audit, outbox, backup metadata |
+| GitHub | `src/server/db/migrations/0007_github.sql` through `0009_github_attention.sql` | connector installations/scopes, source projections, canonical aliases/source links, mutation provenance, collision summaries, inbox |
+| Outline | `src/server/db/migrations/0010_outline.sql` through `0012_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
+| Automation | `src/server/db/migrations/0013_workflows.sql` through `0015_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
 
 Every migration has an adjacent `*.verify.ts` integration test that opens the previous schema fixture, migrates forward, verifies invariants, and proves backup/restore compatibility. Destructive rollback is never improvised; rollback means restore the pre-migration authenticated backup and run the recorded schema compatibility check.
 

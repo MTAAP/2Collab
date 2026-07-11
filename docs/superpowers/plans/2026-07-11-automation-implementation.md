@@ -8,6 +8,8 @@
 
 **Tech Stack:** Bun 1.3.10, TypeScript 7.0.2, Hono 4.12.29, React 19.2.7, Vite 8.1.4, `@xyflow/react` 12.11.2, Zod 4.4.3, `bun:sqlite`, Bun test, Playwright 1.61.1, YAML 2.9.0, Docker Compose.
 
+**Migration reconciliation:** Foundation corrective migration `0006` shifts GitHub to `0007-0009` and Outline to `0010-0012`. Automation migrations therefore occupy `0013-0015`.
+
 ## Global Constraints
 
 - The Product Spec remains canonical; accepted ADRs and the reconciliation design govern implementation shape only when consistent with it.
@@ -38,9 +40,9 @@
 | `src/shared/contracts/plan-artifacts.ts` | Bounded portable Plan Artifact |
 | `src/shared/contracts/gates.ts` | Gate manifest summaries, fingerprints, evaluations |
 | `src/shared/contracts/stop-policies.ts` | Three-valued Stop Policy trees and evaluation evidence |
-| `src/server/db/migrations/0012_workflows.sql` | Run templates, workflow templates, layouts, drafts, presets |
-| `src/server/db/migrations/0013_workflow_execution.sql` | Executions, step occurrences, launch intents, decisions |
-| `src/server/db/migrations/0014_gates_telemetry.sql` | Gate approvals/evaluations, loop state, workflow usage |
+| `src/server/db/migrations/0013_workflows.sql` | Run templates, workflow templates, layouts, drafts, presets |
+| `src/server/db/migrations/0014_workflow_execution.sql` | Executions, step occurrences, launch intents, decisions |
+| `src/server/db/migrations/0015_gates_telemetry.sql` | Gate approvals/evaluations, loop state, workflow usage |
 | `src/server/modules/templates/` | Template publication, sanitization, versioning, bindings |
 | `src/server/modules/workflows/` | Definition validation, drafts/YAML, engine, scheduling, joins, decisions, planning, loops |
 | `src/server/modules/gates/` | Gate coordination and exact-revision evidence |
@@ -80,11 +82,11 @@ export interface GitHubPort extends SourceConnector<GitHubReference, GitHubProje
 
 ---
 
-### Task 1: Portable Team Run Templates and Migration 0012 (`AUT-001`)
+### Task 1: Portable Team Run Templates and Migration 0013 (`AUT-001`)
 
 **Files:**
-- Create: `src/server/db/migrations/0012_workflows.sql`
-- Create: `src/server/db/migrations/0012_workflows.verify.ts`
+- Create: `src/server/db/migrations/0013_workflows.sql`
+- Create: `src/server/db/migrations/0013_workflows.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/templates.ts`
 - Create: `src/server/modules/templates/{contract,run-templates,versioning}.ts`
@@ -226,14 +228,14 @@ CREATE TABLE workflow_canvas_layouts (
 
 - [ ] **Step 5: Run GREEN and migration verification**
 
-Run: `bun test tests/unit/templates/portable-template.test.ts tests/integration/templates/run-templates.test.ts src/server/db/migrations/0012_workflows.verify.ts && bun run typecheck && bun run lint`
+Run: `bun test tests/unit/templates/portable-template.test.ts tests/integration/templates/run-templates.test.ts src/server/db/migrations/0013_workflows.verify.ts && bun run typecheck && bun run lint`
 
 Expected: PASS; verifier proves existing versions remain byte-identical after publishing a new version.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/templates.ts src/server/db/migrations/0012_workflows.sql src/server/db/migrations/0012_workflows.verify.ts src/server/db/migrate.ts src/server/modules/templates tests/unit/templates tests/integration/templates
+git add src/shared/contracts/templates.ts src/server/db/migrations/0013_workflows.sql src/server/db/migrations/0013_workflows.verify.ts src/server/db/migrate.ts src/server/modules/templates tests/unit/templates tests/integration/templates
 git commit -m "feat(automation): add portable run templates"
 ```
 
@@ -416,7 +418,7 @@ git commit -m "feat(automation): validate bounded workflow definitions"
 **Files:**
 - Modify: `package.json`
 - Modify: `bun.lock`
-- Modify: `src/server/db/migrations/0012_workflows.sql`
+- Modify: `src/server/db/migrations/0013_workflows.sql`
 - Create: `src/server/modules/workflows/{drafts,yaml}.ts`
 - Create: `src/server/adapters/http/routes/workflows.ts`
 - Create: `src/server/adapters/mcp/workflow-tools.ts`
@@ -522,14 +524,14 @@ Expected: PASS; keyboard-only authoring, undo/redo, stale duplication, YAML roun
 - [ ] **Step 7: Commit**
 
 ```bash
-git add package.json bun.lock src/server/db/migrations/0012_workflows.sql src/server/modules/workflows/drafts.ts src/server/modules/workflows/yaml.ts src/server/adapters/http/routes/workflows.ts src/server/adapters/mcp/workflow-tools.ts src/cli/commands/workflows.ts src/web/features/workflow-studio tests/integration/workflows/drafts.test.ts tests/protocol/workflow-authoring-parity.test.ts tests/e2e/workflow-authoring.spec.ts
+git add package.json bun.lock src/server/db/migrations/0013_workflows.sql src/server/modules/workflows/drafts.ts src/server/modules/workflows/yaml.ts src/server/adapters/http/routes/workflows.ts src/server/adapters/mcp/workflow-tools.ts src/cli/commands/workflows.ts src/web/features/workflow-studio tests/integration/workflows/drafts.test.ts tests/protocol/workflow-authoring-parity.test.ts tests/e2e/workflow-authoring.spec.ts
 git commit -m "feat(automation): add accessible workflow authoring"
 ```
 
 ### Task 5: Personal Workflow Presets and Exact Bindings (`AUT-004`)
 
 **Files:**
-- Modify: `src/server/db/migrations/0012_workflows.sql`
+- Modify: `src/server/db/migrations/0013_workflows.sql`
 - Create: `src/server/modules/templates/{bindings,workflow-presets}.ts`
 - Create: `src/server/adapters/http/routes/templates.ts`
 - Create: `src/server/adapters/mcp/template-tools.ts`
@@ -597,15 +599,15 @@ Expected: PASS with distinct runtime/model/runner/host/mode bindings and no sile
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0012_workflows.sql src/server/modules/templates src/server/adapters/http/routes/templates.ts src/server/adapters/mcp/template-tools.ts src/cli/commands/templates.ts src/web/features/templates tests/integration/workflows/bindings.test.ts tests/protocol/template-surface-parity.test.ts
+git add src/server/db/migrations/0013_workflows.sql src/server/modules/templates src/server/adapters/http/routes/templates.ts src/server/adapters/mcp/template-tools.ts src/cli/commands/templates.ts src/web/features/templates tests/integration/workflows/bindings.test.ts tests/protocol/template-surface-parity.test.ts
 git commit -m "feat(automation): bind personal workflow execution"
 ```
 
-### Task 6: Durable Idempotent Workflow Engine and Migration 0013 (`AUT-005`)
+### Task 6: Durable Idempotent Workflow Engine and Migration 0014 (`AUT-005`)
 
 **Files:**
-- Create: `src/server/db/migrations/0013_workflow_execution.sql`
-- Create: `src/server/db/migrations/0013_workflow_execution.verify.ts`
+- Create: `src/server/db/migrations/0014_workflow_execution.sql`
+- Create: `src/server/db/migrations/0014_workflow_execution.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Create: `src/server/modules/workflows/{contract,workflow-engine,scheduler,idempotency,step-run-factory}.ts`
 - Test: `tests/integration/workflows/{execution,idempotency,restart}.test.ts`
@@ -700,14 +702,14 @@ export async function dispatchStep(intent: WorkflowLaunchIntent, authority: Exec
 
 - [ ] **Step 5: Run GREEN and migration verifier**
 
-Run: `bun test tests/integration/workflows/execution.test.ts tests/integration/workflows/idempotency.test.ts tests/integration/workflows/restart.test.ts src/server/db/migrations/0013_workflow_execution.verify.ts && bun run typecheck && bun run lint`
+Run: `bun test tests/integration/workflows/execution.test.ts tests/integration/workflows/idempotency.test.ts tests/integration/workflows/restart.test.ts src/server/db/migrations/0014_workflow_execution.verify.ts && bun run typecheck && bun run lint`
 
 Expected: PASS; one transition intent and at most one Agent Run exist per step occurrence.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0013_workflow_execution.sql src/server/db/migrations/0013_workflow_execution.verify.ts src/server/db/migrate.ts src/server/modules/workflows tests/integration/workflows
+git add src/server/db/migrations/0014_workflow_execution.sql src/server/db/migrations/0014_workflow_execution.verify.ts src/server/db/migrate.ts src/server/modules/workflows tests/integration/workflows
 git commit -m "feat(automation): schedule workflows durably"
 ```
 
@@ -780,7 +782,7 @@ git commit -m "feat(automation): add typed parallel joins"
 ### Task 8: Durable Human Decisions With No Parked Process (`AUT-007`)
 
 **Files:**
-- Modify: `src/server/db/migrations/0013_workflow_execution.sql`
+- Modify: `src/server/db/migrations/0014_workflow_execution.sql`
 - Create: `src/server/modules/workflows/human-decisions.ts`
 - Create: `src/web/features/workflows/decision-panel.tsx`
 - Test: `tests/integration/workflows/human-decision.test.ts`
@@ -844,7 +846,7 @@ Expected: PASS; duplicate decisions do not launch twice and no process remains a
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0013_workflow_execution.sql src/server/modules/workflows/human-decisions.ts src/web/features/workflows/decision-panel.tsx tests/integration/workflows/human-decision.test.ts tests/drills/workflow-no-parked-process.test.ts
+git add src/server/db/migrations/0014_workflow_execution.sql src/server/modules/workflows/human-decisions.ts src/web/features/workflows/decision-panel.tsx tests/integration/workflows/human-decision.test.ts tests/drills/workflow-no-parked-process.test.ts
 git commit -m "feat(automation): persist human workflow decisions"
 ```
 
@@ -904,8 +906,8 @@ git commit -m "feat(automation): route typed review results"
 ### Task 10: Trusted-Base Gate Manifests and Exact Fingerprints (`AUT-009`)
 
 **Files:**
-- Create: `src/server/db/migrations/0014_gates_telemetry.sql`
-- Create: `src/server/db/migrations/0014_gates_telemetry.verify.ts`
+- Create: `src/server/db/migrations/0015_gates_telemetry.sql`
+- Create: `src/server/db/migrations/0015_gates_telemetry.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/gates.ts`
 - Create: `src/server/modules/gates/{contract,manifest,fingerprints,evaluations}.ts`
@@ -993,21 +995,21 @@ export async function evaluateLocalGate(gate: Extract<ProjectGate, { kind: "LOCA
 
 - [ ] **Step 5: Run GREEN and migration verifier**
 
-Run: `bun test tests/unit/gates/fingerprint.test.ts tests/integration/gates/evaluations.test.ts tests/runner/gates/local-evaluator.test.ts src/server/db/migrations/0014_gates_telemetry.verify.ts && bun run typecheck && bun run lint`
+Run: `bun test tests/unit/gates/fingerprint.test.ts tests/integration/gates/evaluations.test.ts tests/runner/gates/local-evaluator.test.ts src/server/db/migrations/0015_gates_telemetry.verify.ts && bun run typecheck && bun run lint`
 
 Expected: PASS for trusted base and exact SHA; self-modified manifests, transmitted commands, stale fingerprints, tracked mutation, timeout, cancellation, and replay fail.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0014_gates_telemetry.sql src/server/db/migrations/0014_gates_telemetry.verify.ts src/server/db/migrate.ts src/shared/contracts/gates.ts src/server/modules/gates src/runner/gates tests/unit/gates tests/integration/gates tests/runner/gates
+git add src/server/db/migrations/0015_gates_telemetry.sql src/server/db/migrations/0015_gates_telemetry.verify.ts src/server/db/migrate.ts src/shared/contracts/gates.ts src/server/modules/gates src/runner/gates tests/unit/gates tests/integration/gates tests/runner/gates
 git commit -m "feat(automation): enforce trusted repository gates"
 ```
 
 ### Task 11: Managed Loops and Three-Valued Stop Policies (`AUT-010`)
 
 **Files:**
-- Modify: `src/server/db/migrations/0014_gates_telemetry.sql`
+- Modify: `src/server/db/migrations/0015_gates_telemetry.sql`
 - Create: `src/shared/contracts/stop-policies.ts`
 - Create: `src/server/modules/workflows/{managed-loops,stop-policy}.ts`
 - Test: `tests/unit/workflows/stop-policy.test.ts`
@@ -1087,7 +1089,7 @@ Expected: PASS for TRUE/FALSE/UNKNOWN, consecutive matches, achieved outcome, fa
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0014_gates_telemetry.sql src/shared/contracts/stop-policies.ts src/server/modules/workflows/managed-loops.ts src/server/modules/workflows/stop-policy.ts tests/unit/workflows/stop-policy.test.ts tests/integration/workflows/managed-loop.test.ts
+git add src/server/db/migrations/0015_gates_telemetry.sql src/shared/contracts/stop-policies.ts src/server/modules/workflows/managed-loops.ts src/server/modules/workflows/stop-policy.ts tests/unit/workflows/stop-policy.test.ts tests/integration/workflows/managed-loop.test.ts
 git commit -m "feat(automation): bound managed workflow loops"
 ```
 
@@ -1224,7 +1226,7 @@ git commit -m "feat(automation): add portable planning artifacts"
 ### Task 14: Partial Workflow Usage Telemetry (`AUT-013`)
 
 **Files:**
-- Modify: `src/server/db/migrations/0014_gates_telemetry.sql`
+- Modify: `src/server/db/migrations/0015_gates_telemetry.sql`
 - Create: `src/server/modules/telemetry/workflow-usage.ts`
 - Test: `tests/unit/workflows/usage.test.ts`
 - Test: `tests/integration/workflows/usage.test.ts`
@@ -1278,7 +1280,7 @@ Expected: PASS; unknown is never zero, incompatible provider categories are not 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0014_gates_telemetry.sql src/server/modules/telemetry/workflow-usage.ts tests/unit/workflows/usage.test.ts tests/integration/workflows/usage.test.ts
+git add src/server/db/migrations/0015_gates_telemetry.sql src/server/modules/telemetry/workflow-usage.ts tests/unit/workflows/usage.test.ts tests/integration/workflows/usage.test.ts
 git commit -m "feat(automation): aggregate partial workflow usage"
 ```
 

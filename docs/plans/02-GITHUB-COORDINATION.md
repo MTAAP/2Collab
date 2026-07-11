@@ -8,6 +8,8 @@
 
 **Phase requirements:** `GHB-001` through `GHB-015`.
 
+**Migration range:** `0007-0009`; Foundation corrective migration `0006` is immutable history.
+
 ## Entry gate
 
 - Foundation requirements `FND-001`–`FND-019` pass.
@@ -39,7 +41,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0006_github.sql` and verifier.
+- Create `src/server/db/migrations/0007_github.sql` and verifier.
 - Create `src/shared/contracts/github.ts`.
 - Create `src/server/adapters/github/{contract,app-auth,client,scope,webhooks,reconciliation}.ts`.
 - Extend the Foundation `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts` primitives only through their existing typed interfaces.
@@ -83,7 +85,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0007_coordination_source_mapping.sql` and verifier; Foundation already owns Coordination Records and mutation guards.
+- Create `src/server/db/migrations/0008_coordination_source_mapping.sql` and verifier; Foundation already owns Coordination Records and mutation guards.
 - Create `src/shared/contracts/coordination-records.ts`.
 - Extend `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts` with provider canonical mapping, late linking, and audited coalescing.
 - Create `src/server/modules/github-coordination/{assignment,delegation,delivery}.ts`.
@@ -126,7 +128,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0008_github_attention.sql` and verifier.
+- Create `src/server/db/migrations/0009_github_attention.sql` and verifier.
 - Create `src/server/modules/inbox/{events,inbox,command-center}.ts`.
 - Create `src/web/features/{inbox,command-center}/`.
 - Create `tests/drills/github-scope-narrowing.test.ts`, `github-member-offboarding.test.ts`, `github-missed-webhook.test.ts`.

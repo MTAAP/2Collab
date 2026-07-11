@@ -8,6 +8,8 @@
 
 **Tech Stack:** Bun 1.3.10, TypeScript 7.0.2, Hono 4.12.29, React 19.2.7, Zod 4.4.3, `bun:sqlite`, Bun test, Playwright 1.61.1, GitHub REST/GraphQL APIs.
 
+**Migration reconciliation:** Foundation corrective migration `0006_foundation_configuration_corrections` is immutable history. GitHub migrations therefore occupy `0007-0009`; Outline and Automation continue from `0010`.
+
 ## Global Constraints
 
 - Use Bun 1.3.10, one root `package.json`, and one `bun.lock`; pin every dependency exactly.
@@ -26,9 +28,9 @@
 ## File Map
 
 - `src/shared/contracts/github.ts`: closed GitHub references, projections, mutations, webhooks, dependencies, checks, and Zod schemas.
-- `src/server/db/migrations/0006_github.sql`: installations, selected scopes, delivery deduplication, projections, and reconciliation cursors.
-- `src/server/db/migrations/0007_coordination_source_mapping.sql`: canonical source keys, aliases, link conflicts, and mutation provenance.
-- `src/server/db/migrations/0008_github_attention.sql`: GitHub attention projections and personal Inbox state.
+- `src/server/db/migrations/0007_github.sql`: installations, selected scopes, delivery deduplication, projections, and reconciliation cursors.
+- `src/server/db/migrations/0008_coordination_source_mapping.sql`: canonical source keys, aliases, link conflicts, and mutation provenance.
+- `src/server/db/migrations/0009_github_attention.sql`: GitHub attention projections and personal Inbox state.
 - `src/server/adapters/github/contract.ts`: narrow `GitHubPort` interface.
 - `src/server/adapters/github/{app-auth,client,scope,webhooks,reconciliation}.ts`: production App authentication, scope enforcement, signed ingestion, and refresh.
 - `src/server/adapters/github/{issues,pull-requests,milestones,projects,revision-cas}.ts`: explicit provider-first reads and mutations.
@@ -49,12 +51,12 @@
 **Files:**
 - Create: `src/shared/contracts/github.ts`
 - Create: `src/server/adapters/github/contract.ts`
-- Create: `src/server/db/migrations/0006_github.sql`
-- Create: `src/server/db/migrations/0006_github.verify.ts`
+- Create: `src/server/db/migrations/0007_github.sql`
+- Create: `src/server/db/migrations/0007_github.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
 - Test: `tests/unit/github/contracts.test.ts`
-- Test: `tests/integration/github/migration-0006.test.ts`
+- Test: `tests/integration/github/migration-0007.test.ts`
 - Test: `tests/integration/github/projection-storage-safety.test.ts`
 - Test: `tests/drills/backup-restore.test.ts`
 
@@ -229,7 +231,7 @@ CREATE TABLE github_reconciliation_cursors (
 ```
 
 This is the next contiguous server schema version after Foundation `0005` and is wired into
-`migrate.ts`. Verification covers empty-to-v6 and v5-to-v6 upgrades, rollback, history/integrity,
+`migrate.ts`. Verification covers empty-to-v7 and v6-to-v7 upgrades, rollback, history/integrity,
 foreign keys, bounds, scope isolation, and claimed-schema checks. Provider integer IDs are bounded
 decimal strings, never JavaScript numbers. Mutable logins/names are metadata; immutable IDs/node IDs
 are identity. Installation access tokens are never persisted. The App private key and webhook secret
@@ -264,17 +266,17 @@ digest.
 
 - [ ] **Step 5: Run GREEN and migration verification**
 
-Run: `bun test tests/unit/github/contracts.test.ts tests/integration/github/migration-0006.test.ts && bun run typecheck`
+Run: `bun test tests/unit/github/contracts.test.ts tests/integration/github/migration-0007.test.ts && bun run typecheck`
 
-Also run: `bun test src/server/db/migrations/0006_github.verify.ts tests/integration/github/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts`.
+Also run: `bun test src/server/db/migrations/0007_github.verify.ts tests/integration/github/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts`.
 
-Expected: PASS and exit 0; schema-5 authenticated backups restore through isolated staging to schema
-6, while future/gapped/digest-mismatched backups fail before promotion.
+Expected: PASS and exit 0; schema-6 authenticated backups restore through isolated staging to schema
+7, while future/gapped/digest-mismatched backups fail before promotion.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/github.ts src/server/adapters/github/contract.ts src/server/db/migrations/0006_github.sql src/server/db/migrations/0006_github.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts tests/unit/github/contracts.test.ts tests/integration/github/migration-0006.test.ts tests/integration/github/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts
+git add src/shared/contracts/github.ts src/server/adapters/github/contract.ts src/server/db/migrations/0007_github.sql src/server/db/migrations/0007_github.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts tests/unit/github/contracts.test.ts tests/integration/github/migration-0007.test.ts tests/integration/github/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts
 git commit -m "feat(github): define scoped connector contracts"
 ```
 
@@ -580,8 +582,8 @@ git commit -m "feat(github): add provider-first planning mutations"
 **Requirements:** `GHB-006`, `GHB-007`, `GHB-008`.
 
 **Files:**
-- Create: `src/server/db/migrations/0007_coordination_source_mapping.sql`
-- Create: `src/server/db/migrations/0007_coordination_source_mapping.verify.ts`
+- Create: `src/server/db/migrations/0008_coordination_source_mapping.sql`
+- Create: `src/server/db/migrations/0008_coordination_source_mapping.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
 - Modify: `src/server/modules/coordination-records/{canonical-key,source-links}.ts`
@@ -644,7 +646,7 @@ CREATE TABLE coordination_record_aliases (
 ) STRICT;
 ```
 
-Migration `0007` extends rather than recreates Foundation's canonical source mapping and is wired into
+Migration `0008` extends rather than recreates Foundation's canonical source mapping and is wired into
 the contiguous migrator. Linking uses the immutable provider ID-based `source_item_id`; mutable
 owner/repository/number URLs are aliases only. Late-link races have one canonical winner under the
 Foundation unique key. Coalescing never rewrites completed run provenance and requires explicit
@@ -682,14 +684,14 @@ external closure, and reopen. Assignment and delegation remain independent resul
 
 - [ ] **Step 6: Run GREEN**
 
-Run: `bun test src/server/db/migrations/0007_coordination_source_mapping.verify.ts tests/integration/coordination-records tests/integration/github/assignment-delegation.test.ts tests/integration/github/delivery.test.ts tests/drills/backup-restore.test.ts`
+Run: `bun test src/server/db/migrations/0008_coordination_source_mapping.verify.ts tests/integration/coordination-records tests/integration/github/assignment-delegation.test.ts tests/integration/github/delivery.test.ts tests/drills/backup-restore.test.ts`
 
 Expected: PASS; partial successes remain independently retryable and merged/open remains visible.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0007_coordination_source_mapping.sql src/server/db/migrations/0007_coordination_source_mapping.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/server/modules/coordination-records src/server/modules/github-coordination/assignment-delegation.ts src/server/modules/github-coordination/delivery.ts src/server/adapters/http/routes/coordination-records.ts tests/integration/coordination-records tests/integration/github/assignment-delegation.test.ts tests/integration/github/delivery.test.ts tests/drills/backup-restore.test.ts
+git add src/server/db/migrations/0008_coordination_source_mapping.sql src/server/db/migrations/0008_coordination_source_mapping.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/server/modules/coordination-records src/server/modules/github-coordination/assignment-delegation.ts src/server/modules/github-coordination/delivery.ts src/server/adapters/http/routes/coordination-records.ts tests/integration/coordination-records tests/integration/github/assignment-delegation.test.ts tests/integration/github/delivery.test.ts tests/drills/backup-restore.test.ts
 git commit -m "feat(github): link canonical coordination delivery"
 ```
 
@@ -781,8 +783,8 @@ git commit -m "feat(github): add bounded collision and check evidence"
 **Requirements:** `GHB-013`, `GHB-014`.
 
 **Files:**
-- Create: `src/server/db/migrations/0008_github_attention.sql`
-- Create: `src/server/db/migrations/0008_github_attention.verify.ts`
+- Create: `src/server/db/migrations/0009_github_attention.sql`
+- Create: `src/server/db/migrations/0009_github_attention.verify.ts`
 - Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/operations/{backup,restore}.ts`
 - Create: `src/server/modules/inbox/{github-events,inbox,command-center}.ts`
@@ -864,14 +866,14 @@ startup-resumable; crash after epoch commit before notification never restores a
 
 - [ ] **Step 5: Run GREEN and browser verification**
 
-Run: `bun test src/server/db/migrations/0008_github_attention.verify.ts tests/drills/github-scope-narrowing.test.ts tests/drills/github-member-offboarding.test.ts tests/integration/inbox/github-attention.test.ts tests/drills/backup-restore.test.ts && bun run test:e2e:run github-attention.spec.ts`
+Run: `bun test src/server/db/migrations/0009_github_attention.verify.ts tests/drills/github-scope-narrowing.test.ts tests/drills/github-member-offboarding.test.ts tests/integration/inbox/github-attention.test.ts tests/drills/backup-restore.test.ts && bun run test:e2e:run github-attention.spec.ts`
 
 Expected: PASS; removed authority fails immediately and cards expose no drag lifecycle mutation.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0008_github_attention.sql src/server/db/migrations/0008_github_attention.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/server/modules/inbox src/web/features/inbox src/web/features/command-center src/web/app.tsx tests/drills/github-scope-narrowing.test.ts tests/drills/github-member-offboarding.test.ts tests/integration/inbox/github-attention.test.ts tests/drills/backup-restore.test.ts tests/e2e/github-attention.spec.ts
+git add src/server/db/migrations/0009_github_attention.sql src/server/db/migrations/0009_github_attention.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts src/server/modules/inbox src/web/features/inbox src/web/features/command-center src/web/app.tsx tests/drills/github-scope-narrowing.test.ts tests/drills/github-member-offboarding.test.ts tests/integration/inbox/github-attention.test.ts tests/drills/backup-restore.test.ts tests/e2e/github-attention.spec.ts
 git commit -m "feat(github): project revocation and team attention"
 ```
 

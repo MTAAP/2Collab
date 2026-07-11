@@ -8,6 +8,8 @@
 
 **Phase requirements:** `OUT-001` through `OUT-010`.
 
+**Migration range:** `0010-0012`, following GitHub `0007-0009`.
+
 ## Entry gate
 
 - Foundation identity, exact-revision operation authorization, encrypted credentials, audit, backup/restore, Context Recipes, and offboarding pass.
@@ -41,7 +43,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0009_outline.sql` and verifier.
+- Create `src/server/db/migrations/0010_outline.sql` and verifier.
 - Create `src/shared/contracts/outline.ts`.
 - Create `src/server/adapters/outline/{contract,oauth,bot-auth,client,scope}.ts`.
 - Create `src/server/modules/connectors/outline-credentials.ts`.
@@ -108,7 +110,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0010_outline_grants.sql` and verifier.
+- Create `src/server/db/migrations/0011_outline_grants.sql` and verifier.
 - Create `src/shared/contracts/document-grants.ts`.
 - Create `src/server/modules/documents/{contract,write-grants,agent-operations}.ts`.
 - Create `src/server/modules/execution-authority/outline-operations.ts`.
@@ -131,7 +133,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0011_outline_proposals.sql` and verifier.
+- Create `src/server/db/migrations/0012_outline_proposals.sql` and verifier.
 - Create `src/shared/contracts/document-proposals.ts`.
 - Create `src/server/modules/documents/{proposals,conflicts,working-documents}.ts`.
 - Create `src/web/features/outline/{proposals,working-documents}/`.

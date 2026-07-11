@@ -8,6 +8,8 @@
 
 **Tech Stack:** Bun 1.3.10, TypeScript 7.0.2, Hono 4.12.29, React 19.2.7, Vite 8.1.4, Zod 4.4.3, `bun:sqlite`, `@simplewebauthn/server` 13.3.2, `@modelcontextprotocol/sdk` 1.29.0, Bun test, Playwright 1.61.1, Docker Compose.
 
+**Migration reconciliation:** The committed `0005_foundation_operations` migration is immutable. Task 11 therefore uses corrective migration `0006_foundation_configuration_corrections`; all later phase migration numbers shift by one (`GitHub 0007-0009`, `Outline 0010-0012`, `Automation 0013-0015`).
+
 ## Global Constraints
 
 - Use Bun 1.3.10 for installs, scripts, tests, builds, and local tooling; keep one root `package.json` and one `bun.lock`.
