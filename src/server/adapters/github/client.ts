@@ -66,7 +66,12 @@ export function createGitHubClient(input: GitHubClientInput): GitHubPort {
       selectedProjectIds: input.selectedProjectIds(),
       providerPermissions: input.providerPermissions(),
       requiredPermission: {
-        name: reference.kind === "PROJECT" ? "organization_projects" : "issues",
+        name:
+          reference.kind === "PROJECT"
+            ? "organization_projects"
+            : reference.kind === "PULL_REQUEST"
+              ? "pull_requests"
+              : "issues",
         level: write ? "write" : "read",
       },
       ...resource(reference),

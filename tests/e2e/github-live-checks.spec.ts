@@ -1,7 +1,5 @@
-import { test } from "@playwright/test";
-test("github-live-checks", async () => {
-  test.skip(
-    process.env.COLLAB_LIVE_GITHUB !== "1" || !process.env.COLLAB_GITHUB_APPROVAL_ID,
-    "LIVE_GITHUB_NOT_AUTHORIZED",
-  );
-});
+import { liveGitHubObligation } from "./github-live-evidence.ts";
+
+liveGitHubObligation("github-live-check-exact-sha", "CHECK_EXACT_SHA");
+liveGitHubObligation("github-live-check-failed-conclusion-blocked", "CHECK_FAILURE_BLOCKED");
+liveGitHubObligation("github-live-diff-and-collision-evidence", "DIFF_AND_COLLISION_EVIDENCE");

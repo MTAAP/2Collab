@@ -6,12 +6,19 @@ export type GitHubProjectItemInput = Readonly<{
   number?: number;
   title?: string;
 }>;
+export type GitHubProjectFieldInput = Readonly<{
+  id: string;
+  name: string;
+  dataType: string;
+  optionIds?: readonly string[];
+}>;
 export function normalizeSelectedGitHubProject(
   input: Readonly<{
     projectNodeId: string;
     title: string;
     selectedRepositoryIds: ReadonlySet<string>;
     items: readonly GitHubProjectItemInput[];
+    fields?: readonly GitHubProjectFieldInput[];
   }>,
 ): GitHubProjection {
   let supported = 0;
@@ -26,6 +33,25 @@ export function normalizeSelectedGitHubProject(
     title: input.title,
     itemCount: supported,
     unsupportedRepositoryItems: unsupported,
-    fields: [],
+    fields: (input.fields ?? []).map((field) => ({
+      id: field.id,
+      name: field.name,
+      dataType: field.dataType,
+      optionIds: [...(field.optionIds ?? [])],
+    })),
+    items: input.items.flatMap((item) =>
+      item.repositoryId && item.number && input.selectedRepositoryIds.has(item.repositoryId)
+        ? [
+            {
+              itemId: item.itemId,
+              content: {
+                kind: "ISSUE" as const,
+                repositoryId: item.repositoryId,
+                number: item.number,
+              },
+            },
+          ]
+        : [],
+    ),
   };
 }

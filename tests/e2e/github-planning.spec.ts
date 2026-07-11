@@ -25,6 +25,7 @@ test("selected GitHub planning projects remain read-only projections", async ({ 
             itemCount: 1,
             unsupportedRepositoryItems: 1,
             fields: [],
+            items: [],
           },
         ],
       }),

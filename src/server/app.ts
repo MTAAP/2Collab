@@ -12,12 +12,14 @@ import {
   type GitHubIssueRouteDependencies,
 } from "./adapters/http/routes/github-issues.ts";
 import { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
+import { createInboxRoutes } from "./adapters/http/routes/inbox.ts";
 
 type AppOptions = {
   docsRoot?: string;
   githubIssues?: GitHubIssueRouteDependencies;
   githubPlanning?: Parameters<typeof createGitHubPlanningRoutes>[0];
   githubWebhooks?: GitHubWebhookRouteDependencies;
+  inbox?: Parameters<typeof createInboxRoutes>[0];
   webRoot?: string;
 };
 
@@ -80,6 +82,7 @@ export function createApp(
   if (options.githubPlanning) {
     app.route("/", createGitHubPlanningRoutes(options.githubPlanning));
   }
+  if (options.inbox) app.route("/", createInboxRoutes(options.inbox));
 
   app.all("/api/*", (context) =>
     context.json(errorBody("NOT_FOUND", "The requested API resource does not exist."), 404),

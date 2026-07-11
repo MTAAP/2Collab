@@ -90,3 +90,116 @@ test("production REST provider uses fixed endpoints and returns bounded normaliz
   expect(JSON.stringify(created)).not.toContain("source body");
   expect(JSON.stringify(created)).not.toContain("installation-secret");
 });
+
+test("Projects paginate fields and items, refresh eligibility, and use the clear-field mutation", async () => {
+  const requests: Array<{ query: string; variables: Record<string, unknown> }> = [];
+  const provider = createGitHubRestProvider({
+    connectorId: "github_1",
+    clock: () => 1,
+    selectedRepositoryIds: () => ["101"],
+    selectedProjectIds: () => ["PVT_1"],
+    token: async () => ({ ok: true, value: "installation-secret" }),
+    repository: () => ({
+      ok: true,
+      value: { repositoryId: "101", owner: "owner", name: "repo", nodeId: "R_101" },
+    }),
+    workItemNodeId: () => ({ ok: true, value: "I_42" }),
+    fetcher: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      requests.push(body);
+      if (body.query.includes("clearProjectV2ItemFieldValue"))
+        return Response.json({
+          data: { clearProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_1" } } },
+        });
+      if (body.query.includes("ProjectFields")) {
+        const second = body.variables.after === "field_cursor";
+        return Response.json({
+          data: {
+            node: {
+              id: "PVT_1",
+              title: "Roadmap",
+              fields: {
+                nodes: second
+                  ? [{ id: "PVTF_2", name: "Notes", dataType: "TEXT" }]
+                  : [
+                      {
+                        id: "PVTF_1",
+                        name: "Status",
+                        dataType: "SINGLE_SELECT",
+                        options: [{ id: "OPT_1" }],
+                      },
+                    ],
+                pageInfo: { hasNextPage: !second, endCursor: second ? null : "field_cursor" },
+              },
+            },
+          },
+        });
+      }
+      return Response.json({
+        data: {
+          node: {
+            items: {
+              nodes: [{ id: "PVTI_1", content: { number: 42, repository: { databaseId: 101 } } }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      });
+    },
+  });
+  const projectScope = {
+    ...scope,
+    references: ["PROJECT:PVT_1"],
+    operations: ["SET_PROJECT_FIELD"],
+  };
+  const inspected = await provider.inspect(projectScope, {
+    kind: "PROJECT",
+    projectNodeId: "PVT_1",
+  });
+  if (!inspected.ok) throw new Error(inspected.error.code);
+  expect(inspected.value.value).toMatchObject({
+    kind: "PROJECT",
+    itemCount: 1,
+    fields: [{ id: "PVTF_1" }, { id: "PVTF_2" }],
+  });
+  const actionDigest = "c".repeat(64) as never;
+  const cleared = await provider.mutate(
+    {
+      kind: "CONNECTOR_OPERATION",
+      id: "authorization_2",
+      proof: "p".repeat(32),
+      projectId: projectScope.projectId,
+      connectorId: projectScope.connectorId,
+      connectorEpoch: 1,
+      reference: "PROJECT:PVT_1",
+      operation: "SET_PROJECT_FIELD",
+      actionDigest,
+      expiresAt: 100,
+    },
+    {
+      projectId: projectScope.projectId,
+      connectorId: projectScope.connectorId,
+      connectorEpoch: 1,
+      idempotencyKey: "clear_1",
+      precondition: {
+        kind: "EXACT_REVISION",
+        sourceRevision: inspected.value.sourceRevision,
+        comparableDigest: inspected.value.comparableDigest,
+      },
+      actionDigest,
+      mutation: {
+        kind: "SET_PROJECT_FIELD",
+        project: { kind: "PROJECT", projectNodeId: "PVT_1" },
+        itemId: "PVTI_1",
+        fieldId: "PVTF_1",
+        value: { kind: "CLEAR" },
+      },
+    },
+  );
+  expect(cleared.ok).toBe(true);
+  const clear = requests.find((entry) => entry.query.includes("clearProjectV2ItemFieldValue"));
+  expect(clear?.variables).toEqual({ project: "PVT_1", item: "PVTI_1", field: "PVTF_1" });
+});

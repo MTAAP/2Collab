@@ -95,6 +95,55 @@ export function coalesceCoordinationRecords(
       if (existingAlias) return failure("COORDINATION_ALIAS_CONFLICT", "REFRESH");
       database
         .query(
+          `INSERT INTO coordination_coalescing_permits(
+             project_id, alias_record_id, canonical_record_id, actor_member_id, created_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.projectId,
+          input.aliasRecordId,
+          input.canonicalRecordId,
+          input.actorMemberId,
+          input.now,
+        );
+      input.afterWrite?.("coordination_coalescing_permits");
+      database
+        .query(
+          `UPDATE coordination_source_references SET coordination_record_id = ?
+           WHERE project_id = ? AND coordination_record_id = ?`,
+        )
+        .run(input.canonicalRecordId, input.projectId, input.aliasRecordId);
+      input.afterWrite?.("coordination_source_references");
+      database
+        .query(
+          `UPDATE work_item_mutation_guards SET coordination_record_id = ?
+           WHERE coordination_record_id = ? AND run_id IN (
+             SELECT id FROM agent_runs WHERE project_id = ?
+               AND coordination_record_id = ? AND state NOT IN ('COMPLETED','FAILED','CANCELLED')
+           )`,
+        )
+        .run(input.canonicalRecordId, input.aliasRecordId, input.projectId, input.aliasRecordId);
+      input.afterWrite?.("work_item_mutation_guards");
+      database
+        .query(
+          `UPDATE mutation_guard_overrides SET coordination_record_id = ?
+           WHERE coordination_record_id = ? AND guarded_run_id IN (
+             SELECT id FROM agent_runs WHERE project_id = ?
+               AND coordination_record_id = ? AND state NOT IN ('COMPLETED','FAILED','CANCELLED')
+           )`,
+        )
+        .run(input.canonicalRecordId, input.aliasRecordId, input.projectId, input.aliasRecordId);
+      input.afterWrite?.("mutation_guard_overrides");
+      const moved = database
+        .query(
+          `UPDATE agent_runs SET coordination_record_id = ?
+           WHERE project_id = ? AND coordination_record_id = ?
+             AND state NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+        )
+        .run(input.canonicalRecordId, input.projectId, input.aliasRecordId);
+      input.afterWrite?.("agent_runs");
+      database
+        .query(
           `INSERT INTO coordination_record_aliases(project_id, alias_record_id, canonical_record_id, reason, actor_member_id, created_at) VALUES (?, ?, ?, 'AUTHORIZED_COALESCE', ?, ?)`,
         )
         .run(
@@ -105,6 +154,11 @@ export function coalesceCoordinationRecords(
           input.now,
         );
       input.afterWrite?.("coordination_record_aliases");
+      database
+        .query(
+          "DELETE FROM coordination_coalescing_permits WHERE project_id = ? AND alias_record_id = ?",
+        )
+        .run(input.projectId, input.aliasRecordId);
       const auditId = `coordination_coalesce_${input.aliasRecordId}_${input.now}`;
       database
         .query(
@@ -125,7 +179,7 @@ export function coalesceCoordinationRecords(
         value: {
           canonicalRecordId: input.canonicalRecordId,
           aliasRecordId: input.aliasRecordId,
-          movedRuns: 0,
+          movedRuns: moved.changes,
         },
       };
     });
@@ -152,4 +206,47 @@ export function canonicalCoordinationRecord(
       )
       .get(projectId, recordId)?.id ?? null
   );
+}
+
+export function recordGitHubSourceAlias(
+  database: Database,
+  input: Readonly<{
+    projectId: string;
+    connectorId: string;
+    sourceItemId: string;
+    kind: "REPOSITORY_NUMBER" | "NODE_ID" | "CANONICAL_URL";
+    alias: string;
+    observedAt: number;
+  }>,
+): Result<Readonly<{ recorded: true }>> {
+  if (input.alias.length < 1 || input.alias.length > 512)
+    return failure("GITHUB_SOURCE_ALIAS_INVALID");
+  try {
+    database
+      .query(
+        `INSERT INTO github_source_aliases(
+           project_id, connector_id, provider_alias_kind, provider_alias, source_item_id, observed_at
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_id, connector_id, provider_alias_kind, provider_alias) DO NOTHING`,
+      )
+      .run(
+        input.projectId,
+        input.connectorId,
+        input.kind,
+        input.alias,
+        input.sourceItemId,
+        input.observedAt,
+      );
+    const row = database
+      .query<{ source_item_id: string }, [string, string, string, string]>(
+        `SELECT source_item_id FROM github_source_aliases
+         WHERE project_id = ? AND connector_id = ? AND provider_alias_kind = ? AND provider_alias = ?`,
+      )
+      .get(input.projectId, input.connectorId, input.kind, input.alias);
+    return row?.source_item_id === input.sourceItemId
+      ? { ok: true, value: { recorded: true } }
+      : failure("GITHUB_SOURCE_ALIAS_CONFLICT");
+  } catch {
+    return failure("GITHUB_SOURCE_ALIAS_INVALID");
+  }
 }

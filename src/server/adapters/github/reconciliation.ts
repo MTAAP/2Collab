@@ -25,6 +25,7 @@ export async function reconcileGitHubScope(
     connectorAuthority: GitHubReconciliationAuthority;
     scope: ConnectorScope;
     cursor?: ReconciliationCursor;
+    onProgress?: (cursor: string) => void;
   }>,
 ): Promise<Result<ReconciliationSummary>> {
   let scanned = 0;
@@ -35,6 +36,7 @@ export async function reconcileGitHubScope(
     scanned += 1;
     const applied = input.connectorAuthority.reconcileSource(event.value);
     if (!applied.ok) return applied;
+    if (event.value.actionMarker) input.onProgress?.(event.value.actionMarker);
     if (applied.value.projectionRevision > 1) updated += 1;
     else unchanged += 1;
   }

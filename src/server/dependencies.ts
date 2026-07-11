@@ -22,6 +22,11 @@ import { createMcpHttpHandler } from "./adapters/mcp/http.ts";
 import type { GitHubWebhookRouteDependencies } from "./adapters/http/routes/connectors-github.ts";
 import type { GitHubIssueRouteDependencies } from "./adapters/http/routes/github-issues.ts";
 import type { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
+import type { createInboxRoutes } from "./adapters/http/routes/inbox.ts";
+import type { PublicRunOperations } from "./modules/public-surface/contract.ts";
+import type { MemberActor } from "../shared/contracts/actors.ts";
+import type { GitHubMutation, GitHubProjection } from "../shared/contracts/github.ts";
+import type { ExactRevisionMutation, Observed } from "./modules/connectors/contract.ts";
 
 export type ServerResources = Readonly<{
   docsRoot?: string;
@@ -29,7 +34,21 @@ export type ServerResources = Readonly<{
     webhooks: GitHubWebhookRouteDependencies;
     issues: GitHubIssueRouteDependencies;
     planning: Parameters<typeof createGitHubPlanningRoutes>[0];
+    mcp?: Readonly<{
+      mutate(
+        actor: MemberActor,
+        command: ExactRevisionMutation<GitHubMutation>,
+      ): Promise<Result<Observed<GitHubProjection>>>;
+    }>;
   }>;
+  inbox?: Parameters<typeof createInboxRoutes>[0];
+  foundation?: Readonly<{
+    authentication: PublicAuthenticationPort;
+    rateLimits: PublicRateLimitPort;
+    runs: PublicRunOperations;
+    mcp?: (request: Request) => Promise<Response>;
+  }>;
+  startup?: () => Promise<void> | void;
   webRoot?: string;
   outline?: NonNullable<FoundationHttpDependencies["outline"]> &
     Readonly<{
@@ -158,18 +177,22 @@ export async function createServerDependencies(
   });
 
   const configuredOrigin = environment.publicBaseUrl;
-  const authentication = notImplementedAuthentication();
-  const runs = createStubRunOperations();
+  const authentication = resources.foundation?.authentication ?? notImplementedAuthentication();
+  const rateLimits = resources.foundation?.rateLimits ?? allowAllRateLimits();
+  const runs = resources.foundation?.runs ?? createStubRunOperations();
   const dependencies: FoundationHttpDependencies = {
     configuredOrigin,
     authentication,
-    rateLimits: allowAllRateLimits(),
+    rateLimits,
     runs,
-    mcp: createMcpHttpHandler({
-      authentication,
-      runs,
-      ...(resources.outline ? { outlineMcp: resources.outline.mcp } : {}),
-    }),
+    mcp:
+      resources.foundation?.mcp ??
+      createMcpHttpHandler({
+        authentication,
+        runs,
+        ...(resources.outline ? { outlineMcp: resources.outline.mcp } : {}),
+        ...(resources.github?.mcp ? { github: resources.github.mcp } : {}),
+      }),
     ...(resources.outline ? { outline: resources.outline } : {}),
   };
   const app = createApp(dependencies, {
@@ -177,8 +200,11 @@ export async function createServerDependencies(
     githubWebhooks: resources.github?.webhooks,
     githubIssues: resources.github?.issues,
     githubPlanning: resources.github?.planning,
+    inbox: resources.inbox,
     webRoot: resources.webRoot,
   });
 
-  return createProductionServer(environment, app);
+  const server = await createProductionServer(environment, app);
+  await resources.startup?.();
+  return server;
 }

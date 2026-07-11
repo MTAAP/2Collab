@@ -25,4 +25,14 @@ test("GitHub checks bind exact repository, scope, check name, and published SHA"
     ok: false,
     error: { code: "GATE_EVALUATION_STALE" },
   });
+  expect(evaluateCheck({ ...observation, conclusion: "FAILURE" }, published)).toMatchObject({
+    ok: false,
+    error: { code: "GATE_CHECK_FAILED" },
+  });
+  expect(
+    evaluateCheck(
+      { ...observation, conclusion: "NEUTRAL" },
+      { ...published, acceptableConclusions: ["SUCCESS", "NEUTRAL"] },
+    ).ok,
+  ).toBe(true);
 });

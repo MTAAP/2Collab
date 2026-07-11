@@ -30,6 +30,8 @@ export const RUN_AUTHORITY_TRIGGERS = [
 
 const RUN_AUTHORITY_SCHEMA_SHA256 =
   "8cf9fdaf6fee7bd5998b9e63dee1e9eda400e7aa86f32edfb14d751f3d0c5539";
+const COALESCING_RUN_AUTHORITY_SCHEMA_SHA256 =
+  "37fd777c0c35fa4a67d3c8e434e62651ae85e5093f04e36cd06f82b455cefd33";
 
 const EXPECTED_COLUMNS: Readonly<Record<(typeof RUN_AUTHORITY_TABLES)[number], readonly string[]>> =
   {
@@ -219,7 +221,10 @@ export function verifyRunsAuthoritySchema(database: Database): void {
   const schemaDigest = new Bun.CryptoHasher("sha256")
     .update(JSON.stringify(canonicalObjects))
     .digest("hex");
-  if (schemaDigest !== RUN_AUTHORITY_SCHEMA_SHA256) {
+  if (
+    schemaDigest !== RUN_AUTHORITY_SCHEMA_SHA256 &&
+    !((history.at(-1) ?? 0) >= 8 && schemaDigest === COALESCING_RUN_AUTHORITY_SCHEMA_SHA256)
+  ) {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
   if (
