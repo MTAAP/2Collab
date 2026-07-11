@@ -75,7 +75,7 @@ function omission(
   return { category: candidate.category, referenceId: candidate.referenceId, reason };
 }
 
-function isRecipeValid(recipe: ContextRecipeVersion): boolean {
+function isRecipeShapeValid(recipe: ContextRecipeVersion): boolean {
   return (
     recipe.id.length > 0 &&
     recipe.id.length <= 128 &&
@@ -122,8 +122,13 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function recipeDigest(recipe: Omit<ContextRecipeVersion, "digest">): string {
+export function computeContextRecipeDigest(recipe: Omit<ContextRecipeVersion, "digest">): string {
   return createHash("sha256").update(canonical(recipe), "utf8").digest("hex");
+}
+
+function isRecipeValid(recipe: ContextRecipeVersion): boolean {
+  const { digest, ...unsigned } = recipe;
+  return isRecipeShapeValid(recipe) && digest === computeContextRecipeDigest(unsigned);
 }
 
 export function assembleBootstrapEnvelope(
@@ -189,12 +194,15 @@ export function assembleBootstrapEnvelope(
 
   const deduplicated: AuthorizedContextCandidate[] = [];
   const seenKeys = new Set<string>();
+  const seenDurableReferences = new Set<string>();
   for (const candidate of eligible) {
-    if (seenKeys.has(candidate.canonicalKey)) {
+    const durableReference = `${candidate.category}\u0000${candidate.referenceId}`;
+    if (seenKeys.has(candidate.canonicalKey) || seenDurableReferences.has(durableReference)) {
       omissions.push(omission(candidate, "DUPLICATE"));
       continue;
     }
     seenKeys.add(candidate.canonicalKey);
+    seenDurableReferences.add(durableReference);
     deduplicated.push(candidate);
   }
 
@@ -323,7 +331,7 @@ function insertRecipeVersion(
 ): void {
   const normalized = {
     ...version,
-    digest: recipeDigest({ ...version, digest: undefined } as never),
+    digest: computeContextRecipeDigest({ ...version, digest: undefined } as never),
   };
   const include = (category: ContextCategory) =>
     (normalized.perCategoryLimits[category] ?? 0) > 0 ? 1 : 0;
@@ -456,13 +464,13 @@ export function createContextRecipeStore(
         input.displayName.trim() !== input.displayName ||
         input.displayName.length === 0 ||
         input.displayName.length > 120 ||
-        !isRecipeValid(input.version)
+        !isRecipeShapeValid(input.version)
       ) {
         return invalidRecipe();
       }
       const normalized = {
         ...input.version,
-        digest: recipeDigest({ ...input.version, digest: undefined } as never),
+        digest: computeContextRecipeDigest({ ...input.version, digest: undefined } as never),
       };
       try {
         return inImmediateTransaction(dependencies.database, () => {
@@ -520,13 +528,13 @@ export function createContextRecipeStore(
       if (
         input.version.id !== input.id ||
         input.version.version !== current.current_version + 1 ||
-        !isRecipeValid(input.version)
+        !isRecipeShapeValid(input.version)
       ) {
         return invalidRecipe();
       }
       const normalized = {
         ...input.version,
-        digest: recipeDigest({ ...input.version, digest: undefined } as never),
+        digest: computeContextRecipeDigest({ ...input.version, digest: undefined } as never),
       };
       try {
         return inImmediateTransaction(dependencies.database, () => {
@@ -618,5 +626,6 @@ export function createContextRecipeStore(
     },
   };
 }
-import { createHash } from "node:crypto";
+
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";

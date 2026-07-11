@@ -30,6 +30,26 @@ const base = {
   personalAddendum: "Keep the implementation narrowly scoped.",
 };
 
+const trustedResolution = {
+  authorityFacts: {
+    projectRevision: 4,
+    runnerPolicyRevision: 5,
+    securityPolicyVersion: 6,
+    securityDigest: "c".repeat(64) as never,
+    connectorEpochs: { github_1: 7 },
+    grantIds: ["grant_1"],
+  },
+  currentBinding: {
+    projectId: "project_1",
+    runnerId: "runner_1",
+    runnerEpoch: 2,
+    mappingRevision: 1,
+    profileId: "profile_1",
+    profileVersion: 3,
+    profileFingerprint: "a".repeat(64),
+  },
+} as const;
+
 describe("personal run preset resolution", () => {
   test("rejects local command, environment, credential, and hidden prompt fields", () => {
     for (const forbidden of [
@@ -61,6 +81,7 @@ describe("personal run preset resolution", () => {
 
   test("allows visible overrides to narrow but never widen authority or hard bounds", () => {
     const narrowed = resolveEffectiveRunConfiguration(base, {
+      ...trustedResolution,
       repositoryMode: "INSPECT_ONLY",
       maximumAttempts: 1,
       deadlineSeconds: 600,
@@ -84,6 +105,7 @@ describe("personal run preset resolution", () => {
 
     expect(
       resolveEffectiveRunConfiguration(base, {
+        ...trustedResolution,
         repositoryAssurance: "ENFORCED",
         maximumAttempts: 4,
         deadlineSeconds: 7_200,
@@ -95,9 +117,17 @@ describe("personal run preset resolution", () => {
 
   test("fails stale bindings instead of substituting a runtime, runner, or profile", () => {
     expect(
+      resolveEffectiveRunConfiguration(base, { runGoal: "Implement the change." }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "PRESET_BINDING_REQUIRED" },
+    });
+    expect(
       resolveEffectiveRunConfiguration(base, {
+        authorityFacts: trustedResolution.authorityFacts,
         runGoal: "Implement the change.",
         currentBinding: {
+          projectId: "project_1",
           runnerId: "runner_1",
           runnerEpoch: 3,
           mappingRevision: 1,
@@ -109,11 +139,28 @@ describe("personal run preset resolution", () => {
     ).toMatchObject({ ok: false, error: { code: "PRESET_BINDING_STALE" } });
   });
 
+  test("binds a projectless preset to the explicit trusted current project", () => {
+    const resolved = resolveEffectiveRunConfiguration(
+      { ...base, projectId: undefined },
+      { ...trustedResolution, runGoal: "Run in the selected project." },
+    );
+    expect(resolved).toMatchObject({ ok: true, value: { projectId: "project_1" } });
+    expect(
+      resolveEffectiveRunConfiguration(base, {
+        ...trustedResolution,
+        currentBinding: { ...trustedResolution.currentBinding, projectId: "project_2" },
+        runGoal: "Run elsewhere.",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "PRESET_BINDING_STALE" } });
+  });
+
   test("rejects stale mappings, invalid goals, fractional bounds, and malformed added gates", () => {
     expect(
       resolveEffectiveRunConfiguration(base, {
+        authorityFacts: trustedResolution.authorityFacts,
         runGoal: "Implement.",
         currentBinding: {
+          projectId: "project_1",
           runnerId: "runner_1",
           runnerEpoch: 2,
           mappingRevision: 2,
@@ -130,7 +177,9 @@ describe("personal run preset resolution", () => {
       { runGoal: "Implement.", deadlineSeconds: 1.5 },
       { runGoal: "Implement.", requiredGates: ["bad gate"] },
     ]) {
-      expect(resolveEffectiveRunConfiguration(base, overrides)).toMatchObject({
+      expect(
+        resolveEffectiveRunConfiguration(base, { ...trustedResolution, ...overrides }),
+      ).toMatchObject({
         ok: false,
       });
     }
@@ -140,6 +189,7 @@ describe("personal run preset resolution", () => {
     const result = resolveEffectiveRunConfiguration(
       { ...base, derivedTemplate: { id: "template_1", version: 2 } },
       {
+        ...trustedResolution,
         runGoal: "Implement the selected change.",
         authoredRunInput: "Only touch the requested module.",
         teamTemplate: {
@@ -147,13 +197,6 @@ describe("personal run preset resolution", () => {
           version: 2,
           coreInstructions: "Follow the shared implementation contract.",
           typedVariables: { issueNumber: 42, includeTests: true },
-        },
-        authorityFacts: {
-          projectRevision: 4,
-          runnerPolicyRevision: 5,
-          securityPolicyVersion: 6,
-          connectorEpochs: { github_1: 7 },
-          grantIds: ["grant_1"],
         },
       },
     );
@@ -182,6 +225,7 @@ describe("personal run preset resolution", () => {
       resolveEffectiveRunConfiguration(
         { ...base, derivedTemplate: { id: "template_1", version: 2 } },
         {
+          ...trustedResolution,
           runGoal: "Implement.",
           teamTemplate: {
             id: "template_1",

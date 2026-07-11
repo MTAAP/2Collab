@@ -3,13 +3,13 @@ import {
   type AuthorizedContextCandidate,
   assembleBootstrapEnvelope,
   type ContextRecipeVersion,
+  computeContextRecipeDigest,
 } from "../../../src/server/modules/context/context-recipes.ts";
 
-const recipe: ContextRecipeVersion = {
+const recipeWithoutDigest: Omit<ContextRecipeVersion, "digest"> = {
   id: "recipe_1",
   version: 1,
   projectId: "project_1",
-  digest: "a".repeat(64),
   perCategoryLimits: {
     COORDINATION: 1,
     SOURCE: 2,
@@ -22,6 +22,17 @@ const recipe: ContextRecipeVersion = {
   freshnessSeconds: 30,
   predecessorPolicy: "LATEST_CHECKPOINT",
 };
+const recipe: ContextRecipeVersion = {
+  ...recipeWithoutDigest,
+  digest: computeContextRecipeDigest(recipeWithoutDigest),
+};
+
+function signedRecipe(
+  overrides: Partial<Omit<ContextRecipeVersion, "digest">>,
+): ContextRecipeVersion {
+  const unsigned = { ...recipeWithoutDigest, ...overrides };
+  return { ...unsigned, digest: computeContextRecipeDigest(unsigned) };
+}
 
 function candidate(
   overrides: Partial<AuthorizedContextCandidate> = {},
@@ -77,7 +88,7 @@ describe("reference-first context recipes", () => {
 
   test("never turns forbidden or unavailable candidates into access and reports freshness honestly", () => {
     const result = assembleBootstrapEnvelope(
-      { ...recipe, maximumReferences: 4, maximumPreviewBytes: 32 },
+      signedRecipe({ maximumReferences: 4, maximumPreviewBytes: 32 }),
       [
         candidate({ referenceId: "fresh", canonicalKey: "source:fresh" }),
         candidate({
@@ -115,7 +126,7 @@ describe("reference-first context recipes", () => {
 
   test("bounds authored previews by UTF-8 bytes without splitting a code point", () => {
     const result = assembleBootstrapEnvelope(
-      { ...recipe, maximumReferences: 1, maximumPreviewBytes: 5 },
+      signedRecipe({ maximumReferences: 1, maximumPreviewBytes: 5 }),
       [candidate({ authoredPreview: "Aé€B" })],
       100,
     );
@@ -153,6 +164,12 @@ describe("reference-first context recipes", () => {
     ).toMatchObject({ ok: false, error: { code: "CONTEXT_RECIPE_INVALID" } });
   });
 
+  test("rejects a recipe whose digest does not authenticate its exact budgets", () => {
+    expect(
+      assembleBootstrapEnvelope({ ...recipe, maximumReferences: 4 }, [candidate()], 100),
+    ).toMatchObject({ ok: false, error: { code: "CONTEXT_RECIPE_INVALID" } });
+  });
+
   test("emits at most one durable entry for the same category and reference identifier", () => {
     const result = assembleBootstrapEnvelope(
       recipe,
@@ -163,5 +180,16 @@ describe("reference-first context recipes", () => {
     if (!result.ok) throw new Error(result.error.code);
     expect(result.value.references).toHaveLength(1);
     expect(result.value.omissions).toHaveLength(0);
+  });
+
+  test("deduplicates durable category and reference identity even when canonical keys differ", () => {
+    const result = assembleBootstrapEnvelope(
+      recipe,
+      [candidate(), candidate({ canonicalKey: "github:issue:other", observedRevision: "2" })],
+      100,
+    );
+    expect(result).toMatchObject({ ok: true, value: { references: [{ referenceId: "issue_1" }] } });
+    if (!result.ok) throw new Error(result.error.code);
+    expect(result.value.references).toHaveLength(1);
   });
 });

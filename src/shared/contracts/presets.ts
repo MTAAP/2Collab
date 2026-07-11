@@ -88,6 +88,7 @@ export type EffectiveRunConfiguration = PersonalRunPresetVersion &
         projectRevision: number;
         runnerPolicyRevision: number;
         securityPolicyVersion: number;
+        securityDigest: Sha256;
         exposureRevision?: number;
         acknowledgementVersion?: number;
         connectorEpochs: Readonly<Record<string, number>>;

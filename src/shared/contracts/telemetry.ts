@@ -46,3 +46,41 @@ export type UsageCoverageGroup = Readonly<{
   totalAttempts: number;
   coverage: "NONE" | "PARTIAL" | "COMPLETE";
 }>;
+
+export type AttemptOperationalFact = Readonly<{
+  attemptId: string;
+  startedAt?: number;
+  terminalAt?: number;
+}>;
+
+export type AttemptCauseFact = Readonly<{
+  attemptId: string;
+  cause: "INITIAL" | "RETRY" | "RESUME" | "MANAGED_LOOP" | "HUMAN_DECISION" | "LEGACY_UNKNOWN";
+  managedLoopIteration?: number;
+}>;
+
+export type GateOperationalFact = Readonly<{
+  gateEvaluationId: string;
+  gateKey: string;
+  durationMs: number | "UNKNOWN";
+}>;
+
+export type CoverageCount = Readonly<{
+  knownAttempts: number;
+  totalAttempts: number;
+  coverage: "NONE" | "PARTIAL" | "COMPLETE";
+}>;
+
+export type OperationalUsageSummary = Readonly<{
+  attemptCount: number;
+  attemptCauses: CoverageCount;
+  managedLoopIterationCount: number | "UNKNOWN";
+  wallClock: CoverageCount & Readonly<{ knownMilliseconds: number }>;
+  gates: readonly Readonly<{
+    gateKey: string;
+    knownMilliseconds: number;
+    knownEvaluations: number;
+    totalEvaluations: number;
+    coverage: "NONE" | "PARTIAL" | "COMPLETE";
+  }>[];
+}>;

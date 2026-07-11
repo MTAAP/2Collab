@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import type { ReferenceFirstBootstrapEnvelope } from "../../../shared/contracts/context.ts";
 import type {
   EffectiveRunConfiguration,
@@ -140,6 +140,7 @@ export type ConfigurationOverrides = Readonly<{
   }>;
   authorityFacts?: EffectiveRunConfiguration["provenance"]["authority"];
   currentBinding?: Readonly<{
+    projectId: string;
     runnerId: string;
     runnerEpoch: number;
     mappingRevision: number;
@@ -175,6 +176,7 @@ function validAuthorityFacts(
     value.runnerPolicyRevision > 0 &&
     Number.isInteger(value.securityPolicyVersion) &&
     value.securityPolicyVersion > 0 &&
+    /^[a-f0-9]{64}$/.test(value.securityDigest) &&
     (value.exposureRevision === undefined ||
       (Number.isInteger(value.exposureRevision) && value.exposureRevision > 0)) &&
     (value.acknowledgementVersion === undefined ||
@@ -185,6 +187,7 @@ function validAuthorityFacts(
         /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id) && Number.isInteger(epoch) && epoch > 0,
     ) &&
     value.grantIds.length <= 64 &&
+    (value.exposureRevision === undefined) === (value.acknowledgementVersion === undefined) &&
     value.grantIds.every((id) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id))
   );
 }
@@ -232,14 +235,21 @@ export function resolveEffectiveRunConfiguration(
     return error("CONFIGURATION_INVALID", "The requested run configuration is invalid.");
   }
   const current = overrides.currentBinding;
+  if (!current || !overrides.authorityFacts) {
+    return error(
+      "PRESET_BINDING_REQUIRED",
+      "Current execution binding and authority facts are required.",
+      "REFRESH",
+    );
+  }
   if (
-    current &&
-    (current.runnerId !== preset.runnerId ||
-      current.runnerEpoch !== preset.runnerEpoch ||
-      current.mappingRevision !== preset.mappingRevision ||
-      current.profileId !== preset.profileId ||
-      current.profileVersion !== preset.profileVersion ||
-      current.profileFingerprint !== preset.profileFingerprint)
+    (preset.projectId !== undefined && current.projectId !== preset.projectId) ||
+    current.runnerId !== preset.runnerId ||
+    current.runnerEpoch !== preset.runnerEpoch ||
+    current.mappingRevision !== preset.mappingRevision ||
+    current.profileId !== preset.profileId ||
+    current.profileVersion !== preset.profileVersion ||
+    current.profileFingerprint !== preset.profileFingerprint
   ) {
     return error("PRESET_BINDING_STALE", "The preset execution binding is stale.");
   }
@@ -316,6 +326,7 @@ export function resolveEffectiveRunConfiguration(
   };
   const configuration = {
     ...preset,
+    projectId: current.projectId,
     repositoryMode,
     maximumAttempts,
     deadlineSeconds,
@@ -354,13 +365,451 @@ function validEffectiveConfiguration(value: EffectiveRunConfiguration): boolean 
   );
 }
 
-type ConfigurationSnapshot = Readonly<{
+export type ConfigurationSnapshot = Readonly<{
   runId: string;
   configuration: EffectiveRunConfiguration;
   envelope: ReferenceFirstBootstrapEnvelope;
   authoredRunInput?: string;
   createdAt: number;
 }>;
+
+type PreparedReferenceRow = Readonly<{
+  category: string;
+  referenceId: string;
+  observedRevision: string | null;
+  freshness: "FRESH" | "STALE" | "UNAVAILABLE" | "FORBIDDEN";
+  omissionReason: string | null;
+  previewText: string | null;
+}>;
+
+export type PreparedRunConfigurationSnapshot = Readonly<{
+  configuration: EffectiveRunConfiguration;
+  envelope: ReferenceFirstBootstrapEnvelope;
+  authoredRunInput?: string;
+  configurationJson: string;
+  previewBytes: number;
+  envelopeDigest: string;
+  assemblyDigest: string;
+  referenceRows: readonly PreparedReferenceRow[];
+}>;
+
+export function prepareRunConfigurationSnapshot(
+  input: Readonly<{
+    configuration: EffectiveRunConfiguration;
+    envelope: ReferenceFirstBootstrapEnvelope;
+    authoredRunInput?: string;
+  }>,
+): Result<PreparedRunConfigurationSnapshot> {
+  if (
+    !validEffectiveConfiguration(input.configuration) ||
+    input.configuration.provenance.authority === undefined ||
+    input.envelope.contextRecipe.id !== input.configuration.contextRecipeId ||
+    input.envelope.contextRecipe.version !== input.configuration.contextRecipeVersion ||
+    input.envelope.references.length > 64 ||
+    input.envelope.omissions.length > 4_096 ||
+    (input.authoredRunInput?.length ?? 0) > 16_384 ||
+    input.authoredRunInput !== input.configuration.layers.authoredRunInput
+  ) {
+    return error("RUN_CONFIGURATION_INVALID", "Run configuration is invalid.");
+  }
+  const configurationJson = canonical(input.configuration);
+  if (Buffer.byteLength(configurationJson, "utf8") > 65_536) {
+    return error("RUN_CONFIGURATION_INVALID", "Run configuration is invalid.");
+  }
+  const referenceRows: PreparedReferenceRow[] = [
+    ...input.envelope.references.map((reference) => ({
+      category: reference.category,
+      referenceId: reference.referenceId,
+      observedRevision: reference.observedRevision,
+      freshness: reference.status,
+      omissionReason: null,
+      previewText: reference.authoredPreview ?? null,
+    })),
+    ...input.envelope.omissions.map((omission) => ({
+      category: omission.category,
+      referenceId: omission.referenceId,
+      observedRevision: null,
+      freshness:
+        omission.reason === "FORBIDDEN"
+          ? ("FORBIDDEN" as const)
+          : omission.reason === "UNAVAILABLE"
+            ? ("UNAVAILABLE" as const)
+            : ("FRESH" as const),
+      omissionReason: omission.reason,
+      previewText: null,
+    })),
+  ];
+  const durableKeys = referenceRows.map((row) => `${row.category}\u0000${row.referenceId}`);
+  if (new Set(durableKeys).size !== durableKeys.length) {
+    return error("RUN_CONFIGURATION_INVALID", "Run configuration contains duplicate references.");
+  }
+  const previewBytes = input.envelope.references.reduce(
+    (total, reference) => total + Buffer.byteLength(reference.authoredPreview ?? "", "utf8"),
+    0,
+  );
+  const envelopeDigest = sha256(input.envelope);
+  const assemblyDigest = sha256({
+    configurationDigest: input.configuration.digest,
+    envelopeDigest,
+    authoredRunInput: input.authoredRunInput,
+  });
+  return {
+    ok: true,
+    value: {
+      configuration: input.configuration,
+      envelope: input.envelope,
+      ...(input.authoredRunInput ? { authoredRunInput: input.authoredRunInput } : {}),
+      configurationJson,
+      previewBytes,
+      envelopeDigest,
+      assemblyDigest,
+      referenceRows,
+    },
+  };
+}
+
+function currentConfigurationFactsMatch(
+  database: Database,
+  projectId: string,
+  configuration: EffectiveRunConfiguration,
+): boolean {
+  const authority = configuration.provenance.authority;
+  if (!authority) return false;
+  const row = database
+    .query<
+      {
+        project_revision: number;
+        preset_owner_member_id: string;
+        preset_project_id: string | null;
+        preset_state: string;
+        runner_id: string;
+        runner_epoch: number;
+        mapping_revision: number;
+        profile_id: string;
+        profile_version: number;
+        profile_fingerprint: string;
+        host: string;
+        interaction: string;
+        repository_mode: string;
+        repository_assurance: string;
+        maximum_attempts: number;
+        deadline_seconds: number;
+        context_recipe_id: string | null;
+        context_recipe_version: number | null;
+        runner_owner_member_id: string;
+        current_runner_epoch: number;
+        policy_revision: number;
+        security_policy_version: number;
+        security_digest: string;
+        revoked_at: number | null;
+        adapter: string;
+        supports_native: number;
+        supports_orca: number;
+        supports_headless: number;
+        supports_interactive: number;
+      },
+      [string, string, number]
+    >(
+      `SELECT projects.revision AS project_revision,
+              presets.owner_member_id AS preset_owner_member_id,
+              presets.project_id AS preset_project_id, presets.state AS preset_state,
+              versions.runner_id, versions.runner_epoch, versions.mapping_revision,
+              versions.profile_id, versions.profile_version, versions.profile_fingerprint,
+              versions.host, versions.interaction, versions.repository_mode,
+              versions.repository_assurance, versions.maximum_attempts,
+              versions.deadline_seconds, versions.context_recipe_id,
+              versions.context_recipe_version,
+              runners.owner_member_id AS runner_owner_member_id,
+              runners.runner_epoch AS current_runner_epoch, runners.policy_revision,
+              runners.security_policy_version, runners.security_digest, runners.revoked_at,
+              profiles.adapter, profiles.supports_native, profiles.supports_orca,
+              profiles.supports_headless, profiles.supports_interactive
+       FROM personal_run_presets AS presets
+       JOIN personal_run_preset_versions AS versions ON versions.preset_id = presets.id
+       JOIN projects ON projects.id = ?
+       JOIN runners ON runners.id = versions.runner_id
+       JOIN runner_mapping_versions AS mappings ON mappings.runner_id = versions.runner_id
+         AND mappings.project_id = projects.id AND mappings.revision = versions.mapping_revision
+         AND mappings.revoked_at IS NULL
+       JOIN safe_profile_versions AS profiles ON profiles.runner_id = versions.runner_id
+         AND profiles.profile_id = versions.profile_id AND profiles.version = versions.profile_version
+         AND profiles.fingerprint = versions.profile_fingerprint
+       WHERE presets.id = ? AND versions.version = ?`,
+    )
+    .get(projectId, configuration.presetId, configuration.presetVersion);
+  if (
+    row?.preset_state !== "ACTIVE" ||
+    row.preset_owner_member_id !== configuration.ownerMemberId ||
+    (row.preset_project_id !== null && row.preset_project_id !== projectId) ||
+    row.runner_id !== configuration.runnerId ||
+    row.runner_epoch !== configuration.runnerEpoch ||
+    row.current_runner_epoch !== configuration.runnerEpoch ||
+    row.mapping_revision !== configuration.mappingRevision ||
+    row.profile_id !== configuration.profileId ||
+    row.profile_version !== configuration.profileVersion ||
+    row.profile_fingerprint !== configuration.profileFingerprint ||
+    row.host !== configuration.host ||
+    row.interaction !== configuration.interaction ||
+    (row.repository_mode === "INSPECT_ONLY" && configuration.repositoryMode !== "INSPECT_ONLY") ||
+    row.repository_assurance !== configuration.repositoryAssurance ||
+    configuration.maximumAttempts > row.maximum_attempts ||
+    configuration.deadlineSeconds > row.deadline_seconds ||
+    row.context_recipe_id !== configuration.contextRecipeId ||
+    row.context_recipe_version !== configuration.contextRecipeVersion ||
+    row.revoked_at !== null ||
+    row.adapter !== configuration.runtime ||
+    (configuration.host === "NATIVE" ? row.supports_native !== 1 : row.supports_orca !== 1) ||
+    (configuration.interaction === "HEADLESS"
+      ? row.supports_headless !== 1
+      : row.supports_interactive !== 1) ||
+    row.project_revision !== authority.projectRevision ||
+    row.policy_revision !== authority.runnerPolicyRevision ||
+    row.security_policy_version !== authority.securityPolicyVersion ||
+    row.security_digest !== authority.securityDigest
+  ) {
+    return false;
+  }
+  const storedGates = database
+    .query<{ gate_name: string; manifest_fingerprint: string }, [string, number]>(
+      `SELECT gate_name, manifest_fingerprint FROM personal_run_preset_gates
+       WHERE preset_id = ? AND preset_version = ? AND required = 1`,
+    )
+    .all(configuration.presetId, configuration.presetVersion);
+  if (
+    storedGates.some(
+      (gate) =>
+        !configuration.requiredGates.includes(gate.gate_name) ||
+        gate.manifest_fingerprint !== configuration.gateManifestFingerprint,
+    )
+  ) {
+    return false;
+  }
+  for (const [connectorId, connectorEpoch] of Object.entries(authority.connectorEpochs)) {
+    if (
+      database
+        .query<{ epoch: number }, [string]>(
+          "SELECT epoch FROM connector_epochs WHERE connector_id = ? AND review_state = 'READY'",
+        )
+        .get(connectorId)?.epoch !== connectorEpoch
+    ) {
+      return false;
+    }
+  }
+  if (row.runner_owner_member_id === configuration.ownerMemberId) {
+    return (
+      authority.exposureRevision === undefined && authority.acknowledgementVersion === undefined
+    );
+  }
+  if (authority.exposureRevision === undefined || authority.acknowledgementVersion === undefined) {
+    return false;
+  }
+  return Boolean(
+    database
+      .query<
+        { present: number },
+        [string, string, number, string, number, string, number, number, string, number, number]
+      >(
+        `SELECT 1 AS present FROM runner_exposures AS exposures
+         JOIN runner_exposure_acknowledgements AS acknowledgements
+           ON acknowledgements.id = exposures.acknowledgement_id
+         WHERE exposures.runner_id = ? AND exposures.project_id = ?
+           AND exposures.mapping_revision = ? AND exposures.profile_id = ?
+           AND exposures.profile_version = ? AND exposures.profile_fingerprint = ?
+           AND exposures.policy_revision = ? AND exposures.security_policy_version = ?
+           AND exposures.security_digest = ? AND exposures.revision = ?
+           AND acknowledgements.version = ? AND exposures.revoked_at IS NULL
+           AND acknowledgements.revoked_at IS NULL`,
+      )
+      .get(
+        configuration.runnerId,
+        projectId,
+        configuration.mappingRevision,
+        configuration.profileId,
+        configuration.profileVersion,
+        configuration.profileFingerprint,
+        authority.runnerPolicyRevision,
+        authority.securityPolicyVersion,
+        authority.securityDigest,
+        authority.exposureRevision,
+        authority.acknowledgementVersion,
+      ),
+  );
+}
+
+export function persistPreparedRunConfigurationSnapshotInTransaction(
+  dependencies: Readonly<{
+    database: Database;
+    clock: () => number;
+    id: (prefix: string) => string;
+  }>,
+  input: Readonly<{ runId: string; prepared: PreparedRunConfigurationSnapshot }>,
+): Result<ConfigurationSnapshot> {
+  if (!dependencies.database.inTransaction) {
+    return error(
+      "RUN_CONFIGURATION_TRANSACTION_REQUIRED",
+      "Run configuration persistence requires an active transaction.",
+    );
+  }
+  const existing = dependencies.database
+    .query<{ present: number }, [string]>(
+      "SELECT 1 AS present FROM run_configuration_snapshots WHERE run_id = ?",
+    )
+    .get(input.runId);
+  if (existing) return error("RUN_CONFIGURATION_IMMUTABLE", "Run configuration is immutable.");
+  const run = dependencies.database
+    .query<
+      {
+        project_id: string;
+        effective_configuration_id: string;
+        effective_configuration_version: number;
+        effective_configuration_digest: string;
+      },
+      [string]
+    >(
+      `SELECT project_id, effective_configuration_id, effective_configuration_version,
+              effective_configuration_digest FROM agent_runs WHERE id = ?`,
+    )
+    .get(input.runId);
+  const { prepared } = input;
+  if (
+    !run ||
+    run.project_id !== prepared.configuration.projectId ||
+    run.effective_configuration_id !== prepared.configuration.presetId ||
+    run.effective_configuration_version !== prepared.configuration.presetVersion ||
+    run.effective_configuration_digest !== prepared.configuration.digest
+  ) {
+    return error("RUN_CONFIGURATION_MISMATCH", "Run configuration does not match the run.");
+  }
+  if (
+    !currentConfigurationFactsMatch(dependencies.database, run.project_id, prepared.configuration)
+  ) {
+    return error(
+      "RUN_CONFIGURATION_AUTHORITY_STALE",
+      "Run configuration authority facts are stale.",
+      "REFRESH",
+    );
+  }
+  const recipe = dependencies.database
+    .query<
+      { recipe_digest: string; maximum_references: number; maximum_preview_bytes: number },
+      [string, number, string]
+    >(
+      `SELECT versions.recipe_digest, versions.maximum_references,
+              versions.maximum_preview_bytes
+       FROM context_recipe_versions AS versions
+       JOIN context_recipes AS recipes ON recipes.id = versions.recipe_id
+       WHERE versions.recipe_id = ? AND versions.version = ? AND recipes.project_id = ?`,
+    )
+    .get(
+      prepared.envelope.contextRecipe.id,
+      prepared.envelope.contextRecipe.version,
+      run.project_id,
+    );
+  if (!recipe || recipe.recipe_digest !== prepared.envelope.contextRecipe.digest) {
+    return error("CONTEXT_RECIPE_STALE", "Context recipe provenance is stale.", "REFRESH");
+  }
+  const categoryLimits = new Map(
+    dependencies.database
+      .query<{ category: string; maximum_references: number }, [string, number]>(
+        `SELECT category, maximum_references FROM context_recipe_category_limits
+         WHERE recipe_id = ? AND recipe_version = ?`,
+      )
+      .all(prepared.envelope.contextRecipe.id, prepared.envelope.contextRecipe.version)
+      .map((limit) => [limit.category, limit.maximum_references] as const),
+  );
+  const selectedCategoryCounts = new Map<string, number>();
+  for (const reference of prepared.envelope.references) {
+    selectedCategoryCounts.set(
+      reference.category,
+      (selectedCategoryCounts.get(reference.category) ?? 0) + 1,
+    );
+  }
+  if (
+    prepared.envelope.references.length > recipe.maximum_references ||
+    prepared.previewBytes > recipe.maximum_preview_bytes ||
+    [...selectedCategoryCounts].some(
+      ([category, count]) => count > (categoryLimits.get(category) ?? 0),
+    )
+  ) {
+    return error(
+      "CONTEXT_RECIPE_BUDGET_EXCEEDED",
+      "Bootstrap context exceeds the stored recipe budget.",
+    );
+  }
+  const now = dependencies.clock();
+  dependencies.database
+    .query(
+      `INSERT INTO run_configuration_snapshots(
+         run_id, preset_id, preset_version, template_id, template_version,
+         context_recipe_id, context_recipe_version, personal_addendum,
+         authored_run_input, effective_configuration_json, effective_configuration_digest,
+         assembly_digest, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.runId,
+      prepared.configuration.presetId,
+      prepared.configuration.presetVersion,
+      prepared.configuration.derivedTemplate?.id ?? null,
+      prepared.configuration.derivedTemplate?.version ?? null,
+      prepared.envelope.contextRecipe.id,
+      prepared.envelope.contextRecipe.version,
+      prepared.configuration.layers.personalAddendum ?? null,
+      prepared.authoredRunInput ?? null,
+      prepared.configurationJson,
+      prepared.configuration.digest,
+      prepared.assemblyDigest,
+      now,
+    );
+  const envelopeId = dependencies.id("envelope");
+  dependencies.database
+    .query(
+      `INSERT INTO context_bootstrap_envelopes(
+         id, run_id, recipe_id, recipe_version, reference_count, preview_bytes,
+         envelope_digest, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      envelopeId,
+      input.runId,
+      prepared.envelope.contextRecipe.id,
+      prepared.envelope.contextRecipe.version,
+      prepared.envelope.references.length,
+      prepared.previewBytes,
+      prepared.envelopeDigest,
+      now,
+    );
+  for (const [index, reference] of prepared.referenceRows.entries()) {
+    dependencies.database
+      .query(
+        `INSERT INTO context_envelope_references(
+           envelope_id, ordinal, category, reference_id, observed_revision, freshness,
+           omission_reason, preview_text, preview_digest
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        envelopeId,
+        index + 1,
+        reference.category,
+        reference.referenceId,
+        reference.observedRevision,
+        reference.freshness,
+        reference.omissionReason,
+        reference.previewText,
+        reference.previewText ? sha256(reference.previewText) : null,
+      );
+  }
+  return {
+    ok: true,
+    value: {
+      runId: input.runId,
+      configuration: prepared.configuration,
+      envelope: prepared.envelope,
+      ...(prepared.authoredRunInput ? { authoredRunInput: prepared.authoredRunInput } : {}),
+      createdAt: now,
+    },
+  };
+}
 
 function parseConfiguration(value: string): EffectiveRunConfiguration | null {
   if (Buffer.byteLength(value, "utf8") > 65_536) return null;
@@ -396,221 +845,19 @@ export function createConfigurationPersistence(
       if (alreadyStored) {
         return error("RUN_CONFIGURATION_IMMUTABLE", "Run configuration is immutable.");
       }
-      if (
-        !validEffectiveConfiguration(input.configuration) ||
-        input.configuration.provenance.authority === undefined ||
-        input.envelope.contextRecipe.id !== input.configuration.contextRecipeId ||
-        input.envelope.contextRecipe.version !== input.configuration.contextRecipeVersion ||
-        input.envelope.references.length > 64 ||
-        input.envelope.omissions.length > 4_096 ||
-        (input.authoredRunInput?.length ?? 0) > 16_384 ||
-        input.authoredRunInput !== input.configuration.layers.authoredRunInput
-      ) {
-        return error("RUN_CONFIGURATION_INVALID", "Run configuration is invalid.");
-      }
-      const configurationJson = canonical(input.configuration);
-      if (Buffer.byteLength(configurationJson, "utf8") > 65_536) {
-        return error("RUN_CONFIGURATION_INVALID", "Run configuration is invalid.");
-      }
-      const previewBytes = input.envelope.references.reduce(
-        (total, reference) => total + Buffer.byteLength(reference.authoredPreview ?? "", "utf8"),
-        0,
-      );
-      const envelopeDigest = sha256(input.envelope);
-      const assemblyDigest = sha256({
-        configurationDigest: input.configuration.digest,
-        envelopeDigest,
-        authoredRunInput: input.authoredRunInput,
-      });
+      const prepared = prepareRunConfigurationSnapshot(input);
+      if (!prepared.ok) return prepared;
       try {
-        return inImmediateTransaction(dependencies.database, () => {
-          const existing = dependencies.database
-            .query<{ present: number }, [string]>(
-              "SELECT 1 AS present FROM run_configuration_snapshots WHERE run_id = ?",
-            )
-            .get(input.runId);
-          if (existing) {
-            return error("RUN_CONFIGURATION_IMMUTABLE", "Run configuration is immutable.");
-          }
-          const run = dependencies.database
-            .query<
-              {
-                project_id: string;
-                effective_configuration_id: string;
-                effective_configuration_version: number;
-                effective_configuration_digest: string;
-              },
-              [string]
-            >(
-              `SELECT project_id, effective_configuration_id, effective_configuration_version,
-                      effective_configuration_digest
-               FROM agent_runs WHERE id = ?`,
-            )
-            .get(input.runId);
-          if (
-            !run ||
-            run.project_id !== input.configuration.projectId ||
-            run.effective_configuration_id !== input.configuration.presetId ||
-            run.effective_configuration_version !== input.configuration.presetVersion ||
-            run.effective_configuration_digest !== input.configuration.digest
-          ) {
-            return error("RUN_CONFIGURATION_MISMATCH", "Run configuration does not match the run.");
-          }
-          const recipe = dependencies.database
-            .query<{ recipe_digest: string }, [string, number, string]>(
-              `SELECT versions.recipe_digest FROM context_recipe_versions AS versions
-               JOIN context_recipes AS recipes ON recipes.id = versions.recipe_id
-               WHERE versions.recipe_id = ? AND versions.version = ? AND recipes.project_id = ?`,
-            )
-            .get(
-              input.envelope.contextRecipe.id,
-              input.envelope.contextRecipe.version,
-              run.project_id,
-            );
-          if (!recipe || recipe.recipe_digest !== input.envelope.contextRecipe.digest) {
-            return error("CONTEXT_RECIPE_STALE", "Context recipe provenance is stale.", "REFRESH");
-          }
-          const now = dependencies.clock();
-          dependencies.database
-            .query<
-              void,
-              [
-                string,
-                string,
-                number,
-                string | null,
-                number | null,
-                string,
-                number,
-                string | null,
-                string | null,
-                string,
-                string,
-                string,
-                number,
-              ]
-            >(
-              `INSERT INTO run_configuration_snapshots(
-                 run_id, preset_id, preset_version, template_id, template_version,
-                 context_recipe_id, context_recipe_version, personal_addendum,
-                 authored_run_input, effective_configuration_json, effective_configuration_digest,
-                 assembly_digest, created_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              input.runId,
-              input.configuration.presetId,
-              input.configuration.presetVersion,
-              input.configuration.derivedTemplate?.id ?? null,
-              input.configuration.derivedTemplate?.version ?? null,
-              input.envelope.contextRecipe.id,
-              input.envelope.contextRecipe.version,
-              input.configuration.layers.personalAddendum ?? null,
-              input.authoredRunInput ?? null,
-              configurationJson,
-              input.configuration.digest,
-              assemblyDigest,
-              now,
-            );
-          const envelopeId = dependencies.id("envelope");
-          dependencies.database
-            .query<void, [string, string, string, number, number, number, string, number]>(
-              `INSERT INTO context_bootstrap_envelopes(
-                 id, run_id, recipe_id, recipe_version, reference_count, preview_bytes,
-                 envelope_digest, created_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              envelopeId,
-              input.runId,
-              input.envelope.contextRecipe.id,
-              input.envelope.contextRecipe.version,
-              input.envelope.references.length,
-              previewBytes,
-              envelopeDigest,
-              now,
-            );
-          let ordinal = 1;
-          const insertReference = (
-            category: string,
-            referenceId: string,
-            observedRevision: string | null,
-            freshness: "FRESH" | "STALE" | "UNAVAILABLE" | "FORBIDDEN",
-            omissionReason: string | null,
-            previewText: string | null,
-          ) => {
-            dependencies.database
-              .query<
-                void,
-                [
-                  string,
-                  number,
-                  string,
-                  string,
-                  string | null,
-                  string,
-                  string | null,
-                  string | null,
-                  string | null,
-                ]
-              >(
-                `INSERT INTO context_envelope_references(
-                   envelope_id, ordinal, category, reference_id, observed_revision, freshness,
-                   omission_reason, preview_text, preview_digest
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              )
-              .run(
-                envelopeId,
-                ordinal++,
-                category,
-                referenceId,
-                observedRevision,
-                freshness,
-                omissionReason,
-                previewText,
-                previewText ? sha256(previewText) : null,
-              );
-          };
-          for (const reference of input.envelope.references) {
-            insertReference(
-              reference.category,
-              reference.referenceId,
-              reference.observedRevision,
-              reference.status,
-              null,
-              reference.authoredPreview ?? null,
-            );
-          }
-          for (const omission of input.envelope.omissions) {
-            insertReference(
-              omission.category,
-              omission.referenceId,
-              null,
-              omission.reason === "FORBIDDEN"
-                ? "FORBIDDEN"
-                : omission.reason === "UNAVAILABLE"
-                  ? "UNAVAILABLE"
-                  : "FRESH",
-              omission.reason,
-              null,
-            );
-          }
-          return {
-            ok: true as const,
-            value: {
-              runId: input.runId,
-              configuration: input.configuration,
-              envelope: input.envelope,
-              ...(input.authoredRunInput ? { authoredRunInput: input.authoredRunInput } : {}),
-              createdAt: now,
-            },
-          };
-        });
+        return inImmediateTransaction(dependencies.database, () =>
+          persistPreparedRunConfigurationSnapshotInTransaction(dependencies, {
+            runId: input.runId,
+            prepared: prepared.value,
+          }),
+        );
       } catch {
         return error("RUN_CONFIGURATION_STORAGE_FAILED", "Run configuration could not be stored.");
       }
     },
-
     inspectRunSnapshot(runId: string): Result<ConfigurationSnapshot> {
       const row = dependencies.database
         .query<

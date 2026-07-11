@@ -41,7 +41,7 @@ describe("foundation operations migration", () => {
         database
           .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
+      ).toEqual([1, 2, 3, 4, 5, 6].map((version) => ({ version })));
       for (const table of FOUNDATION_OPERATION_TABLES) {
         expect(
           database.query<{ strict: number }, []>(`PRAGMA table_list('${table}')`).get()?.strict,

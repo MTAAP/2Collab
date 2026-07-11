@@ -10,9 +10,13 @@ import foundationOperationsMigration from "./migrations/0005_foundation_operatio
   type: "text",
 };
 import { verifyFoundationOperationsSchema } from "./migrations/0005_foundation_operations.verify.ts";
+import foundationConfigurationCorrectionsMigration from "./migrations/0006_foundation_configuration_corrections.sql" with {
+  type: "text",
+};
+import { verifyFoundationConfigurationCorrectionsSchema } from "./migrations/0006_foundation_configuration_corrections.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-const LATEST_SCHEMA_VERSION = 5;
+const LATEST_SCHEMA_VERSION = 6;
 const FOUNDATION_TABLES = [
   "audit_events",
   "auth_proxy_replays",
@@ -104,6 +108,9 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 5) {
     verifyFoundationOperationsSchema(database);
   }
+  if (version >= 6) {
+    verifyFoundationConfigurationCorrectionsSchema(database);
+  }
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -160,6 +167,10 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 4) {
       database.exec(foundationOperationsMigration);
+      currentVersion = 5;
+    }
+    if (currentVersion === 5) {
+      database.exec(foundationConfigurationCorrectionsMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);

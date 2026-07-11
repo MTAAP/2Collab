@@ -1,10 +1,14 @@
 import type { Database } from "bun:sqlite";
+import type { Result } from "../../../shared/contracts/result.ts";
 import type {
+  AttemptCauseFact,
+  AttemptOperationalFact,
   AttemptUsageEligibility,
+  GateOperationalFact,
+  OperationalUsageSummary,
   UsageCoverageGroup,
   UsageObservation,
 } from "../../../shared/contracts/telemetry.ts";
-import type { Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 
 function dimension(observation: UsageObservation): string {
@@ -25,6 +29,7 @@ export function aggregateUsage(
     if (!eligible.has(attempt.attemptId)) eligible.set(attempt.attemptId, attempt);
   }
   const seenObservationIds = new Set<string>();
+  const reportedModels = new Map<string, Set<string>>();
   const groups = new Map<
     string,
     {
@@ -55,6 +60,9 @@ export function aggregateUsage(
       continue;
     }
     const key = dimension(observation);
+    const attemptModels = reportedModels.get(observation.attemptId) ?? new Set<string>();
+    attemptModels.add(observation.modelIdentifier);
+    reportedModels.set(observation.attemptId, attemptModels);
     const group = groups.get(key) ?? {
       prototype: observation,
       knownUnits: 0,
@@ -69,10 +77,16 @@ export function aggregateUsage(
 
   return [...groups.values()]
     .map(({ prototype, knownUnits, knownAttempts }) => {
-      const totalAttempts = [...eligible.values()].filter(
-        (attempt) =>
-          attempt.runtime === prototype.runtime && attempt.provider === prototype.provider,
-      ).length;
+      const totalAttempts = [...eligible.values()].filter((attempt) => {
+        if (attempt.runtime !== prototype.runtime || attempt.provider !== prototype.provider) {
+          return false;
+        }
+        const models = reportedModels.get(attempt.attemptId);
+        if (models && models.size > 0) return models.has(prototype.modelIdentifier);
+        return (
+          attempt.declaredModel === undefined || attempt.declaredModel === prototype.modelIdentifier
+        );
+      }).length;
       const knownCount = knownAttempts.size;
       return {
         runtime: prototype.runtime,
@@ -97,6 +111,88 @@ export function aggregateUsage(
         left.modelIdentifier.localeCompare(right.modelIdentifier) ||
         left.category.localeCompare(right.category),
     );
+}
+
+function coverage(known: number, total: number): "NONE" | "PARTIAL" | "COMPLETE" {
+  if (known === 0) return "NONE";
+  return known === total ? "COMPLETE" : "PARTIAL";
+}
+
+export function aggregateOperationalUsage(
+  attempts: readonly AttemptOperationalFact[],
+  causes: readonly AttemptCauseFact[],
+  gateFacts: readonly GateOperationalFact[],
+): OperationalUsageSummary {
+  const uniqueAttempts = new Map(attempts.map((attempt) => [attempt.attemptId, attempt]));
+  const uniqueCauses = new Map(causes.map((cause) => [cause.attemptId, cause]));
+  let knownWallClockAttempts = 0;
+  let knownMilliseconds = 0;
+  for (const attempt of uniqueAttempts.values()) {
+    if (
+      attempt.startedAt !== undefined &&
+      attempt.terminalAt !== undefined &&
+      Number.isInteger(attempt.startedAt) &&
+      Number.isInteger(attempt.terminalAt) &&
+      attempt.startedAt >= 0 &&
+      attempt.terminalAt >= attempt.startedAt
+    ) {
+      knownWallClockAttempts += 1;
+      knownMilliseconds += attempt.terminalAt - attempt.startedAt;
+    }
+  }
+  const knownCauses = [...uniqueAttempts.keys()].filter((attemptId) => {
+    const cause = uniqueCauses.get(attemptId);
+    return cause !== undefined && cause.cause !== "LEGACY_UNKNOWN";
+  }).length;
+  const loopCountKnown = knownCauses === uniqueAttempts.size;
+  const managedLoopIterationCount = loopCountKnown
+    ? [...uniqueAttempts.keys()].filter(
+        (attemptId) => uniqueCauses.get(attemptId)?.cause === "MANAGED_LOOP",
+      ).length
+    : "UNKNOWN";
+
+  const gateGroups = new Map<string, { knownMilliseconds: number; known: number; total: number }>();
+  const seenGateEvaluations = new Set<string>();
+  for (const fact of gateFacts) {
+    if (seenGateEvaluations.has(fact.gateEvaluationId)) continue;
+    seenGateEvaluations.add(fact.gateEvaluationId);
+    const group = gateGroups.get(fact.gateKey) ?? { knownMilliseconds: 0, known: 0, total: 0 };
+    group.total += 1;
+    if (
+      fact.durationMs !== "UNKNOWN" &&
+      Number.isInteger(fact.durationMs) &&
+      fact.durationMs >= 0
+    ) {
+      group.known += 1;
+      group.knownMilliseconds += fact.durationMs;
+    }
+    gateGroups.set(fact.gateKey, group);
+  }
+
+  return {
+    attemptCount: uniqueAttempts.size,
+    attemptCauses: {
+      knownAttempts: knownCauses,
+      totalAttempts: uniqueAttempts.size,
+      coverage: coverage(knownCauses, uniqueAttempts.size),
+    },
+    managedLoopIterationCount,
+    wallClock: {
+      knownMilliseconds,
+      knownAttempts: knownWallClockAttempts,
+      totalAttempts: uniqueAttempts.size,
+      coverage: coverage(knownWallClockAttempts, uniqueAttempts.size),
+    },
+    gates: [...gateGroups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([gateKey, group]) => ({
+        gateKey,
+        knownMilliseconds: group.knownMilliseconds,
+        knownEvaluations: group.known,
+        totalEvaluations: group.total,
+        coverage: coverage(group.known, group.total),
+      })),
+  };
 }
 
 function usageError<T>(code: string, message: string): Result<T> {

@@ -1,15 +1,15 @@
-import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
 import { migrate } from "../../../src/server/db/migrate.ts";
+import {
+  assembleBootstrapEnvelope,
+  createContextRecipeStore,
+} from "../../../src/server/modules/context/context-recipes.ts";
 import {
   createConfigurationPersistence,
   resolveEffectiveRunConfiguration,
 } from "../../../src/server/modules/presets/configuration-resolver.ts";
 import { createPersonalRunPresetStore } from "../../../src/server/modules/presets/personal-run-presets.ts";
-import {
-  assembleBootstrapEnvelope,
-  createContextRecipeStore,
-} from "../../../src/server/modules/context/context-recipes.ts";
 import { aggregateUsage, createUsageStore } from "../../../src/server/modules/telemetry/usage.ts";
 import type { PersonalRunPresetVersion } from "../../../src/shared/contracts/presets.ts";
 
@@ -361,10 +361,12 @@ describe("durable context and run configuration snapshots", () => {
         projectRevision: 1,
         runnerPolicyRevision: 1,
         securityPolicyVersion: 1,
+        securityDigest: SECURITY_DIGEST as never,
         connectorEpochs: {},
         grantIds: [],
       },
       currentBinding: {
+        projectId: "project_1",
         runnerId: "runner_1",
         runnerEpoch: 2,
         mappingRevision: 1,
@@ -424,6 +426,41 @@ describe("durable context and run configuration snapshots", () => {
     );
     expect(envelope.ok).toBeTrue();
     if (!envelope.ok) throw new Error("fixture failed");
+    expect(
+      configurationStore.persistRunSnapshot({
+        runId: "run_1",
+        configuration: effective.value,
+        envelope: {
+          ...envelope.value,
+          references: [
+            ...envelope.value.references,
+            {
+              category: "SOURCE",
+              referenceId: "issue_2",
+              observedRevision: "rev_2",
+              status: "FRESH",
+              authoredPreview: "exceeds stored budget",
+            },
+          ],
+        },
+        authoredRunInput: "Implement Task 11.",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "CONTEXT_RECIPE_BUDGET_EXCEEDED" } });
+    expect(
+      database
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM run_configuration_snapshots")
+        .get()?.count,
+    ).toBe(0);
+    database.exec("UPDATE runners SET policy_revision = 2 WHERE id = 'runner_1'");
+    expect(
+      configurationStore.persistRunSnapshot({
+        runId: "run_1",
+        configuration: effective.value,
+        envelope: envelope.value,
+        authoredRunInput: "Implement Task 11.",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "RUN_CONFIGURATION_AUTHORITY_STALE" } });
+    database.exec("UPDATE runners SET policy_revision = 1 WHERE id = 'runner_1'");
     expect(
       configurationStore.persistRunSnapshot({
         runId: "run_1",
@@ -536,8 +573,8 @@ describe("durable honest usage telemetry", () => {
         category: "OUTPUT",
         knownUnits: 0,
         knownAttempts: 1,
-        totalAttempts: 2,
-        coverage: "PARTIAL",
+        totalAttempts: 1,
+        coverage: "COMPLETE",
       },
     ]);
     expect(JSON.stringify(usage.aggregate())).not.toMatch(/cost|currency|pricing/i);

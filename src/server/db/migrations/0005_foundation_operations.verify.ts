@@ -131,7 +131,7 @@ export const FOUNDATION_OPERATION_TRIGGERS = [
 const FOUNDATION_OPERATIONS_SCHEMA_SHA256 =
   "a70feb94b0c9f9be3861c586c9d23114603d4f8f6ebbed475a63715b3b076838";
 
-const EXPECTED_COLUMNS: Readonly<
+export const FOUNDATION_OPERATION_EXPECTED_COLUMNS: Readonly<
   Record<(typeof FOUNDATION_OPERATION_TABLES)[number], readonly string[]>
 > = {
   run_execution_policies: [
@@ -694,7 +694,7 @@ export function verifyFoundationOperationsSchema(database: Database): void {
       .map((row) => row.name);
     if (
       database.query<{ strict: number }, []>(`PRAGMA table_list('${table}')`).get()?.strict !== 1 ||
-      columns.join(",") !== EXPECTED_COLUMNS[table].join(",")
+      columns.join(",") !== FOUNDATION_OPERATION_EXPECTED_COLUMNS[table].join(",")
     ) {
       throw new Error("SCHEMA_INTEGRITY_INVALID");
     }
@@ -715,7 +715,7 @@ export function verifyFoundationOperationsSchema(database: Database): void {
   const schemaDigest = new Bun.CryptoHasher("sha256")
     .update(JSON.stringify(canonicalObjects))
     .digest("hex");
-  if (schemaDigest !== FOUNDATION_OPERATIONS_SCHEMA_SHA256) {
+  if (versions.at(-1) === 5 && schemaDigest !== FOUNDATION_OPERATIONS_SCHEMA_SHA256) {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
   if (

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { aggregateUsage } from "../../../src/server/modules/telemetry/usage.ts";
+import {
+  aggregateOperationalUsage,
+  aggregateUsage,
+} from "../../../src/server/modules/telemetry/usage.ts";
 
 describe("honest usage telemetry", () => {
   test("keeps unknown eligible attempts in coverage instead of inventing zero", () => {
@@ -173,5 +176,82 @@ describe("honest usage telemetry", () => {
         coverage: "COMPLETE",
       }),
     ]);
+  });
+
+  test("does not put attempts with incompatible reported models in each other's denominator", () => {
+    const groups = aggregateUsage(
+      [
+        { attemptId: "attempt_1", runtime: "CODEX", provider: "OPENAI" },
+        { attemptId: "attempt_2", runtime: "CODEX", provider: "OPENAI" },
+      ],
+      [
+        {
+          observationId: "usage_1",
+          attemptId: "attempt_1",
+          runtime: "CODEX",
+          provider: "OPENAI",
+          modelIdentifier: "gpt-a",
+          category: "OUTPUT",
+          units: 1,
+          observedAt: 100,
+        },
+        {
+          observationId: "usage_2",
+          attemptId: "attempt_2",
+          runtime: "CODEX",
+          provider: "OPENAI",
+          modelIdentifier: "gpt-b",
+          category: "OUTPUT",
+          units: 2,
+          observedAt: 100,
+        },
+      ],
+    );
+    expect(groups).toEqual([
+      expect.objectContaining({ modelIdentifier: "gpt-a", totalAttempts: 1, coverage: "COMPLETE" }),
+      expect.objectContaining({ modelIdentifier: "gpt-b", totalAttempts: 1, coverage: "COMPLETE" }),
+    ]);
+  });
+
+  test("derives operational counts and reports incomplete durations as unknown coverage", () => {
+    expect(
+      aggregateOperationalUsage(
+        [
+          { attemptId: "attempt_1", startedAt: 10, terminalAt: 30 },
+          { attemptId: "attempt_2", startedAt: 40 },
+        ],
+        [
+          { attemptId: "attempt_1", cause: "INITIAL" },
+          { attemptId: "attempt_2", cause: "MANAGED_LOOP", managedLoopIteration: 1 },
+        ],
+        [
+          { gateEvaluationId: "gate_1", gateKey: "lint", durationMs: 5 },
+          { gateEvaluationId: "gate_2", gateKey: "lint", durationMs: "UNKNOWN" },
+        ],
+      ),
+    ).toEqual({
+      attemptCount: 2,
+      attemptCauses: {
+        knownAttempts: 2,
+        totalAttempts: 2,
+        coverage: "COMPLETE",
+      },
+      managedLoopIterationCount: 1,
+      wallClock: {
+        knownMilliseconds: 20,
+        knownAttempts: 1,
+        totalAttempts: 2,
+        coverage: "PARTIAL",
+      },
+      gates: [
+        {
+          gateKey: "lint",
+          knownMilliseconds: 5,
+          knownEvaluations: 1,
+          totalEvaluations: 2,
+          coverage: "PARTIAL",
+        },
+      ],
+    });
   });
 });

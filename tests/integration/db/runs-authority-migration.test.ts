@@ -27,7 +27,7 @@ function versionThreeDatabase(): Database {
 }
 
 describe("runs and authority migration", () => {
-  test("keeps exact strict v4 verified after migrating through v5", () => {
+  test("keeps exact strict v4 verified after migrating through v6", () => {
     const database = new Database(":memory:", { strict: true });
     try {
       migrate(database);
@@ -37,7 +37,7 @@ describe("runs and authority migration", () => {
         database
           .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
           .all(),
-      ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
+      ).toEqual([1, 2, 3, 4, 5, 6].map((version) => ({ version })));
       for (const table of RUN_AUTHORITY_TABLES) {
         expect(
           database.query<{ strict: number }, []>(`PRAGMA table_list('${table}')`).get()?.strict,
