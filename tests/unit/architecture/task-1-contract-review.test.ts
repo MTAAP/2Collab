@@ -208,35 +208,34 @@ describe("reviewed shared contracts", () => {
 
   test("uses the canonical closed GitHub and Outline operation kinds", () => {
     const githubKinds = [
-      "ISSUE_CREATE",
-      "ISSUE_EDIT",
-      "ISSUE_COMMENT",
-      "ISSUE_ADD_LABELS",
-      "ISSUE_REMOVE_LABELS",
-      "ISSUE_ADD_ASSIGNEES",
-      "ISSUE_REMOVE_ASSIGNEES",
-      "ISSUE_SET_MILESTONE",
-      "ISSUE_CLEAR_MILESTONE",
-      "ISSUE_CLOSE",
-      "ISSUE_REOPEN",
-      "MILESTONE_CREATE",
-      "MILESTONE_EDIT",
-      "MILESTONE_CLOSE",
-      "MILESTONE_REOPEN",
-      "PROJECT_ADD_ITEM",
-      "PROJECT_REMOVE_ITEM",
-      "PROJECT_UPDATE_FIELD",
-      "PROJECT_MOVE_ITEM",
+      "CREATE_ISSUE",
+      "EDIT_ISSUE",
+      "ADD_COMMENT",
+      "SET_LABELS",
+      "SET_ASSIGNEES",
+      "SET_MILESTONE",
+      "SET_ISSUE_STATE",
+      "CREATE_MILESTONE",
+      "EDIT_MILESTONE",
+      "ADD_PROJECT_ITEM",
+      "REMOVE_PROJECT_ITEM",
+      "SET_PROJECT_FIELD",
+      "MOVE_PROJECT_ITEM",
     ];
     for (const mutation of githubKinds) {
       expect(
         CollabCommandSchema.safeParse(
           authorizeOperation({
             kind: "MUTATE_GITHUB",
+            projectId: "project_1",
             connectorId: "connector_1",
             connectorEpoch: 1,
             resourceId: "resource_1",
-            expectedRevision: "revision_1",
+            precondition: {
+              kind: "EXACT_REVISION",
+              sourceRevision: "revision_1",
+              comparableDigest: digest,
+            },
             actionDigest: digest,
             mutation,
           }),
@@ -245,35 +244,46 @@ describe("reviewed shared contracts", () => {
     }
 
     for (const mutation of [
-      "DOCUMENT_CREATE",
-      "DOCUMENT_EDIT",
-      "PROPOSAL_APPLY",
-      "WORKING_DOCUMENT_PROMOTE",
-      "WORKING_DOCUMENT_ARCHIVE",
+      "CREATE_DOCUMENT_AS_MEMBER",
+      "EDIT_DOCUMENT_AS_MEMBER",
+      "EDIT_DOCUMENT_AS_BOT",
+      "APPLY_PROPOSAL_AS_MEMBER",
+      "PROMOTE_WORKING_DOCUMENT",
+      "ARCHIVE_WORKING_DOCUMENT",
     ]) {
       expect(
         CollabCommandSchema.safeParse(
           authorizeOperation({
             kind: "MUTATE_OUTLINE",
+            projectId: "project_1",
             connectorId: "connector_1",
             connectorEpoch: 1,
             documentId: "document_1",
-            expectedRevision: "revision_1",
+            precondition: {
+              kind: "EXACT_REVISION",
+              sourceRevision: "revision_1",
+              comparableDigest: digest,
+            },
             actionDigest: digest,
             mutation,
           }),
         ).success,
       ).toBe(true);
     }
-    for (const mutation of ["ADD_COMMENT", "ARCHIVE_DOCUMENT"]) {
+    for (const mutation of ["ISSUE_COMMENT", "ARCHIVE_DOCUMENT"]) {
       expect(
         CollabCommandSchema.safeParse(
           authorizeOperation({
             kind: "MUTATE_OUTLINE",
+            projectId: "project_1",
             connectorId: "connector_1",
             connectorEpoch: 1,
             documentId: "document_1",
-            expectedRevision: "revision_1",
+            precondition: {
+              kind: "EXACT_REVISION",
+              sourceRevision: "revision_1",
+              comparableDigest: digest,
+            },
             actionDigest: digest,
             mutation,
           }),

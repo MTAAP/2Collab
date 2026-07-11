@@ -24,6 +24,11 @@ import type {
   RevokePasskey,
   TeamInvitation,
 } from "../../../shared/contracts/identity.ts";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
+import type { MemberId } from "../../../shared/contracts/ids.ts";
+import type { VerifiedProviderIdentity } from "./oidc.ts";
+import type { ProviderLink } from "./provider-links.ts";
+import type { MemberRemoval } from "./revocation.ts";
 
 export interface IdentityAuthority {
   bootstrap(command: BootstrapDeployment): Promise<Result<MemberSessionIssue>>;
@@ -42,4 +47,27 @@ export interface IdentityAuthority {
   inspectInvitation(query: InspectInvitation): Promise<Result<TeamInvitation>>;
   revokeInvitation(command: RevokeInvitation): Promise<Result<TeamInvitation>>;
   accept(command: AcceptInvitationWithVerifiedIdentity): Promise<Result<MemberSessionIssue>>;
+  linkProvider(
+    command: Readonly<{
+      idempotencyKey: string;
+      actor: MemberActor;
+      identity: VerifiedProviderIdentity;
+    }>,
+  ): Promise<Result<ProviderLink>>;
+  acceptProviderInvitation(
+    command: Readonly<{
+      idempotencyKey: string;
+      invitationSessionSecret: string;
+      displayName: string;
+      identity: VerifiedProviderIdentity;
+    }>,
+  ): Promise<Result<ProviderLink>>;
+  remove(
+    command: Readonly<{
+      idempotencyKey: string;
+      actor: MemberActor;
+      memberId: MemberId;
+      expectedRevision: number;
+    }>,
+  ): Promise<Result<MemberRemoval>>;
 }

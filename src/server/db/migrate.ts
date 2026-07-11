@@ -5,14 +5,29 @@ import { inImmediateTransaction } from "./transaction.ts";
 const LATEST_SCHEMA_VERSION = 1;
 const FOUNDATION_TABLES = [
   "audit_events",
+  "auth_proxy_replays",
+  "authority_revocation_outbox",
+  "connector_idempotency",
+  "connector_operation_authorizations",
+  "connector_operation_intents",
+  "connector_projections",
+  "connector_scope_operations",
+  "connector_scope_references",
+  "connector_scopes",
   "connector_epochs",
   "deployments",
+  "device_access_tokens",
+  "device_authorization_codes",
+  "device_credential_families",
+  "dpop_replays",
   "encrypted_credentials",
   "idempotency_results",
   "invitation_exchange_sessions",
   "invitations",
   "member_credentials",
   "members",
+  "host_recovery_codes",
+  "oidc_transactions",
   "passkey_credential_transports",
   "passkey_credentials",
   "projects",
@@ -20,9 +35,16 @@ const FOUNDATION_TABLES = [
   "recovery_codes",
   "schema_migrations",
   "sessions",
+  "source_reconciliation_idempotency",
   "webauthn_challenges",
 ] as const;
-const FOUNDATION_INDEXES = ["one_active_recovery_code_set_per_member"] as const;
+const FOUNDATION_INDEXES = [
+  "connector_operation_intents_recovery",
+  "one_active_host_recovery_per_owner",
+  "one_active_device_family",
+  "one_active_recovery_code_set_per_member",
+  "sessions_active_member",
+] as const;
 
 type SchemaVersion = Readonly<{ version: number }>;
 

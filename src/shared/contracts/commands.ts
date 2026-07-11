@@ -236,50 +236,102 @@ export type RenewAuthoritySession = CommandBase &
   }>;
 
 export type GitHubMutationKind =
-  | "ISSUE_CREATE"
-  | "ISSUE_EDIT"
-  | "ISSUE_COMMENT"
-  | "ISSUE_ADD_LABELS"
-  | "ISSUE_REMOVE_LABELS"
-  | "ISSUE_ADD_ASSIGNEES"
-  | "ISSUE_REMOVE_ASSIGNEES"
-  | "ISSUE_SET_MILESTONE"
-  | "ISSUE_CLEAR_MILESTONE"
-  | "ISSUE_CLOSE"
-  | "ISSUE_REOPEN"
-  | "MILESTONE_CREATE"
-  | "MILESTONE_EDIT"
-  | "MILESTONE_CLOSE"
-  | "MILESTONE_REOPEN"
-  | "PROJECT_ADD_ITEM"
-  | "PROJECT_REMOVE_ITEM"
-  | "PROJECT_UPDATE_FIELD"
-  | "PROJECT_MOVE_ITEM";
+  | "CREATE_ISSUE"
+  | "EDIT_ISSUE"
+  | "ADD_COMMENT"
+  | "SET_LABELS"
+  | "SET_ASSIGNEES"
+  | "SET_MILESTONE"
+  | "SET_ISSUE_STATE"
+  | "CREATE_MILESTONE"
+  | "EDIT_MILESTONE"
+  | "ADD_PROJECT_ITEM"
+  | "REMOVE_PROJECT_ITEM"
+  | "SET_PROJECT_FIELD"
+  | "MOVE_PROJECT_ITEM";
 export type OutlineMutationKind =
-  | "DOCUMENT_CREATE"
-  | "DOCUMENT_EDIT"
-  | "PROPOSAL_APPLY"
-  | "WORKING_DOCUMENT_PROMOTE"
-  | "WORKING_DOCUMENT_ARCHIVE";
+  | "CREATE_DOCUMENT_AS_MEMBER"
+  | "EDIT_DOCUMENT_AS_MEMBER"
+  | "EDIT_DOCUMENT_AS_BOT"
+  | "APPLY_PROPOSAL_AS_MEMBER"
+  | "PROMOTE_WORKING_DOCUMENT"
+  | "ARCHIVE_WORKING_DOCUMENT";
+
+export const GitHubMutationKindSchema = z.enum([
+  "CREATE_ISSUE",
+  "EDIT_ISSUE",
+  "ADD_COMMENT",
+  "SET_LABELS",
+  "SET_ASSIGNEES",
+  "SET_MILESTONE",
+  "SET_ISSUE_STATE",
+  "CREATE_MILESTONE",
+  "EDIT_MILESTONE",
+  "ADD_PROJECT_ITEM",
+  "REMOVE_PROJECT_ITEM",
+  "SET_PROJECT_FIELD",
+  "MOVE_PROJECT_ITEM",
+]);
+export const OutlineMutationKindSchema = z.enum([
+  "CREATE_DOCUMENT_AS_MEMBER",
+  "EDIT_DOCUMENT_AS_MEMBER",
+  "EDIT_DOCUMENT_AS_BOT",
+  "APPLY_PROPOSAL_AS_MEMBER",
+  "PROMOTE_WORKING_DOCUMENT",
+  "ARCHIVE_WORKING_DOCUMENT",
+]);
+
+export type SourceMutationPrecondition =
+  | Readonly<{ kind: "ABSENT" }>
+  | Readonly<{ kind: "EXACT_REVISION"; sourceRevision: string; comparableDigest: Sha256 }>
+  | Readonly<{
+      kind: "EXPECTED_MEMBERSHIP";
+      sourceRevision: string;
+      comparableDigest: Sha256;
+      memberKey: string;
+      present: boolean;
+    }>;
+
+export const SourceMutationPreconditionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ABSENT") }).strict(),
+  z
+    .object({
+      kind: z.literal("EXACT_REVISION"),
+      sourceRevision: z.string().min(1).max(128),
+      comparableDigest: Sha256Schema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("EXPECTED_MEMBERSHIP"),
+      sourceRevision: z.string().min(1).max(128),
+      comparableDigest: Sha256Schema,
+      memberKey: z.string().min(1).max(256),
+      present: z.boolean(),
+    })
+    .strict(),
+]);
 
 export type SensitiveOperation =
   | Readonly<{ kind: "MUTATE_REPOSITORY"; expectedHead: CommitSha }>
   | Readonly<{ kind: "PUBLISH_GIT_REFERENCE"; expectedHead: CommitSha; remoteRef: string }>
   | Readonly<{
       kind: "MUTATE_GITHUB";
+      projectId: ProjectId;
       connectorId: ConnectorId;
       connectorEpoch: number;
       resourceId: string;
-      expectedRevision: string;
+      precondition: SourceMutationPrecondition;
       actionDigest: Sha256;
       mutation: GitHubMutationKind;
     }>
   | Readonly<{
       kind: "MUTATE_OUTLINE";
+      projectId: ProjectId;
       connectorId: ConnectorId;
       connectorEpoch: number;
       documentId: string;
-      expectedRevision: string;
+      precondition: SourceMutationPrecondition;
       actionDigest: Sha256;
       mutation: OutlineMutationKind;
     }>
@@ -452,49 +504,25 @@ const SensitiveOperationSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("MUTATE_GITHUB"),
+      projectId: IdentifierSchema,
       connectorId: IdentifierSchema,
       connectorEpoch: RevisionSchema,
       resourceId: z.string().min(1).max(256),
-      expectedRevision: z.string().min(1).max(128),
+      precondition: SourceMutationPreconditionSchema,
       actionDigest: Sha256Schema,
-      mutation: z.enum([
-        "ISSUE_CREATE",
-        "ISSUE_EDIT",
-        "ISSUE_COMMENT",
-        "ISSUE_ADD_LABELS",
-        "ISSUE_REMOVE_LABELS",
-        "ISSUE_ADD_ASSIGNEES",
-        "ISSUE_REMOVE_ASSIGNEES",
-        "ISSUE_SET_MILESTONE",
-        "ISSUE_CLEAR_MILESTONE",
-        "ISSUE_CLOSE",
-        "ISSUE_REOPEN",
-        "MILESTONE_CREATE",
-        "MILESTONE_EDIT",
-        "MILESTONE_CLOSE",
-        "MILESTONE_REOPEN",
-        "PROJECT_ADD_ITEM",
-        "PROJECT_REMOVE_ITEM",
-        "PROJECT_UPDATE_FIELD",
-        "PROJECT_MOVE_ITEM",
-      ]),
+      mutation: GitHubMutationKindSchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("MUTATE_OUTLINE"),
+      projectId: IdentifierSchema,
       connectorId: IdentifierSchema,
       connectorEpoch: RevisionSchema,
       documentId: z.string().min(1).max(256),
-      expectedRevision: z.string().min(1).max(128),
+      precondition: SourceMutationPreconditionSchema,
       actionDigest: Sha256Schema,
-      mutation: z.enum([
-        "DOCUMENT_CREATE",
-        "DOCUMENT_EDIT",
-        "PROPOSAL_APPLY",
-        "WORKING_DOCUMENT_PROMOTE",
-        "WORKING_DOCUMENT_ARCHIVE",
-      ]),
+      mutation: OutlineMutationKindSchema,
     })
     .strict(),
   z

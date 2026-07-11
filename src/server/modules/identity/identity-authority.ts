@@ -17,6 +17,11 @@ import { inImmediateTransaction } from "../../db/transaction.ts";
 import type { IdentityAuthority } from "./contract.ts";
 import { IdentityIdempotency } from "./idempotency.ts";
 import { invitationState } from "./invitations.ts";
+import { createProviderLinkAuthority } from "./provider-links.ts";
+import {
+  createMemberRevocationAuthority,
+  type RevocationExecutionAuthority,
+} from "./revocation.ts";
 import {
   simpleWebAuthnPort,
   type RegistrationVerification,
@@ -29,6 +34,7 @@ const INVITATION_LIFETIME = 48 * 60 * 60;
 const INVITATION_SESSION_LIFETIME = 15 * 60;
 const RECOVERY_SESSION_LIFETIME = 15 * 60;
 const BROWSER_SESSION_LIFETIME = 7 * 24 * 60 * 60;
+const BROWSER_SESSION_IDLE_LIFETIME = 12 * 60 * 60;
 const RECOVERY_CODE_COUNT = 8;
 const PasskeyCredentialReplaySchema = PasskeyCredentialSchema.transform(
   (value) => value as PasskeyCredential,
@@ -107,6 +113,7 @@ export type IdentityAuthorityDependencies = Readonly<{
   rpName: string;
   deriveSecret?: typeof hashOneTimeSecret;
   digest?: typeof sha256;
+  executionAuthority?: RevocationExecutionAuthority;
 }>;
 
 function error(
@@ -130,12 +137,14 @@ function sessionIssue(
   memberId: string,
   expiresAt: number,
   proof: string,
+  csrfProof: string,
 ): MemberSessionIssue {
   return {
     id: id as MemberSessionIssue["id"],
     memberId: memberId as MemberSessionIssue["memberId"],
     expiresAt: expiresAt as MemberSessionIssue["expiresAt"],
     proof,
+    csrfProof,
   };
 }
 
@@ -198,6 +207,20 @@ export function createIdentityAuthority(
   const idempotency = new IdentityIdempotency(database, digest, clock, () =>
     auditFailure("IDEMPOTENCY_REPLAY", "IDEMPOTENCY_STORAGE_INVALID"),
   );
+  const providerLinks = createProviderLinkAuthority({ database, clock, id, digest });
+  const revocations = createMemberRevocationAuthority({
+    database,
+    clock,
+    id,
+    digest,
+    executionAuthority:
+      dependencies.executionAuthority ??
+      ({
+        async execute() {
+          return { ok: true, value: { applied: true as const } };
+        },
+      } satisfies RevocationExecutionAuthority),
+  });
   const reject = <T>(
     surface: string,
     code: string,
@@ -231,16 +254,18 @@ export function createIdentityAuthority(
           memberRevision: number;
           sessionRevision: number;
         }>,
-        [string, string, Uint8Array, number]
+        [string, string, Uint8Array, number, number]
       >(
         `SELECT members.role, members.revision AS memberRevision,
                 sessions.revision AS sessionRevision FROM members
          JOIN sessions ON sessions.member_id = members.id
          WHERE members.id = ? AND sessions.id = ? AND members.status = 'ACTIVE'
            AND sessions.proof_hash = ? AND sessions.kind = 'BROWSER'
-           AND sessions.revoked_at IS NULL AND sessions.expires_at > ?`,
+           AND sessions.revoked_at IS NULL AND sessions.idle_expires_at > ?
+           AND sessions.absolute_expires_at > ?
+           AND sessions.member_authority_epoch = members.authority_epoch`,
       )
-      .get(actor.memberId, actor.sessionId, proofHash, clock());
+      .get(actor.memberId, actor.sessionId, proofHash, clock(), clock());
   };
 
   const memberAuthority = async (
@@ -779,7 +804,9 @@ export function createIdentityAuthority(
       }
       const opaqueUserId = (await digest(`bootstrap:${command.bootstrapSecret}`)).slice(0, 32);
       const sessionProof = base64Url(randomBytes(32));
+      const csrfProof = base64Url(randomBytes(32));
       const sessionProofHash = await digest(sessionProof);
+      const csrfHash = await digest(csrfProof);
       try {
         return auditedTransaction("BOOTSTRAP", () => {
           const committedReplay = idempotency.replay<never>(ticket.value);
@@ -810,10 +837,22 @@ export function createIdentityAuthority(
             .run(memberId, command.displayName.trim(), now);
           insertCredential(memberId, opaqueUserId, command.credentialName.trim(), verified.value);
           database
-            .query<void, [string, string, Uint8Array, number]>(
-              "INSERT INTO sessions(id, member_id, proof_hash, kind, expires_at, revision) VALUES (?, ?, ?, 'BROWSER', ?, 1)",
+            .query(
+              `INSERT INTO sessions(
+                 id, member_id, proof_hash, kind, expires_at, idle_expires_at,
+                 absolute_expires_at, csrf_hash, member_authority_epoch, revision, created_at
+               ) VALUES (?, ?, ?, 'BROWSER', ?, ?, ?, ?, 1, 1, ?)`,
             )
-            .run(sessionId, memberId, sessionProofHash, now + BROWSER_SESSION_LIFETIME);
+            .run(
+              sessionId,
+              memberId,
+              sessionProofHash,
+              now + BROWSER_SESSION_LIFETIME,
+              now + BROWSER_SESSION_IDLE_LIFETIME,
+              now + BROWSER_SESSION_LIFETIME,
+              csrfHash,
+              now,
+            );
           database
             .query<void, [number, string]>(
               "UPDATE webauthn_challenges SET consumed_at = ?, revision = revision + 1 WHERE id = ? AND consumed_at IS NULL",
@@ -822,7 +861,13 @@ export function createIdentityAuthority(
           audit("DEPLOYMENT_BOOTSTRAPPED", "BOOTSTRAP", deploymentId, memberId, { role: "OWNER" });
           const result = {
             ok: true,
-            value: sessionIssue(sessionId, memberId, now + BROWSER_SESSION_LIFETIME, sessionProof),
+            value: sessionIssue(
+              sessionId,
+              memberId,
+              now + BROWSER_SESSION_LIFETIME,
+              sessionProof,
+              csrfProof,
+            ),
           } as const;
           idempotency.storeSecretIssued(
             ticket.value,
@@ -1101,7 +1146,9 @@ export function createIdentityAuthority(
           return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
         }
         const sessionProof = base64Url(randomBytes(32));
+        const csrfProof = base64Url(randomBytes(32));
         const sessionProofHash = await digest(sessionProof);
+        const csrfHash = await digest(csrfProof);
         return auditedTransaction("PASSKEY_AUTHENTICATION", () => {
           const committedReplay = idempotency.replay<never>(ticket.value);
           if (committedReplay) return committedReplay;
@@ -1143,10 +1190,22 @@ export function createIdentityAuthority(
             );
           const sessionId = id("session");
           database
-            .query<void, [string, string, Uint8Array, number]>(
-              "INSERT INTO sessions(id, member_id, proof_hash, kind, expires_at, revision) VALUES (?, ?, ?, 'BROWSER', ?, 1)",
+            .query(
+              `INSERT INTO sessions(
+                 id, member_id, proof_hash, kind, expires_at, idle_expires_at,
+                 absolute_expires_at, csrf_hash, member_authority_epoch, revision, created_at
+               ) VALUES (?, ?, ?, 'BROWSER', ?, ?, ?, ?, 1, 1, ?)`,
             )
-            .run(sessionId, credential.member_id, sessionProofHash, now + BROWSER_SESSION_LIFETIME);
+            .run(
+              sessionId,
+              credential.member_id,
+              sessionProofHash,
+              now + BROWSER_SESSION_LIFETIME,
+              now + BROWSER_SESSION_IDLE_LIFETIME,
+              now + BROWSER_SESSION_LIFETIME,
+              csrfHash,
+              now,
+            );
           database
             .query<void, [number, string]>(
               "UPDATE webauthn_challenges SET consumed_at = ?, revision = revision + 1 WHERE id = ?",
@@ -1162,6 +1221,7 @@ export function createIdentityAuthority(
               credential.member_id,
               now + BROWSER_SESSION_LIFETIME,
               sessionProof,
+              csrfProof,
             ),
           } as const;
           idempotency.storeSecretIssued(
@@ -1572,7 +1632,9 @@ export function createIdentityAuthority(
       }
       const opaqueUserId = (await digest(`invitation:${exchange.id}`)).slice(0, 32);
       const sessionProof = base64Url(randomBytes(32));
+      const csrfProof = base64Url(randomBytes(32));
       const sessionProofHash = await digest(sessionProof);
+      const csrfHash = await digest(csrfProof);
       try {
         return auditedTransaction("INVITATION_ACCEPT", () => {
           const committedReplay = idempotency.replay<never>(ticket.value);
@@ -1615,10 +1677,22 @@ export function createIdentityAuthority(
             .run(memberId, command.displayName.trim(), now);
           insertCredential(memberId, opaqueUserId, command.credentialName.trim(), verified.value);
           database
-            .query<void, [string, string, Uint8Array, number]>(
-              "INSERT INTO sessions(id, member_id, proof_hash, kind, expires_at, revision) VALUES (?, ?, ?, 'BROWSER', ?, 1)",
+            .query(
+              `INSERT INTO sessions(
+                 id, member_id, proof_hash, kind, expires_at, idle_expires_at,
+                 absolute_expires_at, csrf_hash, member_authority_epoch, revision, created_at
+               ) VALUES (?, ?, ?, 'BROWSER', ?, ?, ?, ?, 1, 1, ?)`,
             )
-            .run(sessionId, memberId, sessionProofHash, now + BROWSER_SESSION_LIFETIME);
+            .run(
+              sessionId,
+              memberId,
+              sessionProofHash,
+              now + BROWSER_SESSION_LIFETIME,
+              now + BROWSER_SESSION_IDLE_LIFETIME,
+              now + BROWSER_SESSION_LIFETIME,
+              csrfHash,
+              now,
+            );
           database
             .query<void, [number, string]>(
               "UPDATE invitations SET consumed_at = ?, revision = revision + 1 WHERE id = ?",
@@ -1639,7 +1713,13 @@ export function createIdentityAuthority(
           });
           const result = {
             ok: true,
-            value: sessionIssue(sessionId, memberId, now + BROWSER_SESSION_LIFETIME, sessionProof),
+            value: sessionIssue(
+              sessionId,
+              memberId,
+              now + BROWSER_SESSION_LIFETIME,
+              sessionProof,
+              csrfProof,
+            ),
           } as const;
           idempotency.storeSecretIssued(
             ticket.value,
@@ -1854,6 +1934,18 @@ export function createIdentityAuthority(
       } catch {
         return reject("RECOVERY_REDEEM", "IDENTITY_OPERATION_FAILED", "Identity operation failed.");
       }
+    },
+
+    linkProvider(command) {
+      return providerLinks.link(command);
+    },
+
+    acceptProviderInvitation(command) {
+      return providerLinks.acceptInvitation(command);
+    },
+
+    remove(command) {
+      return revocations.remove(command);
     },
   };
 }

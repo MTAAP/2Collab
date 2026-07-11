@@ -155,14 +155,6 @@ describe("local identity lifecycle", () => {
       invitationId: invitation.value.id,
     });
     expect(inspected.ok).toBe(true);
-    value.advance(48 * 60 * 60);
-    const expired = await value.identity.exchangeInvitation({
-      secret: invitation.value.secret,
-      idempotencyKey: "exchange-expired",
-    });
-    expect(expired.ok).toBe(false);
-    if (!expired.ok) expect(expired.error.code).toBe("INVITATION_EXPIRED");
-
     const second = await value.invite(owner.value, "Revoked");
     if (!second.ok) throw new Error(second.error.code);
     expect(
@@ -174,6 +166,14 @@ describe("local identity lifecycle", () => {
         })
       ).ok,
     ).toBe(true);
+    value.advance(48 * 60 * 60);
+    const expired = await value.identity.exchangeInvitation({
+      secret: invitation.value.secret,
+      idempotencyKey: "exchange-expired",
+    });
+    expect(expired.ok).toBe(false);
+    if (!expired.ok) expect(expired.error.code).toBe("INVITATION_EXPIRED");
+
     const revoked = await value.identity.exchangeInvitation({
       secret: second.value.secret,
       idempotencyKey: "exchange-revoked",

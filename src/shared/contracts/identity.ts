@@ -20,7 +20,7 @@ export type MemberSession = Readonly<{
   expiresAt: Instant;
 }>;
 
-export type MemberSessionIssue = MemberSession & Readonly<{ proof: string }>;
+export type MemberSessionIssue = MemberSession & Readonly<{ proof: string; csrfProof: string }>;
 
 export type MemberActor = Readonly<{
   kind: "MEMBER";
@@ -185,6 +185,7 @@ export const MemberSessionSchema = z
 
 export const MemberSessionIssueSchema = MemberSessionSchema.extend({
   proof: z.string().min(32).max(512),
+  csrfProof: z.string().min(32).max(512),
 }).strict();
 
 const DisplayNameSchema = z.string().trim().min(1).max(120);

@@ -1,0 +1,363 @@
+import type { Database } from "bun:sqlite";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
+import type { ApplyRevocation } from "../../../shared/contracts/commands.ts";
+import type { MemberId } from "../../../shared/contracts/ids.ts";
+import type { Result } from "../../../shared/contracts/result.ts";
+import { inImmediateTransaction } from "../../db/transaction.ts";
+
+export type RemoveMember = Readonly<{
+  idempotencyKey: string;
+  actor: MemberActor;
+  memberId: MemberId;
+  expectedRevision: number;
+}>;
+
+export type MemberRemoval = Readonly<{
+  memberId: MemberId;
+  authorityEpoch: number;
+  disposition: "REVOKED";
+  revokedEpochs: readonly ["MEMBER", "RUNNER", "SESSION", "DEVICE"];
+  revocationDispatch: "DISPATCHED" | "PENDING";
+}>;
+
+export interface RevocationExecutionAuthority {
+  execute(command: ApplyRevocation): Promise<Result<Readonly<{ applied: true }>>>;
+}
+
+type Dependencies = Readonly<{
+  database: Database;
+  clock: () => number;
+  id: (prefix: string) => string;
+  digest: (value: string) => Promise<Uint8Array>;
+  executionAuthority: RevocationExecutionAuthority;
+}>;
+
+function error(
+  code: string,
+  message: string,
+  retry: "NEVER" | "SAME_INPUT" = "NEVER",
+): Result<never> {
+  return { ok: false, error: { code, message, retry } };
+}
+
+type RemovalSnapshot = Readonly<{
+  targetRevision: number;
+  targetRole: "OWNER" | "MEMBER";
+  targetAuthorityEpoch: number;
+  actorMemberRevision: number;
+  actorSessionRevision: number;
+  actorProofHash: Uint8Array;
+}>;
+
+export function removeMemberTransaction(
+  database: Database,
+  command: RemoveMember,
+  snapshot: RemovalSnapshot,
+  dependencies: Pick<Dependencies, "clock" | "id">,
+): Result<MemberRemoval> {
+  return inImmediateTransaction(database, () => {
+    const actor = database
+      .query<{ id: string }, [string, number, string, number, Uint8Array, number]>(
+        `SELECT members.id FROM members JOIN sessions ON sessions.member_id = members.id
+         WHERE members.id = ? AND members.revision = ? AND members.role = 'OWNER'
+           AND members.status = 'ACTIVE' AND sessions.id = ? AND sessions.revision = ?
+           AND sessions.proof_hash = ? AND sessions.revoked_at IS NULL
+           AND sessions.expires_at > ? AND sessions.member_authority_epoch = members.authority_epoch`,
+      )
+      .get(
+        command.actor.memberId,
+        snapshot.actorMemberRevision,
+        command.actor.sessionId,
+        snapshot.actorSessionRevision,
+        snapshot.actorProofHash,
+        dependencies.clock(),
+      );
+    const target = database
+      .query<{ role: "OWNER" | "MEMBER"; authority_epoch: number }, [string, number]>(
+        "SELECT role, authority_epoch FROM members WHERE id = ? AND revision = ? AND status = 'ACTIVE'",
+      )
+      .get(command.memberId, snapshot.targetRevision);
+    if (!actor || !target)
+      return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+    if (target.role === "OWNER") {
+      const owners = database
+        .query<{ count: number }, []>(
+          "SELECT count(*) AS count FROM members WHERE role = 'OWNER' AND status = 'ACTIVE'",
+        )
+        .get()?.count;
+      if ((owners ?? 0) <= 1)
+        return error("LAST_OWNER_REQUIRED", "At least one active owner is required.");
+    }
+    const now = dependencies.clock();
+    const authorityEpoch = target.authority_epoch + 1;
+    const changed = database
+      .query(
+        `UPDATE members SET status = 'REVOKED', authority_epoch = ?, revision = revision + 1
+         WHERE id = ? AND revision = ? AND status = 'ACTIVE'`,
+      )
+      .run(authorityEpoch, command.memberId, snapshot.targetRevision);
+    if (changed.changes !== 1)
+      return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+    database
+      .query(
+        "UPDATE member_credentials SET revoked_at = ?, revision = revision + 1 WHERE member_id = ? AND revoked_at IS NULL",
+      )
+      .run(now, command.memberId);
+    database
+      .query(
+        "UPDATE passkey_credentials SET revoked_at = ?, revision = revision + 1 WHERE member_id = ? AND revoked_at IS NULL",
+      )
+      .run(now, command.memberId);
+    database
+      .query(
+        "UPDATE sessions SET revoked_at = ?, revision = revision + 1 WHERE member_id = ? AND revoked_at IS NULL",
+      )
+      .run(now, command.memberId);
+    database
+      .query(
+        "UPDATE device_credential_families SET revoked_at = ?, revision = revision + 1 WHERE member_id = ? AND revoked_at IS NULL",
+      )
+      .run(now, command.memberId);
+    database
+      .query(
+        `UPDATE device_access_tokens SET revoked_at = ?, revision = revision + 1
+         WHERE family_id IN (SELECT id FROM device_credential_families WHERE member_id = ?)
+           AND revoked_at IS NULL`,
+      )
+      .run(now, command.memberId);
+    database
+      .query(
+        "UPDATE encrypted_credentials SET revoked_at = ?, revision = revision + 1, updated_at = ? WHERE owner_kind = 'MEMBER' AND owner_id = ? AND revoked_at IS NULL",
+      )
+      .run(now, now, command.memberId);
+    database
+      .query(
+        `INSERT INTO authority_revocation_outbox(
+           id, member_id, member_authority_epoch, status, created_at
+         ) VALUES (?, ?, ?, 'PENDING', ?)`,
+      )
+      .run(command.idempotencyKey, command.memberId, authorityEpoch, now);
+    database
+      .query(
+        "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, 'MEMBER_REVOKED', 'MEMBER', ?, ?, ?, ?)",
+      )
+      .run(
+        dependencies.id("audit"),
+        command.actor.memberId,
+        command.memberId,
+        JSON.stringify({ disposition: "REVOKED", authorityEpoch }),
+        now,
+      );
+    return {
+      ok: true,
+      value: {
+        memberId: command.memberId,
+        authorityEpoch,
+        disposition: "REVOKED",
+        revokedEpochs: ["MEMBER", "RUNNER", "SESSION", "DEVICE"],
+        revocationDispatch: "PENDING",
+      },
+    };
+  });
+}
+
+export function createMemberRevocationAuthority(dependencies: Dependencies) {
+  return {
+    async remove(command: RemoveMember): Promise<Result<MemberRemoval>> {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(command.idempotencyKey) ||
+        !Number.isInteger(command.expectedRevision) ||
+        command.expectedRevision < 1 ||
+        command.actor.sessionProof.length < 32 ||
+        command.actor.sessionProof.length > 512
+      )
+        return error("MEMBER_REMOVAL_INVALID", "Member removal input is invalid.");
+      const existing = dependencies.database
+        .query<{ member_id: string; member_authority_epoch: number; status: string }, [string]>(
+          "SELECT member_id, member_authority_epoch, status FROM authority_revocation_outbox WHERE id = ?",
+        )
+        .get(command.idempotencyKey);
+      if (existing) {
+        if (existing.member_id !== command.memberId)
+          return error("IDEMPOTENCY_CONFLICT", "Idempotency key was used with different input.");
+        let dispatchState = existing.status;
+        if (existing.status !== "DISPATCHED") {
+          const retried = await dependencies.executionAuthority.execute({
+            kind: "APPLY_REVOCATION",
+            idempotencyKey: command.idempotencyKey as never,
+            actor: command.actor,
+            source: {
+              kind: "MEMBER",
+              memberId: command.memberId,
+              authorityEpoch: existing.member_authority_epoch,
+            },
+          });
+          if (retried.ok) {
+            try {
+              inImmediateTransaction(dependencies.database, () => {
+                dependencies.database
+                  .query(
+                    `UPDATE authority_revocation_outbox SET
+                       status = 'DISPATCHED', attempt_count = attempt_count + 1, dispatched_at = ?
+                     WHERE id = ? AND status != 'DISPATCHED'`,
+                  )
+                  .run(dependencies.clock(), command.idempotencyKey);
+              });
+              dispatchState = "DISPATCHED";
+            } catch {
+              // The durable intent remains retryable.
+            }
+          }
+        }
+        return {
+          ok: true,
+          value: {
+            memberId: command.memberId,
+            authorityEpoch: existing.member_authority_epoch,
+            disposition: "REVOKED",
+            revokedEpochs: ["MEMBER", "RUNNER", "SESSION", "DEVICE"],
+            revocationDispatch: dispatchState === "DISPATCHED" ? "DISPATCHED" : "PENDING",
+          },
+        };
+      }
+      const actorProofHash = await dependencies.digest(command.actor.sessionProof);
+      const actor = dependencies.database
+        .query<
+          { member_revision: number; session_revision: number },
+          [string, string, Uint8Array, number]
+        >(
+          `SELECT members.revision AS member_revision, sessions.revision AS session_revision
+           FROM members JOIN sessions ON sessions.member_id = members.id
+           WHERE members.id = ? AND members.role = 'OWNER' AND members.status = 'ACTIVE'
+             AND sessions.id = ? AND sessions.proof_hash = ? AND sessions.revoked_at IS NULL
+             AND sessions.expires_at > ? AND sessions.member_authority_epoch = members.authority_epoch`,
+        )
+        .get(command.actor.memberId, command.actor.sessionId, actorProofHash, dependencies.clock());
+      const target = dependencies.database
+        .query<{ revision: number; role: "OWNER" | "MEMBER"; authority_epoch: number }, [string]>(
+          "SELECT revision, role, authority_epoch FROM members WHERE id = ? AND status = 'ACTIVE'",
+        )
+        .get(command.memberId);
+      if (!actor) return error("OWNER_REQUIRED", "Owner authorization is required.");
+      if (!target || target.revision !== command.expectedRevision)
+        return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
+      let committed: Result<MemberRemoval>;
+      try {
+        committed = removeMemberTransaction(
+          dependencies.database,
+          command,
+          {
+            targetRevision: target.revision,
+            targetRole: target.role,
+            targetAuthorityEpoch: target.authority_epoch,
+            actorMemberRevision: actor.member_revision,
+            actorSessionRevision: actor.session_revision,
+            actorProofHash,
+          },
+          dependencies,
+        );
+      } catch {
+        return error("MEMBER_REMOVAL_FAILED", "Member removal failed.");
+      }
+      if (!committed.ok) return committed;
+      const dispatched = await dependencies.executionAuthority.execute({
+        kind: "APPLY_REVOCATION",
+        idempotencyKey: command.idempotencyKey as never,
+        actor: command.actor,
+        source: {
+          kind: "MEMBER",
+          memberId: command.memberId,
+          authorityEpoch: committed.value.authorityEpoch,
+        },
+      });
+      if (dispatched.ok) {
+        try {
+          inImmediateTransaction(dependencies.database, () => {
+            dependencies.database
+              .query(
+                `UPDATE authority_revocation_outbox SET
+                   status = 'DISPATCHED', attempt_count = attempt_count + 1, dispatched_at = ?
+                 WHERE id = ? AND status = 'PENDING'`,
+              )
+              .run(dependencies.clock(), command.idempotencyKey);
+          });
+          return {
+            ok: true,
+            value: { ...committed.value, revocationDispatch: "DISPATCHED" },
+          };
+        } catch {
+          return committed;
+        }
+      }
+      try {
+        inImmediateTransaction(dependencies.database, () => {
+          dependencies.database
+            .query(
+              "UPDATE authority_revocation_outbox SET status = 'FAILED', attempt_count = attempt_count + 1 WHERE id = ? AND status = 'PENDING'",
+            )
+            .run(command.idempotencyKey);
+        });
+      } catch {
+        // The committed removal and pending intent remain authoritative.
+      }
+      return committed;
+    },
+
+    async changeRole(
+      input: Readonly<{
+        actor: MemberActor;
+        memberId: MemberId;
+        expectedRevision: number;
+        role: "OWNER" | "MEMBER";
+      }>,
+    ): Promise<
+      Result<Readonly<{ memberId: MemberId; role: "OWNER" | "MEMBER"; revision: number }>>
+    > {
+      const proofHash = await dependencies.digest(input.actor.sessionProof);
+      try {
+        return inImmediateTransaction(dependencies.database, () => {
+          const actor = dependencies.database
+            .query<{ id: string }, [string, string, Uint8Array, number]>(
+              `SELECT members.id FROM members JOIN sessions ON sessions.member_id = members.id
+               WHERE members.id = ? AND members.role = 'OWNER' AND members.status = 'ACTIVE'
+                 AND sessions.id = ? AND sessions.proof_hash = ? AND sessions.revoked_at IS NULL
+                 AND sessions.expires_at > ?`,
+            )
+            .get(input.actor.memberId, input.actor.sessionId, proofHash, dependencies.clock());
+          const target = dependencies.database
+            .query<{ role: "OWNER" | "MEMBER" }, [string, number]>(
+              "SELECT role FROM members WHERE id = ? AND revision = ? AND status = 'ACTIVE'",
+            )
+            .get(input.memberId, input.expectedRevision);
+          if (!actor) return error("OWNER_REQUIRED", "Owner authorization is required.");
+          if (!target)
+            return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
+          if (target.role === "OWNER" && input.role === "MEMBER") {
+            const owners = dependencies.database
+              .query<{ count: number }, []>(
+                "SELECT count(*) AS count FROM members WHERE role = 'OWNER' AND status = 'ACTIVE'",
+              )
+              .get()?.count;
+            if ((owners ?? 0) <= 1)
+              return error("LAST_OWNER_REQUIRED", "At least one active owner is required.");
+          }
+          dependencies.database
+            .query(
+              "UPDATE members SET role = ?, revision = revision + 1 WHERE id = ? AND revision = ?",
+            )
+            .run(input.role, input.memberId, input.expectedRevision);
+          return {
+            ok: true,
+            value: {
+              memberId: input.memberId,
+              role: input.role,
+              revision: input.expectedRevision + 1,
+            },
+          };
+        });
+      } catch {
+        return error("MEMBER_ROLE_FAILED", "Member role change failed.");
+      }
+    },
+  };
+}
