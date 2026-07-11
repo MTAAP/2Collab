@@ -1,5 +1,5 @@
 import type { Result } from "../../../shared/contracts/result.ts";
-import type { OutlineContentPort } from "../../adapters/outline/contract.ts";
+import type { OutlineContentPort } from "../connectors/outline-content-port.ts";
 import type { AuthorizedScopedSearch, FederatedSearchResult } from "./contract.ts";
 
 export function createFederatedSearch(outline: OutlineContentPort) {

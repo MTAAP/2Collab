@@ -4,16 +4,19 @@ import type {
   OutlineMutation,
 } from "../../../shared/contracts/outline.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
-import type { OutlineContentPort } from "../../adapters/outline/contract.ts";
-import { memberCreateMutation, memberEditMutation } from "../../adapters/outline/human-editing.ts";
-import { staleOutlineRevision } from "../../adapters/outline/revision-cas.ts";
-import { assertOutlineScope } from "../../adapters/outline/scope.ts";
 import type {
   ConnectorOperationAuthorization,
   ConnectorScope,
   ExactRevisionMutation,
   Observed,
 } from "../connectors/contract.ts";
+import type { OutlineContentPort } from "../connectors/outline-content-port.ts";
+import { assertOutlineScope } from "../connectors/outline-scope.ts";
+import {
+  memberCreateMutation,
+  memberEditMutation,
+  staleOutlineRevision,
+} from "./human-editing-policy.ts";
 
 export interface OutlineMemberMutationAuthorityPort {
   currentScope(projectId: string, connectorId: string): Promise<Result<ConnectorScope>>;

@@ -5,8 +5,8 @@ import type {
   OutlineReference,
 } from "../../../shared/contracts/outline.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
-import type { OutlineContentPort } from "../../adapters/outline/contract.ts";
 import type { ConnectorScope, EphemeralObserved } from "../connectors/contract.ts";
+import type { OutlineContentPort } from "../connectors/outline-content-port.ts";
 import type { AuthorizedOutlineActor } from "../federated-search/contract.ts";
 
 export type OutlineAccessResult = "ALLOWED" | "STALE" | "UNAVAILABLE" | "FORBIDDEN" | "REDACTED";
