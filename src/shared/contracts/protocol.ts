@@ -65,6 +65,24 @@ export const ClientHelloSchema = z
     }
   });
 
+export const ServerWelcomeSchema = z
+  .object({
+    kind: z.literal("SERVER_WELCOME"),
+    selectedVersion: z.string().regex(/^[1-9][0-9]{0,2}\.(?:0|[1-9][0-9]{0,2})$/),
+    connectionId: IdentifierSchema,
+    fence: z.number().int().positive(),
+    limits: z
+      .object({
+        maximumFrameBytes: z.literal(65_536),
+        runnerFramesPerSecond: z.literal(100),
+        runnerBurst: z.literal(200),
+        heartbeatSeconds: z.literal(10),
+        offlineSeconds: z.literal(30),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const RunnerMessageBodySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("HEARTBEAT") }).strict(),
   z
@@ -252,5 +270,6 @@ export const ServerEnvelopeSchema = z
   .strict();
 
 export type ClientHello = Readonly<z.infer<typeof ClientHelloSchema>>;
+export type ServerWelcome = Readonly<z.infer<typeof ServerWelcomeSchema>>;
 export type RunnerEnvelope = Readonly<z.infer<typeof RunnerEnvelopeSchema>>;
 export type ServerEnvelope = Readonly<z.infer<typeof ServerEnvelopeSchema>>;

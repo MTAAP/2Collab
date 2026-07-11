@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BoundedSendQueue, TokenBucket } from "../../src/server/adapters/wss/rate-limits.ts";
+import { createInMemoryRunnerChannel, validRunnerHeartbeat } from "../fixtures/runner-channel.ts";
 
 describe("runner transport limits", () => {
   test("refills a bounded token bucket without accumulating beyond burst", () => {
@@ -24,5 +25,21 @@ describe("runner transport limits", () => {
     expect(queue.dequeue()).toBe("stop");
     expect(queue.dequeue()).toBe("more");
     expect(queue.dequeue()).toBeUndefined();
+  });
+
+  test("charges every authenticated frame against the advertised runner bucket", () => {
+    const channel = createInMemoryRunnerChannel({ active: true, now: () => 1_000 });
+    for (let sequence = 1; sequence <= 200; sequence += 1) {
+      expect(
+        channel.receiveText(
+          JSON.stringify(validRunnerHeartbeat({ messageId: `message_${sequence}`, sequence })),
+        ),
+      ).toEqual({ accepted: true });
+    }
+    expect(
+      channel.receiveText(
+        JSON.stringify(validRunnerHeartbeat({ messageId: "message_201", sequence: 201 })),
+      ),
+    ).toEqual({ accepted: false, code: "RUNNER_RATE_LIMITED", close: true });
   });
 });

@@ -5,6 +5,7 @@ import {
   RunnerMessageBodySchema,
   type ClientHello,
 } from "../../../shared/contracts/protocol.ts";
+import { TokenBucket } from "./rate-limits.ts";
 
 export const MAXIMUM_RUNNER_FRAME_BYTES = 65_536;
 export const MAXIMUM_FUTURE_SKEW_SECONDS = 5 * 60;
@@ -82,6 +83,7 @@ export class InMemoryRunnerProtocolChannel {
   readonly #connectionId: () => string;
   readonly #fence: number;
   readonly #seen = new Map<string, Readonly<{ sequence: number; digest: string }>>();
+  readonly #runnerBucket: TokenBucket;
   #active: boolean;
   #selectedVersion: string | null;
   #lastSequence = 0;
@@ -91,6 +93,7 @@ export class InMemoryRunnerProtocolChannel {
     this.#now = options.now ?? (() => 1_000);
     this.#connectionId = options.connectionId ?? defaultConnectionId;
     this.#fence = options.fence ?? 1;
+    this.#runnerBucket = new TokenBucket({ ratePerSecond: 100, burst: 200, now: this.#now });
     this.#active = options.active ?? false;
     this.#selectedVersion = this.#active ? (this.#supportedVersions[0] ?? null) : null;
   }
@@ -128,6 +131,7 @@ export class InMemoryRunnerProtocolChannel {
       return reject("FRAME_JSON_INVALID");
     }
     if (!this.#active) return this.#receiveHello(raw);
+    if (!this.#runnerBucket.consume()) return reject("RUNNER_RATE_LIMITED");
     if (
       typeof raw === "object" &&
       raw !== null &&
