@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import {
   ConnectorScopeSchema,
+  createProjectionCodec,
   EphemeralObservedSchema,
   EphemeralSearchPageSchema,
   EphemeralSearchResultSchema,
   ExactRevisionMutationSchema,
   ObservedSchema,
-  createProjectionCodec,
   ScopedSearchSchema,
 } from "../../../src/server/modules/connectors/contract.ts";
 import {
@@ -152,6 +152,8 @@ describe("connector contract", () => {
       persistence: "EPHEMERAL_ONLY",
     });
     expect(codec.serialize(result as never).ok).toBe(false);
+    const utf8Codec = createProjectionCodec(z.object({ title: z.string().max(100_000) }).strict());
+    expect(utf8Codec.serialize({ title: "é".repeat(40_000) }).ok).toBe(false);
     expect(
       EphemeralSearchPageSchema(z.string().max(128)).parse({
         results: [result],

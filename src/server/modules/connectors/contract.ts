@@ -103,13 +103,15 @@ export function createProjectionCodec<P>(schema: z.ZodType<P>): ProjectionCodec<
       if (!parsed.success) return codecError();
       try {
         const serialized = JSON.stringify(parsed.data);
-        return serialized.length <= 65_536 ? { ok: true, value: serialized } : codecError();
+        return Buffer.byteLength(serialized, "utf8") <= 65_536
+          ? { ok: true, value: serialized }
+          : codecError();
       } catch {
         return codecError();
       }
     },
     deserialize(value) {
-      if (value.length < 1 || value.length > 65_536) return codecError();
+      if (value.length < 1 || Buffer.byteLength(value, "utf8") > 65_536) return codecError();
       try {
         const parsed = schema.safeParse(JSON.parse(value));
         return parsed.success ? { ok: true, value: parsed.data } : codecError();
@@ -206,6 +208,21 @@ export type ReconciliationEvent<P> = Readonly<{
   idempotencyKey: string;
   reference: ContextReference;
   actionMarker?: string;
+  mutationProof?: Readonly<{
+    actionMarker: string;
+    operation: string;
+    actionDigest: Sha256;
+    precondition:
+      | Readonly<{ kind: "ABSENT" }>
+      | Readonly<{ kind: "EXACT_REVISION"; sourceRevision: string; comparableDigest: Sha256 }>
+      | Readonly<{
+          kind: "EXPECTED_MEMBERSHIP";
+          sourceRevision: string;
+          comparableDigest: Sha256;
+          memberKey: string;
+          present: boolean;
+        }>;
+  }>;
   sourceRevision: string;
   comparableDigest: Sha256;
   observedAt: number;

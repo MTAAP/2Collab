@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { migrate } from "../../../src/server/db/migrate.ts";
 import { openDatabase } from "../../../src/server/db/connection.ts";
+import { migrate } from "../../../src/server/db/migrate.ts";
+import { verifyCsrf } from "../../../src/server/modules/identity/csrf.ts";
 import { createDeviceAuthority } from "../../../src/server/modules/identity/devices.ts";
 import {
   createDpopVerifier,
   createSessionAuthority,
 } from "../../../src/server/modules/identity/sessions.ts";
-import { verifyCsrf } from "../../../src/server/modules/identity/csrf.ts";
 
 function fixture() {
   const database = openDatabase(":memory:");
@@ -112,6 +112,17 @@ describe("device authorization and DPoP", () => {
         deviceCodeId: started.value.deviceCodeId,
       });
       expect(approved.ok).toBe(true);
+      const approvalReplay = await f.authority.approve({
+        idempotencyKey: "device_approve_1",
+        actor: {
+          kind: "MEMBER",
+          memberId: "member_1" as never,
+          sessionId: "session_1" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        deviceCodeId: started.value.deviceCodeId,
+      });
+      expect(approvalReplay).toEqual({ ok: true, value: { approved: true } });
       const issued = await f.authority.exchange({
         idempotencyKey: "device_exchange_1",
         deviceCode: started.value.deviceCode,
@@ -132,6 +143,33 @@ describe("device authorization and DPoP", () => {
       });
       expect(replay.ok).toBe(false);
       if (!replay.ok) expect(replay.error.code).toBe("DEVICE_REFRESH_REPLAY");
+    } finally {
+      f.database.close();
+    }
+  });
+
+  test("device approval rejects a browser session at the shared idle deadline", async () => {
+    const f = fixture();
+    try {
+      const started = await f.authority.begin({
+        idempotencyKey: "device_begin_idle",
+        deviceId: "device_idle",
+        senderKeyThumbprint: "thumbprint_idle",
+      });
+      if (!started.ok) throw new Error(started.error.code);
+      f.database.exec("UPDATE sessions SET idle_expires_at = 1000 WHERE id = 'session_1'");
+      const approved = await f.authority.approve({
+        idempotencyKey: "device_approve_idle",
+        actor: {
+          kind: "MEMBER",
+          memberId: "member_1" as never,
+          sessionId: "session_1" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        deviceCodeId: started.value.deviceCodeId,
+      });
+      expect(approved.ok).toBe(false);
+      if (!approved.ok) expect(approved.error.code).toBe("SESSION_INVALID");
     } finally {
       f.database.close();
     }

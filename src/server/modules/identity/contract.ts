@@ -1,10 +1,12 @@
-import type { Result } from "../../../shared/contracts/result.ts";
+import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import type {
   AcceptInvitationWithVerifiedIdentity,
   AuthenticatePasskey,
+  BeginMemberRoleChange,
   BeginPasskeyAuthentication,
   BeginPasskeyRegistration,
   BootstrapDeployment,
+  ChangeMemberRole,
   CreateInvitation,
   ExchangeInvitationSecret,
   FinishPasskeyRegistration,
@@ -13,6 +15,7 @@ import type {
   InvitationIssue,
   InvitationSession,
   ListPasskeys,
+  MemberRoleChange,
   MemberSessionIssue,
   PasskeyChallenge,
   PasskeyCredential,
@@ -24,8 +27,8 @@ import type {
   RevokePasskey,
   TeamInvitation,
 } from "../../../shared/contracts/identity.ts";
-import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import type { MemberId } from "../../../shared/contracts/ids.ts";
+import type { Result } from "../../../shared/contracts/result.ts";
 import type { VerifiedProviderIdentity } from "./oidc.ts";
 import type { ProviderLink } from "./provider-links.ts";
 import type { MemberRemoval } from "./revocation.ts";
@@ -38,6 +41,8 @@ export interface IdentityAuthority {
     command: BeginPasskeyAuthentication,
   ): Promise<Result<PasskeyChallenge>>;
   authenticate(command: AuthenticatePasskey): Promise<Result<MemberSessionIssue>>;
+  beginMemberRoleChange(command: BeginMemberRoleChange): Promise<Result<PasskeyChallenge>>;
+  changeMemberRole(command: ChangeMemberRole): Promise<Result<MemberRoleChange>>;
   revokePasskey(command: RevokePasskey): Promise<Result<PasskeyRevocation>>;
   listPasskeys(query: ListPasskeys): Promise<Result<readonly PasskeyCredential[]>>;
   generateRecoveryCodes(command: GenerateRecoveryCodes): Promise<Result<RecoveryCodeSet>>;
@@ -61,7 +66,19 @@ export interface IdentityAuthority {
       displayName: string;
       identity: VerifiedProviderIdentity;
     }>,
-  ): Promise<Result<ProviderLink>>;
+  ): Promise<
+    Result<
+      Readonly<{
+        link: ProviderLink;
+        session: Readonly<{
+          actor: MemberActor;
+          csrfProof: string;
+          idleExpiresAt: number;
+          absoluteExpiresAt: number;
+        }>;
+      }>
+    >
+  >;
   remove(
     command: Readonly<{
       idempotencyKey: string;

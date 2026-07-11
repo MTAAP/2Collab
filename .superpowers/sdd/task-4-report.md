@@ -9,6 +9,41 @@ crash-safe ConnectorAuthority intents/reconciliation, the shared mutation vocabu
 schema-v1 persistence for those primitives. No GitHub or Outline provider-specific repository,
 project, document, GraphQL, URL, payload, or external-call implementation was added.
 
+## Post-review hardening
+
+Resolved every confirmed finding in `task-4-review.md` against the integrated branch:
+
+- Auth-proxy replay identity now comes from a verifier-returned signed assertion ID; signed issue
+  and expiry times are mandatory, bounded, and covered by replay regression tests.
+- Role changes are exposed by `IdentityAuthority` as an idempotent two-step privileged passkey
+  ceremony, require an acting OWNER and a target local passkey for promotion, revalidate authority
+  under the write transaction, preserve the last-owner invariant, and return the categorical audit
+  ID with old/new roles and `PASSKEY` authentication method.
+- Browser-session authorization is consolidated in `browser-session-authority.ts`; its initial facts
+  and transaction recheck cover kind, proof digest, idle and absolute deadlines, Member epoch/status,
+  role, and exact Member/session revisions. Device approval, provider linking, offboarding, role
+  changes, human connector mutation, and connector epoch changes consume this shared seam.
+- The revocation authority is mandatory in production composition. Dispatch failures remain
+  durably `PENDING`; no implicit success adapter exists.
+- Device approval replays `{ approved: true }`, exchange checks the Member CAS before consuming the
+  code, and attempt mutation verifies a stable actor before idempotency while consuming one-time
+  authority only for a new write.
+- Credential reads and writes are owner-scoped, reject tuple ownership collisions before crypto,
+  and enforce the legal provider/member/device credential-class mapping.
+- Provider invitation acceptance creates an ordinary browser session and acceptance audit, while a
+  redeemed `HOST_RECOVERY` session can complete local passkey restoration and is then revoked.
+- Lost-response recovery requires an exact mutation proof over scope, epoch, reference, marker,
+  operation, action digest, and full precondition; a same-reference unrelated event remains pending.
+- Reconciliation keeps its immutable original result and audit ID in a companion idempotency record,
+  so an old key replays the old projection after later updates.
+- Connector epoch changes are current-owner, expected-revision, idempotent, audited
+  `ConnectorAuthority` commands; the unauthenticated SQL mutation export was removed.
+- Projection, observed-value, and canonical idempotency limits are UTF-8 byte limits, and provider
+  relink audit subjects use the persisted credential ID.
+
+The immutable `0001_foundation.sql` migration remains byte-for-byte unchanged. Hardening uses the
+existing schema and therefore does not create an upgrade/checksum fork.
+
 ## RED
 
 Initial focused command:
@@ -43,6 +78,16 @@ The final full repository test run passed:
 - integration: 60 pass, 0 fail, 315 assertions
 - combined: 129 pass, 0 fail
 
+Post-review focused regression run:
+
+```text
+bun test tests/integration/identity/providers.test.ts tests/integration/identity/devices.test.ts tests/integration/identity/offboarding.test.ts tests/integration/identity/local-auth.test.ts tests/integration/connectors/authority.test.ts tests/unit/connectors/credentials.test.ts tests/unit/connectors/contract.test.ts
+```
+
+Observed result: exit 0; 41 pass, 0 fail, 248 assertions. The subsequently integrated repository-wide
+integration suite passed with 114 pass, 0 fail, 542 assertions. Full verification was rerun after the
+concurrent runner integration settled; its final results are recorded below.
+
 ## Implemented invariants
 
 - Browser sessions persist only bearer/CSRF digests, bind the current Member authority epoch, use a
@@ -71,8 +116,9 @@ The final full repository test run passed:
   GitHub/Outline operation vocabulary.
 - A generic STRICT operation intent is `PENDING` before any provider call. Confirmation atomically
   commits normalized provider reference/revision/provenance, a strict codec-approved projection,
-  audit, idempotency, and intent state. Restart recovery uses only an exact reference or deterministic
-  non-secret marker. Ambiguity fails permanently; epoch/scope drift requires explicit
+  audit, idempotency, and intent state. Restart recovery requires an exact mutation proof covering
+  scope, epoch, marker, operation, action digest, and precondition; reference alone is insufficient.
+  Ambiguity fails permanently; epoch/scope drift requires explicit
   reauthorization.
 - `ContextConnector` live reads and search snippets use distinct `EphemeralObserved` and bounded
   `EphemeralSearchPage` envelopes. ConnectorAuthority has no API accepting them. Persisted
@@ -110,6 +156,22 @@ Results:
 - Docker image build: exit 0
 - Docker Compose config with an explicit verification-only `SESSION_SECRET`: exit 0
 - diff check: exit 0
+
+Post-review verification on the integrated Task 5/Task 6 head:
+
+- focused Task 4 regressions: 41 pass, 0 fail, 248 assertions;
+- repository integration suite: 114 pass, 0 fail, 542 assertions;
+- TypeScript typecheck: exit 0;
+- web, server, and compiled CLI build: exit 0;
+- Biome check over every Task 4 source and regression file: exit 0;
+- committed/staged diff checks: exit 0.
+
+The full-worktree format and lint gates were also run. They were blocked only by concurrent,
+uncommitted runner work outside Task 4 (`src/runner/profiles.ts`, `tests/fixtures/runner-channel.ts`,
+and the control-character regex in `src/runner/adapters/runtime/bundled.ts`). The full unit suite had
+77 passes and two architecture failures caused solely by the same uncommitted runner modules importing
+outward adapter contracts. Those files are not part of this commit. The repository integration suite,
+Task 4 focused suite, typecheck, and build all passed against the same live worktree.
 
 Verification limits unrelated to Task 4 code:
 

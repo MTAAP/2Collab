@@ -1,33 +1,35 @@
 import type { Database } from "bun:sqlite";
+import { z } from "zod";
 import {
-  PasskeyCredentialSchema,
-  PasskeyRevocationSchema,
-  TeamInvitationSchema,
   type AcceptInvitationWithVerifiedIdentity,
   type BeginPasskeyRegistration,
   type MemberActor,
   type MemberSessionIssue,
   type PasskeyCredential,
+  PasskeyCredentialSchema,
   type PasskeyRevocation,
+  PasskeyRevocationSchema,
   type RegistrationPrincipal,
   type TeamInvitation,
+  TeamInvitationSchema,
 } from "../../../shared/contracts/identity.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
+import { createBrowserSessionAuthority } from "./browser-session-authority.ts";
 import type { IdentityAuthority } from "./contract.ts";
 import { IdentityIdempotency } from "./idempotency.ts";
 import { invitationState } from "./invitations.ts";
+import {
+  type RegistrationVerification,
+  simpleWebAuthnPort,
+  type WebAuthnPort,
+} from "./passkeys.ts";
 import { createProviderLinkAuthority } from "./provider-links.ts";
+import { base64Url, constantTimeEqual, hashOneTimeSecret, sha256 } from "./recovery.ts";
 import {
   createMemberRevocationAuthority,
   type RevocationExecutionAuthority,
 } from "./revocation.ts";
-import {
-  simpleWebAuthnPort,
-  type RegistrationVerification,
-  type WebAuthnPort,
-} from "./passkeys.ts";
-import { base64Url, constantTimeEqual, hashOneTimeSecret, sha256 } from "./recovery.ts";
 
 const CHALLENGE_LIFETIME = 5 * 60;
 const INVITATION_LIFETIME = 48 * 60 * 60;
@@ -45,10 +47,20 @@ const PasskeyRevocationReplaySchema = PasskeyRevocationSchema.transform(
 const TeamInvitationReplaySchema = TeamInvitationSchema.transform(
   (value) => value as TeamInvitation,
 );
+const MemberRoleChangeReplaySchema = z
+  .object({
+    memberId: z.string().min(1).max(128),
+    previousRole: z.enum(["OWNER", "MEMBER"]),
+    role: z.enum(["OWNER", "MEMBER"]),
+    revision: z.number().int().positive(),
+    auditId: z.string().min(1).max(128),
+  })
+  .strict()
+  .transform((value) => value as import("../../../shared/contracts/identity.ts").MemberRoleChange);
 
 type ChallengeRow = Readonly<{
   id: string;
-  purpose: "PASSKEY_REGISTRATION" | "PASSKEY_AUTHENTICATION";
+  purpose: "PASSKEY_REGISTRATION" | "PASSKEY_AUTHENTICATION" | "PRIVILEGED_REAUTHENTICATION";
   challenge_hash: Uint8Array;
   member_id: string | null;
   passkey_credential_id: string | null;
@@ -113,7 +125,7 @@ export type IdentityAuthorityDependencies = Readonly<{
   rpName: string;
   deriveSecret?: typeof hashOneTimeSecret;
   digest?: typeof sha256;
-  executionAuthority?: RevocationExecutionAuthority;
+  executionAuthority: RevocationExecutionAuthority;
 }>;
 
 function error(
@@ -149,6 +161,7 @@ function sessionIssue(
 }
 
 function validateConfiguration(dependencies: IdentityAuthorityDependencies): void {
+  if (!dependencies.executionAuthority) throw new Error("IDENTITY_EXECUTION_AUTHORITY_REQUIRED");
   let url: URL;
   try {
     url = new URL(dependencies.publicOrigin);
@@ -189,12 +202,14 @@ export function createIdentityAuthority(
     actorId: string,
     subjectId: string | null,
     details: object,
-  ) => {
+  ): string => {
+    const auditId = id("audit");
     database
       .query<void, [string, string, string, string, string | null, string, number]>(
         "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(id("audit"), kind, actorKind, actorId, subjectId, JSON.stringify(details), clock());
+      .run(auditId, kind, actorKind, actorId, subjectId, JSON.stringify(details), clock());
+    return auditId;
   };
 
   const auditFailure = (surface: string, code: string): void => {
@@ -207,19 +222,20 @@ export function createIdentityAuthority(
   const idempotency = new IdentityIdempotency(database, digest, clock, () =>
     auditFailure("IDEMPOTENCY_REPLAY", "IDEMPOTENCY_STORAGE_INVALID"),
   );
-  const providerLinks = createProviderLinkAuthority({ database, clock, id, digest });
+  const providerLinks = createProviderLinkAuthority({
+    database,
+    clock,
+    id,
+    digest,
+    randomSecret: () => base64Url(randomBytes(32)),
+  });
+  const browserSessions = createBrowserSessionAuthority({ database, clock, digest });
   const revocations = createMemberRevocationAuthority({
     database,
     clock,
     id,
     digest,
-    executionAuthority:
-      dependencies.executionAuthority ??
-      ({
-        async execute() {
-          return { ok: true, value: { applied: true as const } };
-        },
-      } satisfies RevocationExecutionAuthority),
+    executionAuthority: dependencies.executionAuthority,
   });
   const reject = <T>(
     surface: string,
@@ -337,7 +353,8 @@ export function createIdentityAuthority(
   const registrationActorId = async (principal: RegistrationPrincipal): Promise<string | null> => {
     if (principal.kind === "BOOTSTRAP") return "BOOTSTRAP";
     if (principal.kind === "MEMBER") return `MEMBER_${principal.memberId}`;
-    if (principal.kind === "RECOVERY") return `RECOVERY_${principal.sessionId}`;
+    if (principal.kind === "RECOVERY" || principal.kind === "HOST_RECOVERY")
+      return `${principal.kind}_${principal.sessionId}`;
     const exchange = await exchangeBySecret(principal.secret);
     return exchange ? `INVITATION_${exchange.id}` : null;
   };
@@ -355,7 +372,7 @@ export function createIdentityAuthority(
         memberRevision: number | null;
         invitationRevision: number | null;
         sessionId: string | null;
-        sessionKind: "BROWSER" | "RECOVERY" | null;
+        sessionKind: "BROWSER" | "RECOVERY" | "HOST_RECOVERY" | null;
         sessionProofHash: Uint8Array | null;
       }>
     >
@@ -416,7 +433,7 @@ export function createIdentityAuthority(
         },
       };
     }
-    if (principal.kind === "RECOVERY") {
+    if (principal.kind === "RECOVERY" || principal.kind === "HOST_RECOVERY") {
       if (
         typeof principal.sessionProof !== "string" ||
         principal.sessionProof.length < 32 ||
@@ -427,16 +444,17 @@ export function createIdentityAuthority(
       const row = database
         .query<
           Readonly<{ member_id: string; session_revision: number; member_revision: number }>,
-          [string, Uint8Array, number]
+          [string, Uint8Array, string, number]
         >(
           `SELECT sessions.member_id, sessions.revision AS session_revision,
                   members.revision AS member_revision
            FROM sessions JOIN members ON members.id = sessions.member_id
-           WHERE sessions.id = ? AND sessions.proof_hash = ? AND sessions.kind = 'RECOVERY'
+           WHERE sessions.id = ? AND sessions.proof_hash = ? AND sessions.kind = ?
              AND sessions.revoked_at IS NULL
-             AND sessions.expires_at > ? AND members.status = 'ACTIVE'`,
+             AND sessions.expires_at > ? AND members.status = 'ACTIVE'
+             AND sessions.member_authority_epoch = members.authority_epoch`,
         )
-        .get(principal.sessionId, proofHash, clock());
+        .get(principal.sessionId, proofHash, principal.kind, clock());
       if (!row) return error("RECOVERY_SESSION_INVALID", "Recovery session is invalid.");
       const existing = database
         .query<Readonly<{ opaque_user_id: Uint8Array }>, [string]>(
@@ -455,7 +473,7 @@ export function createIdentityAuthority(
           memberRevision: row.member_revision,
           invitationRevision: null,
           sessionId: principal.sessionId,
-          sessionKind: "RECOVERY",
+          sessionKind: principal.kind,
           sessionProofHash: proofHash,
         },
       };
@@ -531,7 +549,8 @@ export function createIdentityAuthority(
              AND sessions.proof_hash = ?
              AND sessions.revision = ? AND members.revision = ?
              AND members.status = 'ACTIVE' AND sessions.revoked_at IS NULL
-             AND sessions.expires_at > ?`,
+             AND sessions.expires_at > ?
+             AND sessions.member_authority_epoch = members.authority_epoch`,
         )
         .get(
           authority.memberId,
@@ -891,8 +910,8 @@ export function createIdentityAuthority(
         );
       const ticket = await idempotency.ticket(
         "PASSKEY_REGISTRATION_FINISH",
-        command.principal.kind === "RECOVERY"
-          ? `RECOVERY_${command.principal.sessionId}`
+        command.principal.kind === "RECOVERY" || command.principal.kind === "HOST_RECOVERY"
+          ? `${command.principal.kind}_${command.principal.sessionId}`
           : `MEMBER_${command.principal.memberId}`,
         command.idempotencyKey,
         command,
@@ -936,7 +955,7 @@ export function createIdentityAuthority(
               "UPDATE webauthn_challenges SET consumed_at = ?, revision = revision + 1 WHERE id = ?",
             )
             .run(clock(), command.challengeId);
-          if (command.principal.kind === "RECOVERY")
+          if (command.principal.kind === "RECOVERY" || command.principal.kind === "HOST_RECOVERY")
             database
               .query<void, [number, string]>(
                 "UPDATE sessions SET revoked_at = ?, revision = revision + 1 WHERE id = ?",
@@ -1114,8 +1133,8 @@ export function createIdentityAuthority(
         return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
       }
       const memberSnapshot = database
-        .query<{ revision: number }, [string]>(
-          "SELECT revision FROM members WHERE id = ? AND status = 'ACTIVE'",
+        .query<{ revision: number; authority_epoch: number }, [string]>(
+          "SELECT revision, authority_epoch FROM members WHERE id = ? AND status = 'ACTIVE'",
         )
         .get(credential.member_id);
       if (!memberSnapshot) {
@@ -1234,6 +1253,265 @@ export function createIdentityAuthority(
       } catch {
         auditFailure("PASSKEY_AUTHENTICATION", "PASSKEY_VERIFICATION_FAILED");
         return error("PASSKEY_VERIFICATION_FAILED", "Passkey verification failed.");
+      }
+    },
+
+    async beginMemberRoleChange(command) {
+      if (!validIdempotencyKey(command.idempotencyKey))
+        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const authority = await browserSessions.authorize(command.actor, { role: "OWNER" });
+      if (!authority.ok) return error("OWNER_REQUIRED", "Owner authorization is required.");
+      const ticket = await idempotency.ticket(
+        "MEMBER_ROLE_REAUTH_BEGIN",
+        `MEMBER_${command.actor.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay<never>(ticket.value);
+      if (replay) return replay;
+      const credentials = database
+        .query<CredentialRow, [string]>(
+          "SELECT * FROM passkey_credentials WHERE member_id = ? AND revoked_at IS NULL ORDER BY created_at, id",
+        )
+        .all(command.actor.memberId);
+      if (credentials.length === 0)
+        return error("LOCAL_PASSKEY_REQUIRED", "A local passkey is required.");
+      const challengeId = id("challenge");
+      const now = clock();
+      try {
+        const allowCredentials = credentials.map((credential) => ({
+          id: credential.credential_id,
+          transports: database
+            .query<{ transport: string }, [string]>(
+              "SELECT transport FROM passkey_credential_transports WHERE passkey_credential_id = ?",
+            )
+            .all(credential.id)
+            .map((row) => row.transport),
+        }));
+        const options = await webAuthn.generateAuthenticationOptions({
+          challenge: randomBytes(32),
+          rpId: dependencies.rpId,
+          allowCredentials,
+        });
+        const rawChallenge = generatedChallenge(options);
+        if (!rawChallenge) return error("PASSKEY_OPERATION_FAILED", "Passkey operation failed.");
+        const challengeHash = await digest(rawChallenge);
+        return auditedTransaction("MEMBER_ROLE_REAUTH_BEGIN", () => {
+          const currentReplay = idempotency.replay<never>(ticket.value);
+          if (currentReplay) return currentReplay;
+          if (!browserSessions.revalidate(authority.value, { role: "OWNER" }).ok)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+          database
+            .query(
+              `INSERT INTO webauthn_challenges(
+                 id, purpose, challenge_hash, member_id, rp_id, expected_origin,
+                 revision, created_at, expires_at
+               ) VALUES (?, 'PRIVILEGED_REAUTHENTICATION', ?, ?, ?, ?, 1, ?, ?)`,
+            )
+            .run(
+              challengeId,
+              challengeHash,
+              command.actor.memberId,
+              dependencies.rpId,
+              dependencies.publicOrigin,
+              now,
+              now + CHALLENGE_LIFETIME,
+            );
+          idempotency.storeSecretIssued(
+            ticket.value,
+            "SECRET_ALREADY_ISSUED",
+            "Privileged passkey challenge was already issued.",
+          );
+          return {
+            ok: true,
+            value: {
+              challengeId,
+              challenge: rawChallenge,
+              expiresAt: (now + CHALLENGE_LIFETIME) as never,
+              options,
+            },
+          };
+        });
+      } catch {
+        return error("PASSKEY_OPERATION_FAILED", "Passkey operation failed.");
+      }
+    },
+
+    async changeMemberRole(command) {
+      if (
+        !validIdempotencyKey(command.idempotencyKey) ||
+        !Number.isInteger(command.expectedRevision) ||
+        command.expectedRevision < 1 ||
+        (command.role !== "OWNER" && command.role !== "MEMBER")
+      )
+        return error("IDENTITY_INPUT_INVALID", "Identity input is invalid.");
+      const ticket = await idempotency.ticket(
+        "MEMBER_ROLE_CHANGE",
+        `MEMBER_${command.actor.memberId}`,
+        command.idempotencyKey,
+        command,
+      );
+      if (!ticket.ok) return ticket;
+      const replay = idempotency.replay(ticket.value, MemberRoleChangeReplaySchema);
+      if (replay) return replay;
+      const authority = await browserSessions.authorize(command.actor, { role: "OWNER" });
+      if (!authority.ok) return error("OWNER_REQUIRED", "Owner authorization is required.");
+      const status = challengeStatus(challenge(command.challengeId), "PRIVILEGED_REAUTHENTICATION");
+      if (!status.ok || status.value.member_id !== command.actor.memberId)
+        return error("FRESH_PASSKEY_REQUIRED", "Fresh passkey verification is required.");
+      const credentialPublicId = responseCredentialId(command.response);
+      const credential = credentialPublicId
+        ? database
+            .query<CredentialRow, [string, string]>(
+              "SELECT * FROM passkey_credentials WHERE credential_id = ? AND member_id = ? AND revoked_at IS NULL",
+            )
+            .get(credentialPublicId, command.actor.memberId)
+        : null;
+      if (!credential)
+        return error("FRESH_PASSKEY_REQUIRED", "Fresh passkey verification is required.");
+      const target = database
+        .query<{ role: "OWNER" | "MEMBER"; revision: number }, [string]>(
+          "SELECT role, revision FROM members WHERE id = ? AND status = 'ACTIVE'",
+        )
+        .get(command.memberId);
+      if (!target || target.revision !== command.expectedRevision)
+        return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
+      if (
+        command.role === "OWNER" &&
+        !database
+          .query<{ id: string }, [string]>(
+            "SELECT id FROM passkey_credentials WHERE member_id = ? AND revoked_at IS NULL LIMIT 1",
+          )
+          .get(command.memberId)
+      )
+        return error("TARGET_PASSKEY_REQUIRED", "The target member needs a local passkey.");
+      const transports = database
+        .query<{ transport: string }, [string]>(
+          "SELECT transport FROM passkey_credential_transports WHERE passkey_credential_id = ?",
+        )
+        .all(credential.id)
+        .map((row) => row.transport);
+      try {
+        const verified = await webAuthn.verifyAuthentication({
+          response: command.response,
+          expectedChallenge: expectedChallenge(status.value.challenge_hash),
+          expectedOrigin: dependencies.publicOrigin,
+          expectedRpId: dependencies.rpId,
+          credential: {
+            id: credential.credential_id,
+            publicKey: credential.public_key,
+            counter: credential.signature_counter,
+            transports,
+          },
+        });
+        if (!verified.verified)
+          return error("FRESH_PASSKEY_REQUIRED", "Fresh passkey verification is required.");
+        const freshPasskey = {
+          memberId: command.actor.memberId,
+          challengeId: command.challengeId,
+          challengeRevision: status.value.revision,
+          credentialId: credential.id,
+          credentialRevision: credential.revision,
+          verifiedAt: clock(),
+          maximumAgeSeconds: CHALLENGE_LIFETIME,
+        };
+        return auditedTransaction("MEMBER_ROLE_CHANGE", () => {
+          const currentReplay = idempotency.replay(ticket.value, MemberRoleChangeReplaySchema);
+          if (currentReplay) return currentReplay;
+          if (
+            !browserSessions.revalidate(authority.value, {
+              role: "OWNER",
+              freshPasskey,
+            }).ok
+          )
+            return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
+          const currentChallenge = challengeStatus(
+            challenge(command.challengeId),
+            "PRIVILEGED_REAUTHENTICATION",
+          );
+          if (
+            !currentChallenge.ok ||
+            currentChallenge.value.revision !== status.value.revision ||
+            currentChallenge.value.member_id !== command.actor.memberId
+          )
+            return error("FRESH_PASSKEY_REQUIRED", "Fresh passkey verification is required.");
+          const currentTarget = database
+            .query<{ role: "OWNER" | "MEMBER" }, [string, number]>(
+              "SELECT role FROM members WHERE id = ? AND revision = ? AND status = 'ACTIVE'",
+            )
+            .get(command.memberId, command.expectedRevision);
+          if (!currentTarget)
+            return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
+          if (command.role === "OWNER") {
+            const targetPasskey = database
+              .query<{ id: string }, [string]>(
+                "SELECT id FROM passkey_credentials WHERE member_id = ? AND revoked_at IS NULL LIMIT 1",
+              )
+              .get(command.memberId);
+            if (!targetPasskey)
+              return error("TARGET_PASSKEY_REQUIRED", "The target member needs a local passkey.");
+          }
+          if (currentTarget.role === "OWNER" && command.role === "MEMBER") {
+            const owners = database
+              .query<{ count: number }, []>(
+                "SELECT count(*) AS count FROM members WHERE role = 'OWNER' AND status = 'ACTIVE'",
+              )
+              .get()?.count;
+            if ((owners ?? 0) <= 1)
+              return error("LAST_OWNER_REQUIRED", "At least one active owner is required.");
+          }
+          const now = clock();
+          const passkeyUpdate = database
+            .query(
+              `UPDATE passkey_credentials SET signature_counter = ?, backup_state = ?,
+                 device_type = ?, last_used_at = ?, revision = revision + 1
+               WHERE id = ? AND revision = ? AND revoked_at IS NULL`,
+            )
+            .run(
+              verified.newCounter,
+              verified.backedUp ? 1 : 0,
+              verified.deviceType,
+              now,
+              credential.id,
+              credential.revision,
+            );
+          if (passkeyUpdate.changes !== 1)
+            return error("CREDENTIAL_STALE", "Passkey state changed.", "SAME_INPUT");
+          const changed = database
+            .query(
+              "UPDATE members SET role = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND status = 'ACTIVE'",
+            )
+            .run(command.role, command.memberId, command.expectedRevision);
+          if (changed.changes !== 1)
+            return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
+          database
+            .query(
+              "UPDATE webauthn_challenges SET consumed_at = ?, revision = revision + 1 WHERE id = ?",
+            )
+            .run(now, command.challengeId);
+          const auditId = audit(
+            "MEMBER_ROLE_CHANGED",
+            "MEMBER",
+            command.actor.memberId,
+            command.memberId,
+            { previousRole: currentTarget.role, role: command.role, authMethod: "PASSKEY" },
+          );
+          const result = {
+            ok: true,
+            value: {
+              memberId: command.memberId,
+              previousRole: currentTarget.role,
+              role: command.role,
+              revision: command.expectedRevision + 1,
+              auditId,
+            },
+          } as const;
+          idempotency.storeResult(ticket.value, result);
+          return result;
+        });
+      } catch {
+        return error("MEMBER_ROLE_FAILED", "Member role change failed.");
       }
     },
 
@@ -1837,8 +2115,8 @@ export function createIdentityAuthority(
       const replay = idempotency.replay<never>(ticket.value);
       if (replay) return replay;
       const memberSnapshot = database
-        .query<{ revision: number }, [string]>(
-          "SELECT revision FROM members WHERE id = ? AND status = 'ACTIVE'",
+        .query<{ revision: number; authority_epoch: number }, [string]>(
+          "SELECT revision, authority_epoch FROM members WHERE id = ? AND status = 'ACTIVE'",
         )
         .get(command.memberId);
       if (!memberSnapshot) {
@@ -1888,10 +2166,10 @@ export function createIdentityAuthority(
           const committedReplay = idempotency.replay<never>(ticket.value);
           if (committedReplay) return committedReplay;
           const activeMemberRow = database
-            .query<{ id: string }, [string, number]>(
-              "SELECT id FROM members WHERE id = ? AND status = 'ACTIVE' AND revision = ?",
+            .query<{ id: string }, [string, number, number]>(
+              "SELECT id FROM members WHERE id = ? AND status = 'ACTIVE' AND revision = ? AND authority_epoch = ?",
             )
-            .get(command.memberId, memberSnapshot.revision);
+            .get(command.memberId, memberSnapshot.revision, memberSnapshot.authority_epoch);
           const activeSet = database
             .query<{ id: string }, [string, number]>(
               "SELECT id FROM recovery_code_sets WHERE id = ? AND revision = ? AND revoked_at IS NULL",
@@ -1909,10 +2187,19 @@ export function createIdentityAuthority(
             return error("RECOVERY_CODE_USED", "Recovery code was already used.");
           const sessionId = id("recovery_session");
           database
-            .query<void, [string, string, Uint8Array, number]>(
-              "INSERT INTO sessions(id, member_id, proof_hash, kind, expires_at, revision) VALUES (?, ?, ?, 'RECOVERY', ?, 1)",
+            .query<void, [string, string, Uint8Array, number, number]>(
+              `INSERT INTO sessions(
+                 id, member_id, proof_hash, kind, expires_at,
+                 member_authority_epoch, revision
+               ) VALUES (?, ?, ?, 'RECOVERY', ?, ?, 1)`,
             )
-            .run(sessionId, command.memberId, sessionProofHash, now + RECOVERY_SESSION_LIFETIME);
+            .run(
+              sessionId,
+              command.memberId,
+              sessionProofHash,
+              now + RECOVERY_SESSION_LIFETIME,
+              memberSnapshot.authority_epoch,
+            );
           audit("RECOVERY_CODE_REDEEMED", "RECOVERY_CODE", command.memberId, sessionId, {});
           const result = {
             ok: true,

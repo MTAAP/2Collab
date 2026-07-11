@@ -22,6 +22,29 @@ export type MemberSession = Readonly<{
 
 export type MemberSessionIssue = MemberSession & Readonly<{ proof: string; csrfProof: string }>;
 
+export type BeginMemberRoleChange = Readonly<{
+  idempotencyKey: string;
+  actor: MemberActor;
+}>;
+
+export type ChangeMemberRole = Readonly<{
+  idempotencyKey: string;
+  actor: MemberActor;
+  memberId: MemberId;
+  expectedRevision: number;
+  role: TeamRole;
+  challengeId: string;
+  response: unknown;
+}>;
+
+export type MemberRoleChange = Readonly<{
+  memberId: MemberId;
+  previousRole: TeamRole;
+  role: TeamRole;
+  revision: number;
+  auditId: string;
+}>;
+
 export type MemberActor = Readonly<{
   kind: "MEMBER";
   memberId: MemberId;
@@ -33,7 +56,8 @@ export type RegistrationPrincipal =
   | MemberActor
   | Readonly<{ kind: "BOOTSTRAP"; secret: string }>
   | Readonly<{ kind: "INVITATION"; secret: string }>
-  | Readonly<{ kind: "RECOVERY"; sessionId: SessionId; sessionProof: string }>;
+  | Readonly<{ kind: "RECOVERY"; sessionId: SessionId; sessionProof: string }>
+  | Readonly<{ kind: "HOST_RECOVERY"; sessionId: SessionId; sessionProof: string }>;
 
 export type BootstrapDeployment = Readonly<{
   idempotencyKey: string;
@@ -61,7 +85,8 @@ export type FinishPasskeyRegistration = Readonly<{
   idempotencyKey: string;
   principal:
     | MemberActor
-    | Readonly<{ kind: "RECOVERY"; sessionId: SessionId; sessionProof: string }>;
+    | Readonly<{ kind: "RECOVERY"; sessionId: SessionId; sessionProof: string }>
+    | Readonly<{ kind: "HOST_RECOVERY"; sessionId: SessionId; sessionProof: string }>;
   challengeId: string;
   credentialName: string;
   response: unknown;
@@ -200,6 +225,32 @@ const MemberActorSchema = z
   })
   .strict();
 
+export const BeginMemberRoleChangeSchema = z
+  .object({ idempotencyKey: IdempotencyKeySchema, actor: MemberActorSchema })
+  .strict();
+
+export const ChangeMemberRoleSchema = z
+  .object({
+    idempotencyKey: IdempotencyKeySchema,
+    actor: MemberActorSchema,
+    memberId: IdentifierSchema,
+    expectedRevision: RevisionSchema,
+    role: z.enum(["OWNER", "MEMBER"]),
+    challengeId: IdentifierSchema,
+    response: z.unknown(),
+  })
+  .strict();
+
+export const MemberRoleChangeSchema = z
+  .object({
+    memberId: IdentifierSchema,
+    previousRole: z.enum(["OWNER", "MEMBER"]),
+    role: z.enum(["OWNER", "MEMBER"]),
+    revision: RevisionSchema,
+    auditId: IdentifierSchema,
+  })
+  .strict();
+
 export const RegistrationPrincipalSchema = z.discriminatedUnion("kind", [
   MemberActorSchema,
   z.object({ kind: z.literal("BOOTSTRAP"), secret: OneTimeSecretSchema }).strict(),
@@ -207,6 +258,13 @@ export const RegistrationPrincipalSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("RECOVERY"),
+      sessionId: IdentifierSchema,
+      sessionProof: OneTimeSecretSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("HOST_RECOVERY"),
       sessionId: IdentifierSchema,
       sessionProof: OneTimeSecretSchema,
     })
@@ -239,6 +297,13 @@ export const FinishPasskeyRegistrationSchema = z
       z
         .object({
           kind: z.literal("RECOVERY"),
+          sessionId: IdentifierSchema,
+          sessionProof: OneTimeSecretSchema,
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("HOST_RECOVERY"),
           sessionId: IdentifierSchema,
           sessionProof: OneTimeSecretSchema,
         })

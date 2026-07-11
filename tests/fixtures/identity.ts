@@ -170,6 +170,11 @@ export function createIdentityFixture(overrides: Partial<IdentityAuthorityDepend
     publicOrigin: "http://localhost:3000",
     rpId: "localhost",
     rpName: "2Collab Test",
+    executionAuthority: {
+      async execute() {
+        return { ok: true, value: { applied: true as const } };
+      },
+    },
     ...overrides,
   };
   const identity = createIdentityAuthority(dependencies);

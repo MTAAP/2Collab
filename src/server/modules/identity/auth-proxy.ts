@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import type { Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import type { VerifiedProviderIdentity } from "./oidc.ts";
@@ -26,8 +26,9 @@ export interface AuthProxyAssertionPort {
         issuer: string;
         audience: string;
         subject: string;
-        issuedAt?: number;
-        expiresAt?: number;
+        assertionId: string;
+        issuedAt: number;
+        expiresAt: number;
       }>
     >
   >;
@@ -64,31 +65,18 @@ export function createAuthProxyProvenanceVerifier(
         directPeer: string;
         forwardedOrigin: string;
         assertion: string;
-        replayKey: string;
       }>,
     ): Promise<Result<VerifiedProviderIdentity>> {
       if (
         !dependencies.directPeers.includes(input.directPeer) ||
         input.forwardedOrigin !== dependencies.forwardedOrigin ||
         input.assertion.length < 1 ||
-        input.assertion.length > 16_384 ||
-        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.replayKey)
+        Buffer.byteLength(input.assertion, "utf8") > 16_384
       )
         return error(
           "AUTH_PROXY_PROVENANCE_INVALID",
           "Authentication proxy provenance is invalid.",
         );
-      const replayHash = createHash("sha256")
-        .update(`${dependencies.issuer}:${input.replayKey}`, "utf8")
-        .digest("hex");
-      if (
-        dependencies.database
-          .query<{ replay_hash: Uint8Array }, [Uint8Array, number]>(
-            "SELECT replay_hash FROM auth_proxy_replays WHERE replay_hash = ? AND expires_at > ?",
-          )
-          .get(Buffer.from(replayHash, "hex"), dependencies.clock())
-      )
-        return error("AUTH_PROXY_REPLAY", "Authentication proxy assertion was already used.");
       const provenance = {
         directPeer: input.directPeer,
         forwardedOrigin: input.forwardedOrigin,
@@ -111,11 +99,20 @@ export function createAuthProxyProvenanceVerifier(
         assertion.value.issuer !== dependencies.issuer ||
         assertion.value.audience !== dependencies.audience ||
         assertion.value.subject.length < 1 ||
-        assertion.value.subject.length > 512 ||
-        (assertion.value.issuedAt !== undefined && assertion.value.issuedAt > now + 300) ||
-        (assertion.value.expiresAt !== undefined && assertion.value.expiresAt <= now)
+        Buffer.byteLength(assertion.value.subject, "utf8") > 512 ||
+        !/^[A-Za-z0-9][A-Za-z0-9._~-]{0,255}$/.test(assertion.value.assertionId) ||
+        !Number.isSafeInteger(assertion.value.issuedAt) ||
+        !Number.isSafeInteger(assertion.value.expiresAt) ||
+        assertion.value.issuedAt > now + 300 ||
+        assertion.value.issuedAt < now - 600 ||
+        assertion.value.expiresAt <= now ||
+        assertion.value.expiresAt <= assertion.value.issuedAt ||
+        assertion.value.expiresAt - assertion.value.issuedAt > 600
       )
         return error("AUTH_PROXY_ASSERTION_INVALID", "Authentication proxy assertion is invalid.");
+      const replayHash = createHash("sha256")
+        .update(`${assertion.value.issuer}:${assertion.value.assertionId}`, "utf8")
+        .digest("hex");
       try {
         return inImmediateTransaction(dependencies.database, () => {
           dependencies.database
@@ -128,7 +125,7 @@ export function createAuthProxyProvenanceVerifier(
             .run(
               Buffer.from(replayHash, "hex"),
               dependencies.issuer,
-              Math.min(assertion.value.expiresAt ?? now + 600, now + 600),
+              assertion.value.expiresAt,
               now,
             );
           return inserted.changes === 1

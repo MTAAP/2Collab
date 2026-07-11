@@ -77,11 +77,37 @@ function validOwnerId(value: string): boolean {
 
 export function createEncryptedCredentialStore(dependencies: CredentialStoreDependencies) {
   const rowFor = (
-    input: Pick<PutCredential, "credentialClass" | "connectorId" | "credentialOwnerId">,
+    input: Pick<
+      PutCredential,
+      "credentialClass" | "ownerKind" | "ownerId" | "connectorId" | "credentialOwnerId"
+    >,
   ) =>
     dependencies.database
-      .query<StoredRow, [CredentialClass, string, string]>(
+      .query<StoredRow, [CredentialClass, CredentialOwnerKind, string, string, string]>(
         `SELECT * FROM encrypted_credentials
+         WHERE credential_class = ? AND owner_kind = ? AND owner_id = ?
+           AND connector_id = ? AND credential_owner_id = ?`,
+      )
+      .get(
+        input.credentialClass,
+        input.ownerKind,
+        input.ownerId,
+        input.connectorId,
+        input.credentialOwnerId,
+      );
+
+  const legalOwner = (input: Pick<PutCredential, "credentialClass" | "ownerKind">) =>
+    (input.credentialClass === "PROVIDER" && input.ownerKind === "CONNECTOR") ||
+    (input.credentialClass === "MEMBER_OAUTH" && input.ownerKind === "MEMBER") ||
+    (input.credentialClass === "DEVICE_REFRESH" && input.ownerKind === "DEVICE");
+
+  const ownerCollision = (input: PutCredential) =>
+    dependencies.database
+      .query<
+        { owner_kind: CredentialOwnerKind; owner_id: string },
+        [CredentialClass, string, string]
+      >(
+        `SELECT owner_kind, owner_id FROM encrypted_credentials
          WHERE credential_class = ? AND connector_id = ? AND credential_owner_id = ?`,
       )
       .get(input.credentialClass, input.connectorId, input.credentialOwnerId);
@@ -89,6 +115,7 @@ export function createEncryptedCredentialStore(dependencies: CredentialStoreDepe
   return {
     async put(input: PutCredential): Promise<Result<Readonly<{ id: string; revision: number }>>> {
       if (
+        !legalOwner(input) ||
         !validOwnerId(input.ownerId) ||
         !validOwnerId(input.connectorId) ||
         !validOwnerId(input.credentialOwnerId) ||
@@ -99,6 +126,12 @@ export function createEncryptedCredentialStore(dependencies: CredentialStoreDepe
       ) {
         return error("CREDENTIAL_INPUT_INVALID", "Credential input is invalid.");
       }
+      const collision = ownerCollision(input);
+      if (
+        collision &&
+        (collision.owner_kind !== input.ownerKind || collision.owner_id !== input.ownerId)
+      )
+        return error("CREDENTIAL_NOT_FOUND", "Credential was not found.");
       const snapshot = rowFor(input);
       const currentRevision = snapshot?.revision ?? 0;
       if (snapshot && snapshot.revoked_at !== null)
@@ -176,7 +209,6 @@ export function createEncryptedCredentialStore(dependencies: CredentialStoreDepe
                  nonce, ciphertext, auth_tag, revision, created_at, updated_at
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(credential_class, connector_id, credential_owner_id) DO UPDATE SET
-                 owner_kind = excluded.owner_kind, owner_id = excluded.owner_id,
                  key_id = excluded.key_id, key_version = excluded.key_version,
                  algorithm = excluded.algorithm, nonce = excluded.nonce,
                  ciphertext = excluded.ciphertext, auth_tag = excluded.auth_tag,
@@ -213,6 +245,7 @@ export function createEncryptedCredentialStore(dependencies: CredentialStoreDepe
       >,
     ): Promise<Result<Readonly<{ cleartext: Uint8Array; revision: number }>>> {
       if (
+        !legalOwner(input) ||
         !validOwnerId(input.ownerId) ||
         !validOwnerId(input.connectorId) ||
         !validOwnerId(input.credentialOwnerId)

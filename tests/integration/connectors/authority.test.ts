@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { migrate } from "../../../src/server/db/migrate.ts";
 import { openDatabase } from "../../../src/server/db/connection.ts";
+import { migrate } from "../../../src/server/db/migrate.ts";
 import {
-  createConnectorAuthority,
   type AttemptOperationAuthorityPort,
+  createConnectorAuthority,
 } from "../../../src/server/modules/connectors/connector-authority.ts";
 import type {
   ConnectorOperationAuthorization,
@@ -88,6 +88,18 @@ function fixture(overrides: Readonly<{ beforeConfirmationCommit?: () => void }> 
     },
   };
   const attemptAuthority: AttemptOperationAuthorityPort = {
+    async verify(input) {
+      return input.authorizationId === "operation_1"
+        ? { ok: true, value: { actorId: "attempt_1" } }
+        : {
+            ok: false,
+            error: {
+              code: "OPERATION_AUTHORIZATION_INVALID",
+              message: "Operation authorization is invalid.",
+              retry: "NEVER",
+            },
+          };
+    },
     async consume(input) {
       consumed += 1;
       return input.authorizationId === "operation_1"
@@ -137,6 +149,34 @@ function fixture(overrides: Readonly<{ beforeConfirmationCommit?: () => void }> 
 }
 
 describe("ConnectorAuthority", () => {
+  test("only an active owner can idempotently advance connector authority with an audit id", async () => {
+    const f = fixture();
+    try {
+      f.database.exec("UPDATE members SET role = 'OWNER' WHERE id = 'member_1'");
+      const command = {
+        actor: {
+          kind: "MEMBER" as const,
+          memberId: "member_1" as never,
+          sessionId: "session_1" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        idempotencyKey: "epoch_advance_1",
+        connectorId: "connector_1",
+        expectedEpoch: 1,
+        expectedRevision: 1,
+        reviewState: "REVIEW_REQUIRED" as const,
+      };
+      const changed = await f.authority.changeEpoch(command);
+      expect(changed.ok).toBe(true);
+      if (!changed.ok) return;
+      expect(changed.value).toMatchObject({ epoch: 2, revision: 2 });
+      expect(changed.auditId).toMatch(/^audit_/);
+      expect(await f.authority.changeEpoch(command)).toEqual(changed);
+    } finally {
+      f.database.close();
+    }
+  });
+
   test("ordinary ACTIVE members enter the shared mutation path without an authority session", async () => {
     const f = fixture();
     try {
@@ -158,6 +198,28 @@ describe("ConnectorAuthority", () => {
     }
   });
 
+  test("human connector mutation rejects a browser session at the shared idle deadline", async () => {
+    const f = fixture();
+    try {
+      f.database.exec("UPDATE sessions SET idle_expires_at = 100 WHERE id = 'session_1'");
+      const result = await f.authority.mutateAsMember(f.connector, {
+        actor: {
+          kind: "MEMBER",
+          memberId: "member_1" as never,
+          sessionId: "session_1" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        reference: "issue_42",
+        operation: "SET_TITLE",
+        command: f.command,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("SESSION_INVALID");
+    } finally {
+      f.database.close();
+    }
+  });
+
   test("attempt writes consume exact operation authority then use the same persistence path", async () => {
     const f = fixture();
     try {
@@ -169,6 +231,17 @@ describe("ConnectorAuthority", () => {
         command: f.command,
       });
       expect(result.ok).toBe(true);
+      expect(
+        (
+          await f.authority.mutateAsAttempt(f.connector, {
+            authorizationId: "operation_1",
+            authorizationProof: "operation-proof-with-at-least-thirty-two-bytes",
+            reference: "issue_42",
+            operation: "SET_TITLE",
+            command: f.command,
+          })
+        ).ok,
+      ).toBe(true);
       expect(f.consumed()).toBe(1);
       expect(f.calls()).toBe(1);
     } finally {
@@ -225,6 +298,16 @@ describe("ConnectorAuthority", () => {
               idempotencyKey: "provider_event_1",
               reference: observed.reference,
               actionMarker: "SET_TITLE:issue_42:mutation_1",
+              mutationProof: {
+                actionMarker: "SET_TITLE:issue_42:mutation_1",
+                operation: "SET_TITLE",
+                actionDigest: digest as never,
+                precondition: {
+                  kind: "EXACT_REVISION",
+                  sourceRevision: "etag-1",
+                  comparableDigest: digest as never,
+                },
+              },
               sourceRevision: observed.sourceRevision,
               comparableDigest: observed.comparableDigest,
               observedAt: observed.observedAt,
@@ -264,6 +347,57 @@ describe("ConnectorAuthority", () => {
           .query<{ state: string }, []>("SELECT state FROM connector_operation_intents")
           .get()?.state,
       ).toBe("COMMITTED");
+    } finally {
+      f.database.close();
+    }
+  });
+
+  test("does not recover a lost response from an unrelated event for the same reference", async () => {
+    const f = fixture();
+    const connector: SourceConnector<string, Projection, Mutation> = {
+      ...f.connector,
+      async mutate() {
+        throw new Error("lost response");
+      },
+      async *scan() {
+        yield {
+          ok: true,
+          value: {
+            projectId: "project_1" as never,
+            connectorId: "connector_1" as never,
+            connectorEpoch: 1,
+            idempotencyKey: "unrelated_event",
+            reference: "issue_42",
+            sourceRevision: "etag-unrelated",
+            comparableDigest: "e".repeat(64) as never,
+            observedAt: 100,
+            freshness: "FRESH" as const,
+            provenance: { kind: "MUTATION_CONFIRMATION" as const },
+            value: { title: "Unrelated" },
+          },
+        };
+      },
+    };
+    try {
+      await f.authority.mutateAsMember(connector, {
+        actor: {
+          kind: "MEMBER",
+          memberId: "member_1" as never,
+          sessionId: "session_1" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        reference: "issue_42",
+        operation: "SET_TITLE",
+        command: f.command,
+      });
+      const intentId = f.database
+        .query<{ id: string }, []>("SELECT id FROM connector_operation_intents")
+        .get()?.id;
+      const recovered = await f.restart().recoverPending(connector, {
+        intentId: intentId ?? "missing",
+      });
+      expect(recovered.ok).toBe(false);
+      if (!recovered.ok) expect(recovered.error.code).toBe("CONNECTOR_OPERATION_PENDING");
     } finally {
       f.database.close();
     }
@@ -362,6 +496,16 @@ describe("ConnectorAuthority", () => {
               idempotencyKey: `event_${index + 1}`,
               reference,
               actionMarker: "SET_TITLE:issue_42:mutation_1",
+              mutationProof: {
+                actionMarker: "SET_TITLE:issue_42:mutation_1",
+                operation: "SET_TITLE",
+                actionDigest: digest as never,
+                precondition: {
+                  kind: "EXACT_REVISION",
+                  sourceRevision: "etag-1",
+                  comparableDigest: digest as never,
+                },
+              },
               sourceRevision: "etag-2",
               comparableDigest: "b".repeat(64) as never,
               observedAt: 100,
@@ -423,6 +567,21 @@ describe("ConnectorAuthority", () => {
       expect(first.ok).toBe(true);
       const replay = f.authority.reconcileSource(event);
       expect(replay.ok).toBe(true);
+      const later = f.authority.reconcileSource({
+        ...event,
+        idempotencyKey: "reconcile_2",
+        sourceRevision: "etag-4",
+        comparableDigest: "d".repeat(64) as never,
+        value: { title: "Later" },
+      });
+      expect(later.ok).toBe(true);
+      const immutableReplay = f.authority.reconcileSource(event);
+      expect(immutableReplay.ok).toBe(true);
+      if (immutableReplay.ok) {
+        expect(immutableReplay.value.value).toEqual({ title: "Reconciled" });
+        expect(immutableReplay.value.sourceRevision).toBe("etag-3");
+        expect(immutableReplay.auditId).toBe(first.ok ? first.auditId : undefined);
+      }
       const conflict = f.authority.reconcileSource({
         ...event,
         value: { title: "Changed input" },

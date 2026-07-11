@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createAuthRecoverCommand } from "../../../src/server/commands/auth-recover.ts";
 import { createIdentityFixture, type IdentityFixture } from "../../fixtures/identity.ts";
 
 const fixtures: IdentityFixture[] = [];
@@ -15,6 +16,104 @@ afterEach(() =>
 );
 
 describe("local identity lifecycle", () => {
+  test("owner promotion requires a fresh acting-owner passkey and replays the audited result", async () => {
+    const value = fixture();
+    const owner = await value.bootstrap();
+    if (!owner.ok) throw new Error(owner.error.code);
+    const invitation = await value.invite(owner.value, "Role target");
+    if (!invitation.ok) throw new Error(invitation.error.code);
+    const accepted = await value.accept(invitation.value, "Grace");
+    if (!accepted.ok) throw new Error(accepted.error.code);
+    const actor = {
+      kind: "MEMBER" as const,
+      memberId: owner.value.memberId,
+      sessionId: owner.value.id,
+      sessionProof: owner.value.proof,
+    };
+    const begun = await value.identity.beginMemberRoleChange({
+      idempotencyKey: "role-begin",
+      actor,
+    });
+    if (!begun.ok) throw new Error(begun.error.code);
+    const command = {
+      idempotencyKey: "role-finish",
+      actor,
+      memberId: accepted.value.memberId,
+      expectedRevision: 1,
+      role: "OWNER" as const,
+      challengeId: begun.value.challengeId,
+      response: {
+        challenge: begun.value.challenge,
+        credentialId: "credential-ada",
+        newCounter: 1,
+      },
+    };
+    const changed = await value.identity.changeMemberRole(command);
+    expect(changed.ok).toBe(true);
+    if (!changed.ok) return;
+    expect(changed.value).toMatchObject({ previousRole: "MEMBER", role: "OWNER", revision: 2 });
+    expect(changed.value.auditId).toMatch(/^audit_/);
+    expect(await value.identity.changeMemberRole(command)).toEqual(changed);
+    expect(
+      value.database
+        .query<{ safe_details: string }, [string]>(
+          "SELECT safe_details FROM audit_events WHERE id = ?",
+        )
+        .get(changed.value.auditId)?.safe_details,
+    ).toContain('"authMethod":"PASSKEY"');
+  });
+
+  test("a redeemed host-recovery session can restore a local passkey", async () => {
+    const value = fixture();
+    const owner = await value.bootstrap();
+    if (!owner.ok) throw new Error(owner.error.code);
+    let sequence = 0;
+    const recovery = createAuthRecoverCommand({
+      database: value.database,
+      clock: value.now,
+      id: (prefix) => `${prefix}_restore_${++sequence}`,
+      invocationMode: "OFFLINE_CONTAINER",
+      mountedBootstrapSecret: "mounted-bootstrap-secret-with-at-least-32-bytes",
+      randomSecret: () => `host-recovery-${"x".repeat(32)}-${++sequence}`,
+    });
+    const issued = recovery.generate({ memberId: owner.value.memberId });
+    if (!issued.ok) throw new Error(issued.error.code);
+    const redeemed = recovery.redeem({
+      memberId: owner.value.memberId,
+      recoveryCode: issued.value.recoveryCode,
+    });
+    if (!redeemed.ok) throw new Error(redeemed.error.code);
+    const principal = {
+      kind: "HOST_RECOVERY" as const,
+      sessionId: redeemed.value.sessionId as never,
+      sessionProof: redeemed.value.sessionProof,
+    };
+    const begun = await value.identity.beginPasskeyRegistration({
+      idempotencyKey: "host-recovery-begin",
+      principal,
+      displayName: "Ada",
+    });
+    if (!begun.ok) throw new Error(begun.error.code);
+    const restored = await value.identity.finishPasskeyRegistration({
+      idempotencyKey: "host-recovery-finish",
+      principal,
+      challengeId: begun.value.challengeId,
+      credentialName: "Restored passkey",
+      response: {
+        challenge: begun.value.challenge,
+        credentialId: "credential-restored",
+      },
+    });
+    expect(restored.ok).toBe(true);
+    expect(
+      value.database
+        .query<{ revoked_at: number | null }, [string]>(
+          "SELECT revoked_at FROM sessions WHERE id = ?",
+        )
+        .get(redeemed.value.sessionId)?.revoked_at,
+    ).toBe(value.now());
+  });
+
   test("bootstrap is one-time, transactional, and creates an owner with a verified passkey", async () => {
     const value = fixture();
     const [first, second] = await Promise.all([value.bootstrap("Ada"), value.bootstrap("Grace")]);

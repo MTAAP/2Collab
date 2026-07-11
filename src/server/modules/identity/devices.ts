@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
+import { createBrowserSessionAuthority } from "./browser-session-authority.ts";
 
 const DEVICE_CODE_SECONDS = 10 * 60;
 const ACCESS_SECONDS = 10 * 60;
@@ -98,25 +99,7 @@ export function createDeviceAuthority(dependencies: Dependencies) {
       )
       .run(actorId, key, hash, JSON.stringify({ kind: "SECRET_ISSUED" }), dependencies.clock());
   };
-
-  const activeActor = async (actor: MemberActor) => {
-    if (actor.sessionProof.length < 32 || actor.sessionProof.length > 512) return null;
-    const proofHash = await digest(actor.sessionProof);
-    return dependencies.database
-      .query<
-        { member_revision: number; session_revision: number; authority_epoch: number },
-        [string, string, Uint8Array, number]
-      >(
-        `SELECT members.revision AS member_revision, sessions.revision AS session_revision,
-                members.authority_epoch
-         FROM members JOIN sessions ON sessions.member_id = members.id
-         WHERE members.id = ? AND sessions.id = ? AND sessions.proof_hash = ?
-           AND members.status = 'ACTIVE' AND sessions.kind = 'BROWSER'
-           AND sessions.revoked_at IS NULL AND sessions.expires_at > ?
-           AND sessions.member_authority_epoch = members.authority_epoch`,
-      )
-      .get(actor.memberId, actor.sessionId, proofHash, dependencies.clock());
-  };
+  const browserSessions = createBrowserSessionAuthority({ ...dependencies, digest });
 
   const familyForHash = (
     hash: Uint8Array,
@@ -186,35 +169,30 @@ export function createDeviceAuthority(dependencies: Dependencies) {
     ): Promise<Result<Readonly<{ approved: true }>>> {
       if (!validId(input.idempotencyKey) || !validId(input.deviceCodeId))
         return error("DEVICE_INPUT_INVALID", "Device authorization input is invalid.");
-      const authority = await activeActor(input.actor);
-      if (!authority) return error("SESSION_INVALID", "Member session is invalid.");
-      const snapshot = dependencies.database
-        .query<CodeRow, [string]>("SELECT * FROM device_authorization_codes WHERE id = ?")
-        .get(input.deviceCodeId);
-      if (snapshot?.state !== "PENDING" || dependencies.clock() >= snapshot.expires_at)
-        return error("DEVICE_CODE_INVALID", "Device authorization code is invalid.");
+      const authority = await browserSessions.authorize(input.actor);
+      if (!authority.ok) return authority;
       const actorId = `DEVICE_APPROVE_${input.actor.memberId}`;
       const ticketHash = idempotencyHash("DEVICE_APPROVE", {
         memberId: input.actor.memberId,
         deviceCodeId: input.deviceCodeId,
       });
-      const prior = replay(actorId, input.idempotencyKey, ticketHash);
-      if (prior) return prior;
+      const stored = dependencies.database
+        .query<{ input_hash: string; result_json: string }, [string, string]>(
+          "SELECT input_hash, result_json FROM idempotency_results WHERE actor_id = ? AND idempotency_key = ?",
+        )
+        .get(actorId, input.idempotencyKey);
+      if (stored)
+        return stored.input_hash === ticketHash
+          ? { ok: true, value: { approved: true as const } }
+          : error("IDEMPOTENCY_CONFLICT", "Idempotency key was used with different input.");
+      const snapshot = dependencies.database
+        .query<CodeRow, [string]>("SELECT * FROM device_authorization_codes WHERE id = ?")
+        .get(input.deviceCodeId);
+      if (snapshot?.state !== "PENDING" || dependencies.clock() >= snapshot.expires_at)
+        return error("DEVICE_CODE_INVALID", "Device authorization code is invalid.");
       try {
         return inImmediateTransaction(dependencies.database, () => {
-          const currentActor = dependencies.database
-            .query<{ id: string }, [string, number, string, number]>(
-              `SELECT members.id FROM members JOIN sessions ON sessions.member_id = members.id
-               WHERE members.id = ? AND members.revision = ? AND members.status = 'ACTIVE'
-                 AND sessions.id = ? AND sessions.revision = ? AND sessions.revoked_at IS NULL`,
-            )
-            .get(
-              input.actor.memberId,
-              authority.member_revision,
-              input.actor.sessionId,
-              authority.session_revision,
-            );
-          if (!currentActor)
+          if (!browserSessions.revalidate(authority.value).ok)
             return error("AUTHORITY_STALE", "Identity authority changed.", "REFRESH");
           const changed = dependencies.database
             .query(
@@ -222,7 +200,18 @@ export function createDeviceAuthority(dependencies: Dependencies) {
                WHERE id = ? AND revision = ? AND state = 'PENDING' AND expires_at > ?`,
             )
             .run(input.actor.memberId, input.deviceCodeId, snapshot.revision, dependencies.clock());
-          if (changed.changes === 1) storeMarker(actorId, input.idempotencyKey, ticketHash);
+          if (changed.changes === 1)
+            dependencies.database
+              .query(
+                "INSERT INTO idempotency_results(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+              )
+              .run(
+                actorId,
+                input.idempotencyKey,
+                ticketHash,
+                JSON.stringify({ approved: true }),
+                dependencies.clock(),
+              );
           return changed.changes === 1
             ? { ok: true, value: { approved: true as const } }
             : error("DEVICE_CODE_INVALID", "Device authorization code is invalid.");
@@ -290,18 +279,20 @@ export function createDeviceAuthority(dependencies: Dependencies) {
       const now = dependencies.clock();
       try {
         return inImmediateTransaction(dependencies.database, () => {
+          const currentMember = dependencies.database
+            .query<{ id: string }, [string, number, number]>(
+              "SELECT id FROM members WHERE id = ? AND status = 'ACTIVE' AND revision = ? AND authority_epoch = ?",
+            )
+            .get(code.member_id as string, member.revision, member.authority_epoch);
+          if (!currentMember)
+            return error("AUTHORITY_STALE", "Identity authority changed.", "REFRESH");
           const changed = dependencies.database
             .query(
               `UPDATE device_authorization_codes SET state = 'CONSUMED', consumed_at = ?, revision = revision + 1
                WHERE id = ? AND revision = ? AND state = 'APPROVED' AND expires_at > ?`,
             )
             .run(now, code.id, code.revision, now);
-          const currentMember = dependencies.database
-            .query<{ id: string }, [string, number, number]>(
-              "SELECT id FROM members WHERE id = ? AND status = 'ACTIVE' AND revision = ? AND authority_epoch = ?",
-            )
-            .get(code.member_id as string, member.revision, member.authority_epoch);
-          if (changed.changes !== 1 || !currentMember)
+          if (changed.changes !== 1)
             return error("AUTHORITY_STALE", "Identity authority changed.", "REFRESH");
           dependencies.database
             .query(

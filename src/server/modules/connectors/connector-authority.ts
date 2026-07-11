@@ -3,6 +3,10 @@ import { createHash, randomBytes } from "node:crypto";
 import type { MemberActor } from "../../../shared/contracts/actors.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
+import {
+  type BrowserSessionAuthorityFacts,
+  createBrowserSessionAuthority,
+} from "../identity/browser-session-authority.ts";
 import type {
   ConnectorOperationAuthorization,
   ConnectorScope,
@@ -15,6 +19,18 @@ import type {
 import { connectorScopeAllows } from "./scope-policy.ts";
 
 export interface AttemptOperationAuthorityPort {
+  verify(
+    input: Readonly<{
+      authorizationId: string;
+      authorizationProof: string;
+      projectId: string;
+      connectorId: string;
+      connectorEpoch: number;
+      reference: string;
+      operation: string;
+      actionDigest: string;
+    }>,
+  ): Promise<Result<Readonly<{ actorId: string }>>>;
   consume(
     input: Readonly<{
       authorizationId: string;
@@ -75,7 +91,7 @@ function error(
 }
 
 function validBounded(value: string, maximum: number): boolean {
-  return value.length > 0 && value.length <= maximum;
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= maximum;
 }
 
 function canonicalInputHash(value: unknown): string | null {
@@ -115,7 +131,7 @@ function canonicalInputHash(value: unknown): string | null {
   };
   try {
     const serialized = JSON.stringify(normalize(value, 0));
-    if (serialized.length > 65_536) return null;
+    if (Buffer.byteLength(serialized, "utf8") > 65_536) return null;
     return createHash("sha256").update(serialized, "utf8").digest("hex");
   } catch {
     return null;
@@ -131,7 +147,7 @@ function observedIsBounded(value: Observed<unknown>): boolean {
       /^[a-f0-9]{64}$/.test(value.comparableDigest) &&
       Number.isInteger(value.observedAt) &&
       value.observedAt >= 0 &&
-      serialized.length <= 65_536 &&
+      Buffer.byteLength(serialized, "utf8") <= 65_536 &&
       value.provenance.projectId.length <= 128 &&
       value.provenance.connectorId.length <= 128
     );
@@ -142,6 +158,7 @@ function observedIsBounded(value: Observed<unknown>): boolean {
 
 export function createConnectorAuthority(dependencies: Dependencies) {
   const { database, clock } = dependencies;
+  const browserSessions = createBrowserSessionAuthority(dependencies);
 
   const scopeSnapshot = (projectId: string, connectorId: string): ScopeRow | null =>
     database
@@ -230,6 +247,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     input: MutationInput<M>,
     snapshot: Readonly<{ scope: ScopeRow; projection: ProjectionRow | null }>,
     inputHash: string,
+    browser?: BrowserSessionAuthorityFacts,
   ): Promise<Result<ConnectorOperationAuthorization>> => {
     const proof = dependencies.randomSecret?.() ?? randomBytes(32).toString("base64url");
     const proofHash = await dependencies.digest(proof);
@@ -251,6 +269,8 @@ export function createConnectorAuthority(dependencies: Dependencies) {
         ) {
           return error("CONNECTOR_AUTHORITY_STALE", "Connector authority changed.", "REFRESH");
         }
+        if (browser && !browserSessions.revalidate(browser).ok)
+          return error("CONNECTOR_AUTHORITY_STALE", "Connector authority changed.", "REFRESH");
         const actionMarker = `${input.operation}:${input.reference}:${input.command.idempotencyKey}`;
         const actorBindingDigest = createHash("sha256")
           .update(
@@ -357,6 +377,10 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     actorKind: "MEMBER" | "ATTEMPT",
     actorId: string,
     input: MutationInput<M>,
+    authority?: Readonly<{
+      browser?: BrowserSessionAuthorityFacts;
+      consumeAttempt?: () => Promise<Result<Readonly<{ consumed: true }>>>;
+    }>,
   ): Promise<Result<Observed<P>>> => {
     const inputHash = canonicalInputHash({
       reference: input.reference,
@@ -376,12 +400,13 @@ export function createConnectorAuthority(dependencies: Dependencies) {
       try {
         const parsed = JSON.parse(stored.result_json) as Omit<Observed<P>, "value"> & {
           projectionJson: string;
+          auditId: string;
         };
         const projection = codec.deserialize(parsed.projectionJson);
         if (!projection.ok)
           return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
-        const { projectionJson: _, ...metadata } = parsed;
-        return { ok: true, value: { ...metadata, value: projection.value } };
+        const { projectionJson: _, auditId, ...metadata } = parsed;
+        return { ok: true, value: { ...metadata, value: projection.value }, auditId };
       } catch {
         return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
       }
@@ -406,12 +431,19 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     }
     const valid = validateInput(input);
     if (!valid.ok) return valid;
+    if (authority?.browser && !browserSessions.revalidate(authority.browser).ok)
+      return error("CONNECTOR_AUTHORITY_STALE", "Connector authority changed.", "REFRESH");
+    if (authority?.consumeAttempt) {
+      const consumed = await authority.consumeAttempt();
+      if (!consumed.ok) return consumed;
+    }
     const authorization = await issueAuthorization(
       actorKind,
       actorId,
       input,
       valid.value,
       inputHash,
+      authority?.browser,
     );
     if (!authorization.ok) return authorization;
     let providerResult: Result<Observed<P>>;
@@ -485,12 +517,26 @@ export function createConnectorAuthority(dependencies: Dependencies) {
             .run(authorization.value.id);
           return error("CONNECTOR_AUTHORITY_STALE", "Connector authority changed.", "REFRESH");
         }
+        if (authority?.browser && !browserSessions.revalidate(authority.browser).ok) {
+          database
+            .query(
+              "UPDATE connector_operation_intents SET state = 'REQUIRES_REAUTHORIZATION', updated_at = ? WHERE id = ? AND state = 'PENDING'",
+            )
+            .run(clock(), authorization.value.id);
+          database
+            .query(
+              "UPDATE connector_operation_authorizations SET state = 'REVOKED' WHERE id = ? AND state = 'RESERVED'",
+            )
+            .run(authorization.value.id);
+          return error("CONNECTOR_AUTHORITY_STALE", "Connector authority changed.", "REFRESH");
+        }
         const nextProjection = (currentProjection?.projection_revision ?? 0) + 1;
         const observed: Observed<P> = {
           ...providerResult.value,
           projectionRevision: nextProjection,
         };
         dependencies.beforeConfirmationCommit?.();
+        const auditId = dependencies.id("audit");
         database
           .query<
             void,
@@ -575,6 +621,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
               ...observed,
               value: undefined,
               projectionJson: encodedProjection.value,
+              auditId,
             }),
             clock(),
           );
@@ -583,14 +630,14 @@ export function createConnectorAuthority(dependencies: Dependencies) {
             "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, 'CONNECTOR_MUTATION_CONFIRMED', ?, ?, ?, ?, ?)",
           )
           .run(
-            dependencies.id("audit"),
+            auditId,
             actorKind,
             actorId,
             input.command.connectorId,
             JSON.stringify({ operation: input.operation, disposition: "CONFIRMED" }),
             clock(),
           );
-        return { ok: true, value: observed };
+        return { ok: true, value: observed, auditId };
       });
     } catch {
       return error("CONNECTOR_OPERATION_FAILED", "Connector operation failed.");
@@ -649,34 +696,30 @@ export function createConnectorAuthority(dependencies: Dependencies) {
          FROM connector_projections WHERE project_id = ? AND connector_id = ? AND reference = ?`,
       )
       .get(event.projectId, event.connectorId, event.reference);
-    if (stored && current) {
+    const reconciliationActorId = `RECONCILIATION_${event.projectId}_${event.connectorId}_${event.connectorEpoch}`;
+    const immutableResult = stored
+      ? database
+          .query<{ input_hash: string; result_json: string }, [string, string]>(
+            "SELECT input_hash, result_json FROM connector_idempotency WHERE actor_id = ? AND idempotency_key = ?",
+          )
+          .get(reconciliationActorId, event.idempotencyKey)
+      : null;
+    if (stored) {
       try {
-        const persistedProjection = codec.deserialize(current.projection_json);
+        if (!immutableResult || immutableResult.input_hash !== inputHash)
+          return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+        const parsed = JSON.parse(immutableResult.result_json) as Omit<Observed<P>, "value"> & {
+          projectionJson: string;
+          auditId: string;
+        };
+        const persistedProjection = codec.deserialize(parsed.projectionJson);
         if (!persistedProjection.ok)
           return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+        const { projectionJson: _, auditId, ...metadata } = parsed;
         return {
           ok: true,
-          value: {
-            value: persistedProjection.value,
-            reference: event.reference,
-            sourceRevision: current.source_revision,
-            comparableDigest: current.comparable_digest as never,
-            projectionRevision: current.projection_revision,
-            observedAt: current.observed_at,
-            ...(current.source_updated_at === null
-              ? {}
-              : { sourceUpdatedAt: current.source_updated_at }),
-            freshness: current.freshness,
-            provenance: {
-              projectId: event.projectId,
-              connectorId: event.connectorId,
-              connectorEpoch: event.connectorEpoch,
-              kind: current.provenance_kind,
-              ...(current.provider_actor_id === null
-                ? {}
-                : { providerActorId: current.provider_actor_id }),
-            },
-          },
+          value: { ...metadata, value: persistedProjection.value },
+          auditId,
         };
       } catch {
         return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
@@ -725,6 +768,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
         };
         if (!observedIsBounded(observed))
           return error("RECONCILIATION_INPUT_INVALID", "Reconciliation input is invalid.");
+        const auditId = dependencies.id("audit");
         database
           .query(
             `INSERT INTO connector_projections(
@@ -777,15 +821,31 @@ export function createConnectorAuthority(dependencies: Dependencies) {
           );
         database
           .query(
+            "INSERT INTO connector_idempotency(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(
+            reconciliationActorId,
+            event.idempotencyKey,
+            inputHash,
+            JSON.stringify({
+              ...observed,
+              value: undefined,
+              projectionJson: encodedProjection.value,
+              auditId,
+            }),
+            clock(),
+          );
+        database
+          .query(
             "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, 'SOURCE_RECONCILED', 'SYSTEM', 'RECONCILER', ?, ?, ?)",
           )
           .run(
-            dependencies.id("audit"),
+            auditId,
             event.connectorId,
             JSON.stringify({ disposition: "APPLIED", provenance: event.provenance.kind }),
             clock(),
           );
-        return { ok: true, value: observed };
+        return { ok: true, value: observed, auditId };
       });
     } catch {
       return error("RECONCILIATION_FAILED", "Source reconciliation failed.");
@@ -793,24 +853,129 @@ export function createConnectorAuthority(dependencies: Dependencies) {
   };
 
   return {
+    async changeEpoch(
+      input: Readonly<{
+        actor: MemberActor;
+        idempotencyKey: string;
+        connectorId: string;
+        expectedEpoch: number;
+        expectedRevision: number;
+        reviewState: "READY" | "REVIEW_REQUIRED" | "REVOKED";
+      }>,
+    ): Promise<
+      Result<
+        Readonly<{
+          connectorId: string;
+          epoch: number;
+          reviewState: "READY" | "REVIEW_REQUIRED" | "REVOKED";
+          revision: number;
+        }>
+      >
+    > {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.idempotencyKey) ||
+        !validBounded(input.connectorId, 128) ||
+        !Number.isInteger(input.expectedEpoch) ||
+        input.expectedEpoch < 1 ||
+        !Number.isInteger(input.expectedRevision) ||
+        input.expectedRevision < 1
+      )
+        return error("CONNECTOR_INPUT_INVALID", "Connector input is invalid.");
+      const authority = await browserSessions.authorize(input.actor, { role: "OWNER" });
+      if (!authority.ok) return error("OWNER_REQUIRED", "Owner authorization is required.");
+      const hash = canonicalInputHash({
+        connectorId: input.connectorId,
+        expectedEpoch: input.expectedEpoch,
+        expectedRevision: input.expectedRevision,
+        reviewState: input.reviewState,
+      });
+      if (!hash) return error("CONNECTOR_INPUT_INVALID", "Connector input is invalid.");
+      const storageKey = `EPOCH:${input.idempotencyKey}`;
+      const stored = database
+        .query<{ input_hash: string; result_json: string }, [string, string]>(
+          "SELECT input_hash, result_json FROM connector_idempotency WHERE actor_id = ? AND idempotency_key = ?",
+        )
+        .get(input.actor.memberId, storageKey);
+      if (stored) {
+        if (stored.input_hash !== hash)
+          return error("IDEMPOTENCY_CONFLICT", "Idempotency key was used with different input.");
+        try {
+          const parsed = JSON.parse(stored.result_json) as {
+            value: {
+              connectorId: string;
+              epoch: number;
+              reviewState: "READY" | "REVIEW_REQUIRED" | "REVOKED";
+              revision: number;
+            };
+            auditId: string;
+          };
+          return { ok: true, value: parsed.value, auditId: parsed.auditId };
+        } catch {
+          return error("IDEMPOTENCY_STORAGE_INVALID", "Stored idempotency result is invalid.");
+        }
+      }
+      try {
+        return inImmediateTransaction(database, () => {
+          if (!browserSessions.revalidate(authority.value, { role: "OWNER" }).ok)
+            return error("CONNECTOR_AUTHORITY_STALE", "Connector authority changed.", "REFRESH");
+          const changed = database
+            .query(
+              `UPDATE connector_epochs SET epoch = epoch + 1, review_state = ?,
+                 revision = revision + 1
+               WHERE connector_id = ? AND epoch = ? AND revision = ?`,
+            )
+            .run(input.reviewState, input.connectorId, input.expectedEpoch, input.expectedRevision);
+          if (changed.changes !== 1)
+            return error("CONNECTOR_EPOCH_STALE", "Connector epoch is stale.", "REFRESH");
+          const value = {
+            connectorId: input.connectorId,
+            epoch: input.expectedEpoch + 1,
+            reviewState: input.reviewState,
+            revision: input.expectedRevision + 1,
+          } as const;
+          const auditId = dependencies.id("audit");
+          database
+            .query(
+              "INSERT INTO connector_idempotency(actor_id, idempotency_key, input_hash, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .run(
+              input.actor.memberId,
+              storageKey,
+              hash,
+              JSON.stringify({ value, auditId }),
+              clock(),
+            );
+          database
+            .query(
+              "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, 'CONNECTOR_EPOCH_CHANGED', 'MEMBER', ?, ?, ?, ?)",
+            )
+            .run(
+              auditId,
+              input.actor.memberId,
+              input.connectorId,
+              JSON.stringify({
+                previousEpoch: input.expectedEpoch,
+                epoch: value.epoch,
+                reviewState: input.reviewState,
+              }),
+              clock(),
+            );
+          return { ok: true, value, auditId };
+        });
+      } catch {
+        return error("CONNECTOR_OPERATION_FAILED", "Connector operation failed.");
+      }
+    },
+
     async mutateAsMember<P, M>(
       connector: SourceConnector<string, P, M>,
       input: MemberMutationInput<M>,
     ): Promise<Result<Observed<P>>> {
-      if (input.actor.sessionProof.length < 32 || input.actor.sessionProof.length > 512)
-        return error("SESSION_INVALID", "Member session is invalid.");
-      const proofHash = await dependencies.digest(input.actor.sessionProof);
-      const active = database
-        .query<{ id: string }, [string, string, Uint8Array, number]>(
-          `SELECT sessions.id FROM sessions JOIN members ON members.id = sessions.member_id
-           WHERE members.id = ? AND sessions.id = ? AND sessions.proof_hash = ?
-             AND sessions.kind = 'BROWSER' AND sessions.revoked_at IS NULL
-             AND sessions.expires_at > ? AND members.status = 'ACTIVE'
-             AND sessions.member_authority_epoch = members.authority_epoch`,
-        )
-        .get(input.actor.memberId, input.actor.sessionId, proofHash, clock());
-      if (!active) return error("SESSION_INVALID", "Member session is invalid.");
-      return mutate(connector, "MEMBER", input.actor.memberId, input);
+      const active = await browserSessions.authorize(input.actor);
+      if (!active.ok) return active;
+      return mutate(connector, "MEMBER", input.actor.memberId, input, {
+        browser: active.value,
+      });
     },
 
     async mutateAsAttempt<P, M>(
@@ -819,7 +984,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     ): Promise<Result<Observed<P>>> {
       if (!validBounded(input.authorizationProof, 512) || input.authorizationProof.length < 32)
         return error("OPERATION_AUTHORIZATION_INVALID", "Operation authorization is invalid.");
-      const consumed = await dependencies.attemptAuthority.consume({
+      const authorizationInput = {
         authorizationId: input.authorizationId,
         authorizationProof: input.authorizationProof,
         projectId: input.command.projectId,
@@ -828,9 +993,12 @@ export function createConnectorAuthority(dependencies: Dependencies) {
         reference: input.reference,
         operation: input.operation,
         actionDigest: input.command.actionDigest,
+      };
+      const verified = await dependencies.attemptAuthority.verify(authorizationInput);
+      if (!verified.ok) return verified;
+      return mutate(connector, "ATTEMPT", verified.value.actorId, input, {
+        consumeAttempt: () => dependencies.attemptAuthority.consume(authorizationInput),
       });
-      if (!consumed.ok) return consumed;
-      return mutate(connector, "ATTEMPT", input.authorizationId, input);
     },
 
     reconcileSource<P>(event: ReconciliationEvent<P>): Result<Observed<P>> {
@@ -854,12 +1022,21 @@ export function createConnectorAuthority(dependencies: Dependencies) {
             connector_epoch: number;
             scope_revision: number;
             reference: string;
+            operation: string;
+            precondition_kind: "ABSENT" | "EXACT_REVISION" | "EXPECTED_MEMBERSHIP";
+            source_revision: string | null;
+            comparable_digest: string | null;
+            member_key: string | null;
+            expected_present: number | null;
+            action_digest: string;
             state: string;
           }>,
           [string]
         >(
           `SELECT id, actor_id, idempotency_key, input_hash, action_marker, project_id,
-                  connector_id, connector_epoch, scope_revision, reference, state
+                  connector_id, connector_epoch, scope_revision, reference, operation,
+                  precondition_kind, source_revision, comparable_digest, member_key,
+                  expected_present, action_digest, state
            FROM connector_operation_intents WHERE id = ?`,
         )
         .get(input.intentId);
@@ -885,12 +1062,36 @@ export function createConnectorAuthority(dependencies: Dependencies) {
         );
       }
       const matches: ReconciliationEvent<P>[] = [];
+      const expectedPrecondition =
+        intent.precondition_kind === "ABSENT"
+          ? { kind: "ABSENT" as const }
+          : intent.precondition_kind === "EXACT_REVISION"
+            ? {
+                kind: "EXACT_REVISION" as const,
+                sourceRevision: intent.source_revision,
+                comparableDigest: intent.comparable_digest,
+              }
+            : {
+                kind: "EXPECTED_MEMBERSHIP" as const,
+                sourceRevision: intent.source_revision,
+                comparableDigest: intent.comparable_digest,
+                memberKey: intent.member_key,
+                present: intent.expected_present === 1,
+              };
       try {
         for await (const candidate of connector.scan(scopeFrom(scopeRow))) {
           if (!candidate.ok) continue;
+          const proof = candidate.value.mutationProof;
           if (
-            candidate.value.actionMarker === intent.action_marker ||
-            candidate.value.reference === intent.reference
+            candidate.value.projectId === intent.project_id &&
+            candidate.value.connectorId === intent.connector_id &&
+            candidate.value.connectorEpoch === intent.connector_epoch &&
+            candidate.value.reference === intent.reference &&
+            candidate.value.provenance.kind === "MUTATION_CONFIRMATION" &&
+            proof?.actionMarker === intent.action_marker &&
+            proof.operation === intent.operation &&
+            proof.actionDigest === intent.action_digest &&
+            JSON.stringify(proof.precondition) === JSON.stringify(expectedPrecondition)
           ) {
             matches.push(candidate.value);
             if (matches.length > 1) break;
@@ -969,6 +1170,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
                 : { providerActorId: match.provenance.providerActorId }),
             },
           };
+          const auditId = dependencies.id("audit");
           database
             .query(
               `INSERT INTO connector_projections(
@@ -1031,6 +1233,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
                 ...observed,
                 value: undefined,
                 projectionJson: recoveryProjection.value,
+                auditId,
               }),
               clock(),
             );
@@ -1039,12 +1242,12 @@ export function createConnectorAuthority(dependencies: Dependencies) {
               "INSERT INTO audit_events(id, kind, actor_kind, actor_id, subject_id, safe_details, created_at) VALUES (?, 'CONNECTOR_MUTATION_RECOVERED', 'SYSTEM', 'RECONCILER', ?, ?, ?)",
             )
             .run(
-              dependencies.id("audit"),
+              auditId,
               intent.connector_id,
               JSON.stringify({ disposition: "CONFIRMED", operationRecovery: true }),
               clock(),
             );
-          return { ok: true, value: observed };
+          return { ok: true, value: observed, auditId };
         });
       } catch {
         return error("CONNECTOR_RECOVERY_FAILED", "Connector recovery failed.");

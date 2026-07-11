@@ -4,6 +4,10 @@ import type { ApplyRevocation } from "../../../shared/contracts/commands.ts";
 import type { MemberId } from "../../../shared/contracts/ids.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
+import {
+  type BrowserSessionAuthorityFacts,
+  createBrowserSessionAuthority,
+} from "./browser-session-authority.ts";
 
 export type RemoveMember = Readonly<{
   idempotencyKey: string;
@@ -44,40 +48,27 @@ type RemovalSnapshot = Readonly<{
   targetRevision: number;
   targetRole: "OWNER" | "MEMBER";
   targetAuthorityEpoch: number;
-  actorMemberRevision: number;
-  actorSessionRevision: number;
-  actorProofHash: Uint8Array;
+  actorAuthority: BrowserSessionAuthorityFacts;
 }>;
 
-export function removeMemberTransaction(
+function removeMemberTransaction(
   database: Database,
   command: RemoveMember,
   snapshot: RemovalSnapshot,
-  dependencies: Pick<Dependencies, "clock" | "id">,
+  dependencies: Pick<Dependencies, "clock" | "id"> & {
+    browserSessions: ReturnType<typeof createBrowserSessionAuthority>;
+  },
 ): Result<MemberRemoval> {
   return inImmediateTransaction(database, () => {
-    const actor = database
-      .query<{ id: string }, [string, number, string, number, Uint8Array, number]>(
-        `SELECT members.id FROM members JOIN sessions ON sessions.member_id = members.id
-         WHERE members.id = ? AND members.revision = ? AND members.role = 'OWNER'
-           AND members.status = 'ACTIVE' AND sessions.id = ? AND sessions.revision = ?
-           AND sessions.proof_hash = ? AND sessions.revoked_at IS NULL
-           AND sessions.expires_at > ? AND sessions.member_authority_epoch = members.authority_epoch`,
-      )
-      .get(
-        command.actor.memberId,
-        snapshot.actorMemberRevision,
-        command.actor.sessionId,
-        snapshot.actorSessionRevision,
-        snapshot.actorProofHash,
-        dependencies.clock(),
-      );
+    const actor = dependencies.browserSessions.revalidate(snapshot.actorAuthority, {
+      role: "OWNER",
+    });
     const target = database
       .query<{ role: "OWNER" | "MEMBER"; authority_epoch: number }, [string, number]>(
         "SELECT role, authority_epoch FROM members WHERE id = ? AND revision = ? AND status = 'ACTIVE'",
       )
       .get(command.memberId, snapshot.targetRevision);
-    if (!actor || !target)
+    if (!actor.ok || !target)
       return error("AUTHORITY_STALE", "Identity authority changed.", "SAME_INPUT");
     if (target.role === "OWNER") {
       const owners = database
@@ -197,6 +188,7 @@ export function removeMemberTransaction(
 }
 
 export function createMemberRevocationAuthority(dependencies: Dependencies) {
+  const browserSessions = createBrowserSessionAuthority(dependencies);
   return {
     async remove(command: RemoveMember): Promise<Result<MemberRemoval>> {
       if (
@@ -255,25 +247,13 @@ export function createMemberRevocationAuthority(dependencies: Dependencies) {
           },
         };
       }
-      const actorProofHash = await dependencies.digest(command.actor.sessionProof);
-      const actor = dependencies.database
-        .query<
-          { member_revision: number; session_revision: number },
-          [string, string, Uint8Array, number]
-        >(
-          `SELECT members.revision AS member_revision, sessions.revision AS session_revision
-           FROM members JOIN sessions ON sessions.member_id = members.id
-           WHERE members.id = ? AND members.role = 'OWNER' AND members.status = 'ACTIVE'
-             AND sessions.id = ? AND sessions.proof_hash = ? AND sessions.revoked_at IS NULL
-             AND sessions.expires_at > ? AND sessions.member_authority_epoch = members.authority_epoch`,
-        )
-        .get(command.actor.memberId, command.actor.sessionId, actorProofHash, dependencies.clock());
+      const actor = await browserSessions.authorize(command.actor, { role: "OWNER" });
       const target = dependencies.database
         .query<{ revision: number; role: "OWNER" | "MEMBER"; authority_epoch: number }, [string]>(
           "SELECT revision, role, authority_epoch FROM members WHERE id = ? AND status = 'ACTIVE'",
         )
         .get(command.memberId);
-      if (!actor) return error("OWNER_REQUIRED", "Owner authorization is required.");
+      if (!actor.ok) return error("OWNER_REQUIRED", "Owner authorization is required.");
       if (!target || target.revision !== command.expectedRevision)
         return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
       let committed: Result<MemberRemoval>;
@@ -285,26 +265,29 @@ export function createMemberRevocationAuthority(dependencies: Dependencies) {
             targetRevision: target.revision,
             targetRole: target.role,
             targetAuthorityEpoch: target.authority_epoch,
-            actorMemberRevision: actor.member_revision,
-            actorSessionRevision: actor.session_revision,
-            actorProofHash,
+            actorAuthority: actor.value,
           },
-          dependencies,
+          { ...dependencies, browserSessions },
         );
       } catch {
         return error("MEMBER_REMOVAL_FAILED", "Member removal failed.");
       }
       if (!committed.ok) return committed;
-      const dispatched = await dependencies.executionAuthority.execute({
-        kind: "APPLY_REVOCATION",
-        idempotencyKey: command.idempotencyKey as never,
-        actor: command.actor,
-        source: {
-          kind: "MEMBER",
-          memberId: command.memberId,
-          authorityEpoch: committed.value.authorityEpoch,
-        },
-      });
+      let dispatched: Awaited<ReturnType<RevocationExecutionAuthority["execute"]>>;
+      try {
+        dispatched = await dependencies.executionAuthority.execute({
+          kind: "APPLY_REVOCATION",
+          idempotencyKey: command.idempotencyKey as never,
+          actor: command.actor,
+          source: {
+            kind: "MEMBER",
+            memberId: command.memberId,
+            authorityEpoch: committed.value.authorityEpoch,
+          },
+        });
+      } catch {
+        dispatched = error("REVOCATION_DISPATCH_FAILED", "Revocation dispatch failed.");
+      }
       if (dispatched.ok) {
         try {
           inImmediateTransaction(dependencies.database, () => {
@@ -328,7 +311,7 @@ export function createMemberRevocationAuthority(dependencies: Dependencies) {
         inImmediateTransaction(dependencies.database, () => {
           dependencies.database
             .query(
-              "UPDATE authority_revocation_outbox SET status = 'FAILED', attempt_count = attempt_count + 1 WHERE id = ? AND status = 'PENDING'",
+              "UPDATE authority_revocation_outbox SET attempt_count = attempt_count + 1 WHERE id = ? AND status = 'PENDING'",
             )
             .run(command.idempotencyKey);
         });
@@ -336,63 +319,6 @@ export function createMemberRevocationAuthority(dependencies: Dependencies) {
         // The committed removal and pending intent remain authoritative.
       }
       return committed;
-    },
-
-    async changeRole(
-      input: Readonly<{
-        actor: MemberActor;
-        memberId: MemberId;
-        expectedRevision: number;
-        role: "OWNER" | "MEMBER";
-      }>,
-    ): Promise<
-      Result<Readonly<{ memberId: MemberId; role: "OWNER" | "MEMBER"; revision: number }>>
-    > {
-      const proofHash = await dependencies.digest(input.actor.sessionProof);
-      try {
-        return inImmediateTransaction(dependencies.database, () => {
-          const actor = dependencies.database
-            .query<{ id: string }, [string, string, Uint8Array, number]>(
-              `SELECT members.id FROM members JOIN sessions ON sessions.member_id = members.id
-               WHERE members.id = ? AND members.role = 'OWNER' AND members.status = 'ACTIVE'
-                 AND sessions.id = ? AND sessions.proof_hash = ? AND sessions.revoked_at IS NULL
-                 AND sessions.expires_at > ?`,
-            )
-            .get(input.actor.memberId, input.actor.sessionId, proofHash, dependencies.clock());
-          const target = dependencies.database
-            .query<{ role: "OWNER" | "MEMBER" }, [string, number]>(
-              "SELECT role FROM members WHERE id = ? AND revision = ? AND status = 'ACTIVE'",
-            )
-            .get(input.memberId, input.expectedRevision);
-          if (!actor) return error("OWNER_REQUIRED", "Owner authorization is required.");
-          if (!target)
-            return error("MEMBER_REVISION_STALE", "Member revision is stale.", "SAME_INPUT");
-          if (target.role === "OWNER" && input.role === "MEMBER") {
-            const owners = dependencies.database
-              .query<{ count: number }, []>(
-                "SELECT count(*) AS count FROM members WHERE role = 'OWNER' AND status = 'ACTIVE'",
-              )
-              .get()?.count;
-            if ((owners ?? 0) <= 1)
-              return error("LAST_OWNER_REQUIRED", "At least one active owner is required.");
-          }
-          dependencies.database
-            .query(
-              "UPDATE members SET role = ?, revision = revision + 1 WHERE id = ? AND revision = ?",
-            )
-            .run(input.role, input.memberId, input.expectedRevision);
-          return {
-            ok: true,
-            value: {
-              memberId: input.memberId,
-              role: input.role,
-              revision: input.expectedRevision + 1,
-            },
-          };
-        });
-      } catch {
-        return error("MEMBER_ROLE_FAILED", "Member role change failed.");
-      }
     },
   };
 }

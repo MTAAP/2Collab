@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { migrate } from "../../../src/server/db/migrate.ts";
 import { openDatabase } from "../../../src/server/db/connection.ts";
+import { migrate } from "../../../src/server/db/migrate.ts";
 import { createMemberRevocationAuthority } from "../../../src/server/modules/identity/revocation.ts";
 
-function fixture() {
+function fixture(dispatchSucceeds = true) {
   const database = openDatabase(":memory:");
   migrate(database);
   database.exec(`
@@ -62,7 +62,16 @@ function fixture() {
           .get(command.idempotencyKey);
         expect(committed?.status).toBe("PENDING");
         dispatched.push(command.source.kind);
-        return { ok: true, value: { applied: true } };
+        return dispatchSucceeds
+          ? { ok: true, value: { applied: true as const } }
+          : {
+              ok: false,
+              error: {
+                code: "EXECUTION_UNAVAILABLE",
+                message: "Execution authority is unavailable.",
+                retry: "REFRESH" as const,
+              },
+            };
       },
     },
   });
@@ -151,6 +160,56 @@ describe("member offboarding", () => {
       });
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error.code).toBe("LAST_OWNER_REQUIRED");
+    } finally {
+      f.database.close();
+    }
+  });
+
+  test("member removal rejects an owner session at the shared idle deadline", async () => {
+    const f = fixture();
+    try {
+      f.database.exec("UPDATE sessions SET idle_expires_at = 1000 WHERE id = 'owner_session'");
+      const result = await f.authority.remove({
+        idempotencyKey: "remove_idle",
+        actor: {
+          kind: "MEMBER",
+          memberId: "owner_1" as never,
+          sessionId: "owner_session" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        memberId: "member_1" as never,
+        expectedRevision: 1,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("OWNER_REQUIRED");
+    } finally {
+      f.database.close();
+    }
+  });
+
+  test("failed execution revocation stays durably pending and never reports dispatch", async () => {
+    const f = fixture(false);
+    try {
+      const result = await f.authority.remove({
+        idempotencyKey: "remove_pending",
+        actor: {
+          kind: "MEMBER",
+          memberId: "owner_1" as never,
+          sessionId: "owner_session" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        memberId: "member_1" as never,
+        expectedRevision: 1,
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.revocationDispatch).toBe("PENDING");
+      expect(
+        f.database
+          .query<{ status: string }, []>(
+            "SELECT status FROM authority_revocation_outbox WHERE id = 'remove_pending'",
+          )
+          .get(),
+      ).toEqual({ status: "PENDING" });
     } finally {
       f.database.close();
     }

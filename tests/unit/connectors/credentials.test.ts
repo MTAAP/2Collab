@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { migrate } from "../../../src/server/db/migrate.ts";
 import { openDatabase } from "../../../src/server/db/connection.ts";
+import { migrate } from "../../../src/server/db/migrate.ts";
 import {
-  createEncryptedCredentialStore,
   type CredentialAssociatedData,
   type CredentialCryptoPort,
+  createEncryptedCredentialStore,
 } from "../../../src/server/modules/connectors/credentials.ts";
 
 test("credential encryption binds connector and credential-owner row identity into AAD", async () => {
@@ -63,6 +63,39 @@ test("credential encryption binds connector and credential-owner row identity in
       cleartext: new TextEncoder().encode("other-secret"),
     });
     expect(secondWorkspace.ok).toBe(true);
+    const stolen = await store.get({
+      credentialClass: "MEMBER_OAUTH",
+      ownerKind: "MEMBER",
+      ownerId: "member_attacker",
+      connectorId: "connector_outline_1",
+      credentialOwnerId: "grant_1",
+    });
+    expect(stolen.ok).toBe(false);
+    if (!stolen.ok) expect(stolen.error.code).toBe("CREDENTIAL_NOT_FOUND");
+    const overwrite = await store.put({
+      credentialClass: "MEMBER_OAUTH",
+      ownerKind: "MEMBER",
+      ownerId: "member_attacker",
+      connectorId: "connector_outline_1",
+      credentialOwnerId: "grant_1",
+      expectedRevision: 0,
+      keyVersion: 1,
+      cleartext: new TextEncoder().encode("attacker-secret"),
+    });
+    expect(overwrite.ok).toBe(false);
+    if (!overwrite.ok) expect(overwrite.error.code).toBe("CREDENTIAL_NOT_FOUND");
+    const illegal = await store.put({
+      credentialClass: "PROVIDER",
+      ownerKind: "MEMBER",
+      ownerId: "member_1",
+      connectorId: "connector_outline_1",
+      credentialOwnerId: "provider_1",
+      expectedRevision: 0,
+      keyVersion: 1,
+      cleartext: new TextEncoder().encode("illegal"),
+    });
+    expect(illegal.ok).toBe(false);
+    if (!illegal.ok) expect(illegal.error.code).toBe("CREDENTIAL_INPUT_INVALID");
     expect(
       database
         .query<{ count: number }, []>("SELECT count(*) AS count FROM encrypted_credentials")

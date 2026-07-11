@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../../../src/server/db/connection.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
+import type { IdentityAuthority } from "../../../src/server/modules/identity/contract.ts";
 import {
   createIdentityAuthority,
   type IdentityAuthorityDependencies,
 } from "../../../src/server/modules/identity/identity-authority.ts";
 import { hashOneTimeSecret, sha256 } from "../../../src/server/modules/identity/recovery.ts";
-import type { IdentityAuthority } from "../../../src/server/modules/identity/contract.ts";
 import type { MemberSessionIssue } from "../../../src/shared/contracts/identity.ts";
 import type { Result } from "../../../src/shared/contracts/result.ts";
 import { StrictFakeWebAuthn } from "../../fixtures/identity.ts";
@@ -69,6 +69,11 @@ async function authorityPair(
       publicOrigin: "http://localhost:3000",
       rpId: "localhost",
       rpName: "2Collab Race",
+      executionAuthority: {
+        async execute() {
+          return { ok: true, value: { applied: true as const } };
+        },
+      },
       clock: () => 1_000_000,
       id: (kind) => `${kind}_${prefix}_${next()}`,
       randomBytes: (length) => {
