@@ -24,6 +24,7 @@ import type {
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import { linkSourceReferences } from "../coordination-records/source-links.ts";
 import type { PreparedRunConfigurationSnapshot } from "../presets/configuration-resolver.ts";
+import { resolveExactPersonalRunPresetVersion } from "../presets/personal-run-presets.ts";
 import { createCheckpoint } from "../runs/checkpoints.ts";
 import type {
   createRunnerEventDeduplicator,
@@ -3440,6 +3441,7 @@ function executeQuery(
             .get(query.runId, query.actor.runnerId, query.actor.runnerEpoch)?.count;
         case "INSPECT_COORDINATION_RECORD":
         case "INSPECT_PROJECTION":
+        case "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS":
           return 0;
       }
     })();
@@ -3475,6 +3477,8 @@ function executeQuery(
                WHERE r.coordination_record_id = ? AND ${suffix}`,
             )
             .get(query.coordinationRecordId, query.actor.originalDispatcherId, contextId)?.count;
+        case "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS":
+          return 0;
       }
     })();
     if (!allowed) return error("NOT_FOUND", "Coordination state was not found.");
@@ -3527,6 +3531,40 @@ function executeQuery(
           .filter((attempt): attempt is AttemptView => attempt !== undefined),
       );
       return { ok: true, value: { kind: query.kind, projection: { record, runs, attempts } } };
+    }
+    case "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS": {
+      const bindings: Record<
+        string,
+        Extract<QueryResult, { kind: "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS" }>["bindings"][string]
+      > = {};
+      const staleKeys: string[] = [];
+      for (const [key, requested] of Object.entries(query.bindings)) {
+        const version = resolveExactPersonalRunPresetVersion(
+          dependencies.database,
+          query.actor.memberId,
+          requested.personalRunPresetId,
+          requested.expectedVersion,
+        );
+        if (!version) {
+          staleKeys.push(key);
+          continue;
+        }
+        bindings[key] = {
+          personalRunPresetId: version.presetId,
+          presetVersion: version.presetVersion,
+          runtime: version.runtime,
+          runnerId: version.runnerId,
+          profileVersion: version.profileVersion,
+          host: version.host,
+          interaction: version.interaction,
+          repositoryMode: version.repositoryMode,
+          repositoryAssurance: version.repositoryAssurance,
+        };
+      }
+      return {
+        ok: true,
+        value: { kind: query.kind, bindings, staleKeys },
+      };
     }
   }
 }

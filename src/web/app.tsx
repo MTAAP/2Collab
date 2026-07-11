@@ -19,6 +19,7 @@ import { RunsFeature } from "./features/runs/runs-feature.tsx";
 import { InvitationExchange } from "./features/setup/invitation-exchange.tsx";
 import { SetupFeature } from "./features/setup/setup-feature.tsx";
 import { OutlineFeature } from "./features/outline/index.tsx";
+import { WorkflowStudioFeature } from "./features/workflow-studio/editor.tsx";
 
 const navigation = [
   { href: "/runs", label: "Runs", icon: PlayIcon },
@@ -26,6 +27,7 @@ const navigation = [
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
   { href: "/command-center", label: "Command Center", icon: LayoutDashboardIcon },
   { href: "/presets", label: "Presets", icon: WorkflowIcon },
+  { href: "/workflows", label: "Workflows", icon: WorkflowIcon },
   { href: "/runners", label: "Runners", icon: BotIcon },
   { href: "/outline", label: "Outline", icon: BookOpenIcon },
   { href: "/settings/team", label: "Team & access", icon: UsersIcon },
@@ -45,6 +47,8 @@ function AppShell() {
     <CommandCenterFeature />
   ) : path.startsWith("/presets") ? (
     <PresetsFeature />
+  ) : path.startsWith("/workflows") ? (
+    <WorkflowStudioFeature />
   ) : path.startsWith("/outline") ? (
     <OutlineFeature />
   ) : (

@@ -536,13 +536,21 @@ export type InspectProjection = Readonly<{
   actor: AuthenticatedActor;
   coordinationRecordId: CoordinationRecordId;
 }>;
+export type ResolvePersonalRunPresetBindings = Readonly<{
+  kind: "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS";
+  actor: MemberActor;
+  bindings: Readonly<
+    Record<string, Readonly<{ personalRunPresetId: string; expectedVersion: number }>>
+  >;
+}>;
 
 export type CoordinationQuery =
   | InspectCoordinationRecord
   | InspectRun
   | InspectAttempt
   | InspectEvidence
-  | InspectProjection;
+  | InspectProjection
+  | ResolvePersonalRunPresetBindings;
 
 export type CommandResult =
   | Readonly<{
@@ -602,7 +610,27 @@ export type QueryResult =
   | Readonly<{ kind: "INSPECT_RUN"; run: RunView }>
   | Readonly<{ kind: "INSPECT_ATTEMPT"; attempt: AttemptView }>
   | Readonly<{ kind: "INSPECT_EVIDENCE"; evidence: readonly EvidenceRecord[]; next?: EvidenceId }>
-  | Readonly<{ kind: "INSPECT_PROJECTION"; projection: ProjectionView }>;
+  | Readonly<{ kind: "INSPECT_PROJECTION"; projection: ProjectionView }>
+  | Readonly<{
+      kind: "RESOLVE_PERSONAL_RUN_PRESET_BINDINGS";
+      bindings: Readonly<
+        Record<
+          string,
+          Readonly<{
+            personalRunPresetId: string;
+            presetVersion: number;
+            runtime: "CLAUDE" | "CODEX" | "PI" | "OPENCODE";
+            runnerId: string;
+            profileVersion: number;
+            host: "NATIVE" | "ORCA";
+            interaction: "HEADLESS" | "INTERACTIVE";
+            repositoryMode: "INSPECT_ONLY" | "MUTATING";
+            repositoryAssurance: "ADVISORY" | "ENFORCED";
+          }>
+        >
+      >;
+      staleKeys: readonly string[];
+    }>;
 
 export type CommandResultFor<C extends CollabCommand> = Extract<CommandResult, { kind: C["kind"] }>;
 export type QueryResultFor<Q extends CoordinationQuery> = Extract<QueryResult, { kind: Q["kind"] }>;
@@ -1137,6 +1165,21 @@ export const CoordinationQuerySchema = z.discriminatedUnion("kind", [
       coordinationRecordId: IdentifierSchema,
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal("RESOLVE_PERSONAL_RUN_PRESET_BINDINGS"),
+      actor: MemberActorSchema,
+      bindings: z.record(
+        IdentifierSchema,
+        z
+          .object({
+            personalRunPresetId: IdentifierSchema,
+            expectedVersion: z.number().int().positive(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
 ]);
 
 export const QueryResultSchema = z.discriminatedUnion("kind", [
@@ -1156,6 +1199,28 @@ export const QueryResultSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("INSPECT_PROJECTION"), projection: ProjectionViewSchema }).strict(),
+  z
+    .object({
+      kind: z.literal("RESOLVE_PERSONAL_RUN_PRESET_BINDINGS"),
+      bindings: z.record(
+        IdentifierSchema,
+        z
+          .object({
+            personalRunPresetId: IdentifierSchema,
+            presetVersion: z.number().int().positive(),
+            runtime: z.enum(["CLAUDE", "CODEX", "PI", "OPENCODE"]),
+            runnerId: IdentifierSchema,
+            profileVersion: z.number().int().positive(),
+            host: z.enum(["NATIVE", "ORCA"]),
+            interaction: z.enum(["HEADLESS", "INTERACTIVE"]),
+            repositoryMode: z.enum(["INSPECT_ONLY", "MUTATING"]),
+            repositoryAssurance: z.enum(["ADVISORY", "ENFORCED"]),
+          })
+          .strict(),
+      ),
+      staleKeys: z.array(IdentifierSchema),
+    })
+    .strict(),
 ]);
 
 export type AuthorityFact = Readonly<{

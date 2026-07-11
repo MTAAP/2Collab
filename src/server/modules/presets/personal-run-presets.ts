@@ -464,6 +464,25 @@ function readVersion(
   return row ? versionFromRow(database, row) : null;
 }
 
+export function resolveExactPersonalRunPresetVersion(
+  database: Database,
+  actorMemberId: string,
+  presetId: string,
+  version: number,
+): PersonalRunPresetVersion | null {
+  if (!activeMember(database, actorMemberId)) return null;
+  const selected = presetRow(database, presetId, actorMemberId);
+  if (selected?.state !== "ACTIVE") return null;
+  const value = readVersion(database, presetId, actorMemberId, version);
+  if (
+    !value ||
+    currentBinding(database, actorMemberId, value) ||
+    currentContextRecipe(database, value)
+  )
+    return null;
+  return value;
+}
+
 export function createPersonalRunPresetStore(dependencies: Dependencies) {
   const inspectVersion = (
     actorMemberId: string,
