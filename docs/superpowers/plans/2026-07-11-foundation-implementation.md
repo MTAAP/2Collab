@@ -35,7 +35,7 @@
 | Identity | `src/server/modules/identity/{contract,identity-authority,passkeys,invitations,recovery,revocation,sessions,csrf,devices,oidc,auth-proxy,provider-links}.ts` |
 | Connector foundation | `src/server/modules/connectors/{contract,connector-authority,credentials,epochs,scope-policy}.ts` |
 | Projects | `src/server/modules/projects/{contract,project-registry}.ts`, `src/runner/repository/{config,discovery,global-registry}.ts` |
-| Runners | `src/server/modules/runners/{contract,runner-registry,exposures}.ts`, `src/server/adapters/wss/{protocol,runner-channel,revocations}.ts`, `src/runner/{daemon,supervisor,local-diagnostics}.ts` |
+| Runners | `src/server/modules/runners/{contract,pairing,authentication,runner-registry,exposures}.ts`, `src/server/adapters/wss/{protocol,runner-channel,revocations}.ts`, `src/runner/{daemon,supervisor,local-diagnostics}.ts` |
 | Runner adapters | `src/runner/adapters/runtime/{contract,claude,codex}.ts`, `src/runner/adapters/host/{contract,native,orca}.ts`, `src/runner/adapters/enforcement/{contract,trusted-host}.ts` |
 | Authority and coordination | `src/server/modules/execution-authority/{contract,execution-authority,policy,fencing,revocation}.ts`, `src/server/modules/runs/{lifecycle,checkpoints,evidence,results,event-deduplication,reconciliation}.ts`, `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts` |
 | Run configuration | `src/server/modules/presets/{personal-run-presets,configuration-resolver}.ts`, `src/server/modules/context/context-recipes.ts`, `src/server/modules/telemetry/usage.ts` |
@@ -624,14 +624,20 @@ git commit -m "feat: add project discovery and registry"
 **Files:**
 - Create: `src/server/db/migrations/0003_runners.sql`
 - Create: `src/server/db/migrations/0003_runners.verify.ts`
-- Create: `src/server/modules/runners/{contract,runner-registry,exposures}.ts`
-- Modify: `src/shared/contracts/runners.ts`
+- Create: `src/server/modules/runners/{contract,pairing,authentication,runner-registry,exposures}.ts`
+- Modify: `src/shared/contracts/{ids,actors,runners}.ts`
+- Modify: `src/server/modules/identity/{devices,revocation}.ts`
 - Modify: `src/server/db/{migrate}.ts`
-- Test: `tests/integration/runners/registry.test.ts`
+- Test: `tests/integration/db/runners-migration.test.ts`
+- Test: `tests/integration/runners/{pairing,authentication,ownership-policy,mappings-profiles,exposures,heartbeat,revocation,concurrency,privacy}.test.ts`
+- Modify: `tests/integration/identity/offboarding.test.ts`
 
 **Interfaces:**
-- Consumes: identity/device credentials and project IDs.
-- Produces: `RunnerRegistry`, pairing, immutable ownership, mappings, policy revisions, heartbeat leases, exact acknowledged exposures, revocation.
+- Consumes: adapter-derived `VerifiedDevicePrincipal`, active browser Member, runner-key proof port,
+  projects, Task 5 schema v2, and identity offboarding transaction.
+- Produces: `RunnerRegistry`, `RunnerAuthenticationAuthority`, hash-only three-principal pairing,
+  immutable ownership, versioned mappings/profiles, private authority policy collaborator, derived
+  heartbeat status, exact server-authored acknowledgements/exposures, and epoch-first revocation.
 
 - [ ] **Step 1: Write failing runner ownership tests**
 
@@ -663,28 +669,92 @@ export interface RunnerRegistry {
   confirmPairing(command: ConfirmRunnerPairing): Promise<Result<ConfirmedRunnerPairing>>;
   consumePairing(command: ConsumeRunnerPairing): Promise<Result<RunnerCredentialEnvelope>>;
   registerMapping(command: RegisterRunnerMapping): Promise<Result<RunnerMapping>>;
+  replaceMapping(command: ReplaceRunnerMapping): Promise<Result<RunnerMapping>>;
+  revokeMapping(command: RevokeRunnerMapping): Promise<Result<RunnerMapping>>;
   advertiseProfile(command: AdvertiseSafeProfileVersion): Promise<Result<SafeProfileVersion>>;
+  previewExposureAcknowledgement(query: PreviewExposureAcknowledgement): Promise<Result<ExposureAcknowledgementPreview>>;
   acknowledgeExposure(command: AcknowledgeTeamExposure): Promise<Result<ExposureAcknowledgement>>;
+  revokeAcknowledgement(command: RevokeExposureAcknowledgement): Promise<Result<ExposureAcknowledgement>>;
   createExposure(command: CreateTeamExposure): Promise<Result<TeamDispatchExposure>>;
-  replacePolicy(command: ReplaceRunnerPolicy): Promise<Result<RegisteredRunner>>;
+  revokeExposure(command: RevokeTeamExposure): Promise<Result<TeamDispatchExposure>>;
   heartbeat(command: RunnerHeartbeat): Promise<Result<RunnerLeaseView>>;
   revoke(command: RevokeRunner): Promise<Result<RunnerRevocation>>;
   inspectEligibility(query: InspectRunnerEligibility): Promise<Result<RunnerEligibilityFacts>>;
 }
+export interface RunnerAuthenticationAuthority {
+  exchangeCredential(command: ExchangeRunnerCredential): Promise<Result<RunnerAccessIssue>>;
+  authenticateAccess(command: AuthenticateRunnerAccess): Promise<Result<VerifiedRunnerPrincipal>>;
+}
+interface RunnerPolicyFactsStore {
+  replaceForAuthority(command: CommittedRunnerPolicyReplacement): RunnerPolicyFacts;
+}
 ```
 
-Pairing is layered on a current DPoP-bound CLI device session but returns a distinct runner credential and immutable runner owner; a device credential never authenticates WSS as a runner. Registry methods expose exact facts and mutations, not dispatch authorization: `ExecutionAuthority` alone decides whether a dispatcher may launch. Persistence includes runner credentials/key thumbprints, safe profile advertisements, bounded concurrency, append-only acknowledgement content digests, exact exposure tuple revisions, and durable revocation intents. Status is derived from server-received heartbeat time rather than trusted client status. Adding migration 0003 must prove empty-to-v3 and v2-to-v3 upgrades, idempotency, history integrity, and migration rollback. Source-free mappings remain connector-neutral and contain opaque local mapping identifiers only.
+Pairing binds three principals. `beginPairing` accepts only an adapter-derived current
+`VerifiedDevicePrincipal` (active member, device family/device, member epoch, verified sender-key
+thumbprint) and creates a ten-minute hash-only 32-byte random secret; it accepts no owner/audience/
+runner identity. `confirmPairing` requires an active browser Member matching the initiating device
+member. `consumePairing` requires the one-time secret plus verified possession of a newly generated
+runner key; the server derives the key thumbprint and creates runner/immutable owner/epoch 1/policy
+revision 1/`OWNER_ONLY`. One concurrent consume wins. Clear pairing and runner credentials never enter
+SQLite, idempotency/audit/logs/URLs/errors and are never reissued; replay returns
+`RUNNER_PAIRING_CONSUMED`.
+
+Runner authentication is distinct from device auth. Credential digest and runner-key proof must match;
+runner/member status and epochs must be current. It mints a short-lived runner-audience sender-bound
+access issue for WSS. Device tokens always fail, reconnect retains runner identity without re-pairing,
+and revoked/old-epoch credentials cannot mint or authenticate. Task 7 consumes only
+`VerifiedRunnerPrincipal`, never tables or device principals.
+
+Migration 0003 creates STRICT `runners`, `runner_pairings`, `runner_credentials`,
+`runner_mapping_versions`, `safe_profile_versions`, `runner_exposure_acknowledgements`,
+`runner_exposures`, and `runner_authority_change_outbox`. It uses positive epochs/revisions, default
+audience `OWNER_ONLY`, concurrency 1..32 (default 1), ordered nonnegative times, exact 600-second
+pairing expiry, hash-only secrets, immutable history triggers, partial active uniqueness, and no open
+JSON/local path/URL/command/environment/credential fields. Composite keys/FKs bind exact same-runner
+mapping revision, profile version/fingerprint, policy revision, security policy/digest,
+acknowledgement and exposure; Frankenstein tuples fail. Profiles/mapping versions/ack content are
+append-only and profile identifiers are server-generated within runner scope.
+
+Mappings have explicit replace/revoke with expected revisions, one active project mapping and opaque
+local mapping ID per runner. Safe profiles contain only ID/display name, closed adapter, generic
+host/mode traits, risk summary, version and SHA-256 fingerprint. Material changes create a new version.
+The server generates acknowledgement preview text/digest from runner/owner/mapping/profile/policy/
+security facts and the stable OS-user-credentials/worktree-not-sandbox warning. Acceptance supplies the
+expected digest and the transaction recomputes it; acknowledging never creates exposure. Any bound fact
+change stales the acknowledgement/exposure; returning `TEAM` after `OWNER_ONLY` never resurrects one.
+
+Only `ExecutionAuthority.REPLACE_RUNNER_POLICY` may call the private policy facts store. Registry
+public queries expose full safe facts to the owner/ExecutionAuthority; non-owners see active TEAM
+intersections only and receive indistinguishable `RUNNER_NOT_OWNED_OR_EXPOSED` for private/missing/
+unexposed profiles. Eligibility contains epoch, policy/mapping/profile/fingerprint, authorization
+source, exposure/ack revisions, heartbeat observation and safe stale reasons.
+
+Heartbeat accepts no client status/time and uses server receive time. Derived state is
+`NEVER_CONNECTED`, `ONLINE` for age <30 seconds, `OFFLINE` at >=30, or durable `REVOKED`; the 90-second
+active-attempt loss threshold remains Task 14. Heartbeat never changes epoch/revision or resurrects.
+Policy/audience/concurrency edits advance policy revision; mapping/profile/security changes stale exact
+tuples; exposure/audience revoke denies future/unused permits but lets an existing valid attempt
+continue. Direct runner revoke increments epoch and requests termination. Member offboarding, once v3
+exists, atomically increments every owned runner epoch, revokes credential/mapping/ack/exposure rows,
+and commits closed idempotent outbox intents; pairing/heartbeat races cannot leave active authority.
+
+Adding migration 0003 proves empty-through-v3 and v2-to-v3 upgrades with Project preservation, exact
+history `[1,2,3]`, rollback to valid v2, schema/index/trigger/FK/integrity verification and newer/gapped/
+duplicate rejection. Tests cover pairing/key proof/replay/secrecy, device-token rejection, ownership,
+policy CAS, mapping/profile/exposure tuple constraints, acknowledgement derivation, private
+enumeration, 29/30-second boundary, offboarding/revoke races, restore epoch support, and storage scans.
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test src/server/db/migrations/0003_runners.verify.ts tests/integration/runners/registry.test.ts`
+Run: `bun test src/server/db/migrations/0003_runners.verify.ts tests/integration/db/runners-migration.test.ts tests/integration/runners tests/integration/identity/offboarding.test.ts`
 
 Expected: PASS; pairing replay, stale credentials, immutable ownership, exact exposure facts, acknowledgement refresh, and revocation are enforced without duplicating dispatch policy.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0003_runners.sql src/server/db/migrations/0003_runners.verify.ts src/server/modules/runners tests/integration/runners
+git add src/shared/contracts/ids.ts src/shared/contracts/actors.ts src/shared/contracts/runners.ts src/server/db/migrations/0003_runners.sql src/server/db/migrations/0003_runners.verify.ts src/server/db/migrate.ts src/server/modules/runners src/server/modules/identity/devices.ts src/server/modules/identity/revocation.ts tests/integration/db/runners-migration.test.ts tests/integration/runners tests/integration/identity/offboarding.test.ts
 git commit -m "feat: add secure runner registry"
 ```
 
