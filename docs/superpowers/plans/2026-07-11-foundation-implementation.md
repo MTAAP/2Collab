@@ -311,16 +311,21 @@ git commit -m "feat: implement local identity lifecycle"
 
 **Files:**
 - Create: `src/server/modules/identity/{sessions,csrf,devices,oidc,auth-proxy,provider-links,revocation}.ts`
-- Create: `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts`
+- Create: `src/server/modules/connectors/{contract,connector-authority,credentials,epochs,scope-policy}.ts`
+- Modify: `src/shared/contracts/commands.ts`
 - Create: `src/server/adapters/http/middleware/{session,csrf}.ts`
 - Create: `src/server/commands/auth-recover.ts`
 - Modify: `src/server/db/migrations/0001_foundation.sql`
 - Modify: `src/server/db/migrations/0001_foundation.verify.ts`
 - Test: `tests/integration/identity/{providers,devices,offboarding}.test.ts`
+- Test: `tests/unit/connectors/contract.test.ts`
+- Test: `tests/integration/connectors/authority.test.ts`
 
 **Interfaces:**
 - Consumes: `IdentityAuthority`, SQLite transaction, `ExecutionAuthority.execute(ApplyRevocation)`.
-- Produces: `OidcPort`, `AuthProxyPort`, rotating device sessions, DPoP verification, CSRF middleware, encrypted credential store, host-only recovery command, atomic member removal.
+- Produces: `OidcPort`, `AuthProxyPort`, rotating device sessions, DPoP verification, CSRF
+  middleware, encrypted credential store, host-only recovery command, atomic member removal, and the
+  Foundation `ConnectorAuthority`/`SourceConnector` contract consumed by GitHub and Outline.
 
 - [ ] **Step 1: Write failing provider and revocation tests**
 
@@ -365,8 +370,67 @@ export type DeviceAccess = Readonly<{ memberId: string; deviceId: string; sender
 ```
 
 ```ts
+export type Observed<T> = Readonly<{
+  value: T;
+  reference: ContextReference;
+  sourceRevision: string;
+  comparableDigest: Sha256;
+  projectionRevision: number;
+  observedAt: number;
+  sourceUpdatedAt?: number;
+  freshness: "FRESH" | "STALE" | "UNAVAILABLE" | "REDACTED";
+  provenance: Readonly<{ projectId: ProjectId; connectorId: ConnectorId; connectorEpoch: number; kind: "WEBHOOK" | "RECONCILIATION" | "MUTATION_CONFIRMATION"; providerActorId?: string }>;
+}>;
+export type ExactRevisionMutation<T> = Readonly<{
+  projectId: ProjectId;
+  connectorId: ConnectorId;
+  connectorEpoch: number;
+  idempotencyKey: string;
+  expectedRevision: string;
+  expectedComparableDigest: Sha256;
+  actionDigest: Sha256;
+  mutation: T;
+}>;
+export interface SourceConnector<R, P, M> {
+  inspect(scope: ConnectorScope, reference: R): Promise<Result<Observed<P>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<M>): Promise<Result<Observed<P>>>;
+  reconcile(scope: ConnectorScope, event: ReconciliationEvent<R>): Promise<Result<Observed<P>>>;
+}
+```
+
+`ConnectorAuthority` owns connector scope, epoch, human authorization, attempt-operation
+authorization consumption, idempotency, audit, and projection application. An ordinary authenticated
+ACTIVE Member uses a closed human connector command after current membership/scope/epoch checks; it
+does not need an `AuthoritySession`. An attempt-originated write first consumes the exact
+`ExecutionAuthority` operation authorization, then enters the same connector command. Provider ports
+receive an opaque short-lived `ConnectorOperationAuthorization`; they never decide actor authority,
+persist idempotency/audit/projections, or mutate epochs.
+
+Foundation also owns a run-independent source reconciliation command. It binds exact project,
+connector, epoch, source reference, provider revision/comparable digest, freshness, provenance, and
+idempotency key; it does not forge a run ID or reuse run-scoped `RECONCILE_OBSERVATION`. Webhook,
+periodic reconciliation, and mutation confirmation converge through this one revision-guarded
+projection application path.
+
+Every connector schema is strict and bounded. `Observed<T>` separates source revision/provider time,
+comparable-field digest, local projection revision, server observation time, freshness, scope, and
+provenance. `ExactRevisionMutation<T>` carries expected revision plus prior comparable digest and one
+outer action digest. Connector scopes are explicit project/connector/epoch allowlists. Same
+idempotency key and canonical input replays; changed input conflicts. No connector contract admits
+raw provider payloads, bodies, credentials, URLs/GraphQL documents, or provider error text.
+
+Reconcile the shared sensitive-operation vocabulary now so later phases cannot define a second set.
+The closed GitHub kinds are `CREATE_ISSUE`, `EDIT_ISSUE`, `ADD_COMMENT`, `SET_LABELS`,
+`SET_ASSIGNEES`, `SET_MILESTONE`, `SET_ISSUE_STATE`, `CREATE_MILESTONE`, `EDIT_MILESTONE`,
+`ADD_PROJECT_ITEM`, `REMOVE_PROJECT_ITEM`, `SET_PROJECT_FIELD`, and `MOVE_PROJECT_ITEM`. The closed
+Outline kinds are `CREATE_DOCUMENT_AS_MEMBER`, `EDIT_DOCUMENT_AS_MEMBER`, `EDIT_DOCUMENT_AS_BOT`,
+`APPLY_PROPOSAL_AS_MEMBER`, `PROMOTE_WORKING_DOCUMENT`, and `ARCHIVE_WORKING_DOCUMENT`. One outer
+authorization envelope owns connector/project/epoch, expected revision/prior digest, and action
+digest; nested provider mutations do not duplicate authority fields.
+
+```ts
 // src/server/modules/identity/revocation.ts
-export function removeMemberTransaction(db: Database, command: RemoveMember, authority: ExecutionAuthority): Promise<Result<MemberRemoval>> {
+export function removeMemberTransaction(db: Database, command: RemoveMember): Result<MemberRemoval> {
   return inImmediateTransaction(db, () => {
     assertNotLastOwner(db, command.memberId);
     const revision = revokeMembershipAndCredentials(db, command);
@@ -380,7 +444,7 @@ Expected issuer, audience, redirect binding, state, nonce, and proxy trust prove
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test tests/integration/identity && bun test tests/drills/offboarding-active-run.test.ts`
+Run: `bun test tests/unit/connectors tests/integration/connectors tests/integration/identity && bun test tests/drills/offboarding-active-run.test.ts`
 
 Expected: PASS; issuer/audience/signature/state/nonce, trusted proxy origin, CSRF, refresh rotation, sender binding, last-owner races, container recovery, and offboarding all fail closed.
 
