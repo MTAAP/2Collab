@@ -9,6 +9,7 @@ import {
   MachineRunEvidenceSchema,
   RestoreEvidenceSchema,
   validateEvidence,
+  type DogfoodDay,
   type FoundationEvidence,
 } from "./evidence/foundation-contract.ts";
 
@@ -70,7 +71,7 @@ export class FoundationEvidenceService {
   }
 
   async closeDay(
-    input: Omit<Parameters<typeof DogfoodDaySchema.parse>[0], "localDate" | "recordedAt">,
+    input: Omit<DogfoodDay, "localDate" | "recordedAt" | "correctionOf">,
   ): Promise<void> {
     const evidence = await this.read();
     const instant = this.now();
@@ -80,15 +81,31 @@ export class FoundationEvidenceService {
       month: "2-digit",
       day: "2-digit",
     }).format(instant);
+    if (evidence.days.some((day) => day.localDate === localDate))
+      throw new Error("DOGFOOD_DATE_DUPLICATE");
     const row = DogfoodDaySchema.parse({
       ...(input as object),
       localDate,
       recordedAt: instant.toISOString(),
     });
-    if (evidence.days.some((day) => day.localDate === localDate))
-      throw new Error("DOGFOOD_DATE_DUPLICATE");
     const lastDate = evidence.days.at(-1)?.localDate;
-    if (lastDate && lastDate >= localDate) throw new Error("DOGFOOD_DATE_OUT_OF_ORDER");
+    if (lastDate && lastDate > localDate) throw new Error("DOGFOOD_DATE_OUT_OF_ORDER");
+    await this.replace({ ...evidence, days: [...evidence.days, row] });
+  }
+
+  async correctDay(
+    input: Omit<DogfoodDay, "localDate" | "recordedAt"> & { correctionOf: string },
+  ): Promise<void> {
+    const evidence = await this.read();
+    const target = evidence.days.find((day) => day.evidenceId === input.correctionOf);
+    if (!target) throw new Error("EVIDENCE_CORRECTION_TARGET_INVALID");
+    if (evidence.days.some((day) => day.correctionOf === target.evidenceId))
+      throw new Error("EVIDENCE_CORRECTION_BRANCH_INVALID");
+    const row = DogfoodDaySchema.parse({
+      ...input,
+      localDate: target.localDate,
+      recordedAt: this.now().toISOString(),
+    });
     await this.replace({ ...evidence, days: [...evidence.days, row] });
   }
 
@@ -129,14 +146,19 @@ export async function runFoundationEvidenceCli(): Promise<number> {
       console.log(JSON.stringify({ status: "IN_PROGRESS_EXTERNAL" }));
       return 0;
     }
-    if (["enroll-machine", "record-run", "record-restore", "close-day"].includes(command ?? "")) {
+    if (
+      ["enroll-machine", "record-run", "record-restore", "close-day", "correct-day"].includes(
+        command ?? "",
+      )
+    ) {
       const inputPath = option("--input");
       if (!inputPath) throw new Error("EVIDENCE_INPUT_REQUIRED");
       const input = await readJson(inputPath);
       if (command === "enroll-machine") await service.enrollMachine(input);
       else if (command === "record-run") await service.recordRun(input);
       else if (command === "record-restore") await service.recordRestore(input);
-      else await service.closeDay(input as never);
+      else if (command === "close-day") await service.closeDay(input as never);
+      else await service.correctDay(input as never);
       console.log(JSON.stringify(await service.status()));
       return 0;
     }
