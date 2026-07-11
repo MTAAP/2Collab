@@ -48,11 +48,27 @@ export function advanceManagedLoop(
   return { ok: true, value: { ...state, attemptsCreated } };
 }
 
+export interface ManagedLoopAuthorityProvider {
+  resolveCurrentAuthority(
+    command: AuthorizeAttempt,
+  ): ExecutionAuthority | null | Promise<ExecutionAuthority | null>;
+}
+
 export async function authorizeManagedLoopIteration(
-  authority: ExecutionAuthority,
+  authorityProvider: ManagedLoopAuthorityProvider,
   command: AuthorizeAttempt,
 ) {
   if (command.cause.kind !== "MANAGED_LOOP") throw new Error("MANAGED_LOOP_CAUSE_REQUIRED");
+  const authority = await authorityProvider.resolveCurrentAuthority(command);
+  if (!authority)
+    return {
+      ok: false as const,
+      error: {
+        code: "EXECUTION_AUTHORITY_UNAVAILABLE",
+        message: "Current execution authority is unavailable.",
+        retry: "REFRESH" as const,
+      },
+    };
   return authority.execute(command);
 }
 

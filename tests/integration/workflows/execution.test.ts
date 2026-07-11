@@ -7,6 +7,8 @@ import migration14 from "../../../src/server/db/migrations/0014_workflow_executi
   type: "text",
 };
 import { createWorkflowEngine } from "../../../src/server/modules/workflows/workflow-engine.ts";
+import type { WorkflowEventCommand } from "../../../src/server/modules/workflows/contract.ts";
+import type { ExecutionAuthority } from "../../../src/shared/contracts/execution-authority.ts";
 import { createWorkflowAuthority, startCommand } from "../../fixtures/workflows/engine.ts";
 
 let database: Database;
@@ -22,12 +24,37 @@ beforeEach(() => {
 });
 afterEach(() => database.close());
 
+function deferredLaunchAuthority() {
+  const fake = createWorkflowAuthority();
+  const execute = fake.authority.execute.bind(fake.authority);
+  let releaseLaunch = () => {};
+  const launchBlocked = new Promise<void>((resolve) => {
+    releaseLaunch = resolve;
+  });
+  let launchStarted = () => {};
+  const launchObserved = new Promise<void>((resolve) => {
+    launchStarted = resolve;
+  });
+  const authority = {
+    preview: fake.authority.preview.bind(fake.authority),
+    query: fake.authority.query.bind(fake.authority),
+    execute: async (command: Parameters<ExecutionAuthority["execute"]>[0]) => {
+      if (command.kind === "LAUNCH_RUN") {
+        launchStarted();
+        await launchBlocked;
+      }
+      return execute(command as never);
+    },
+  } as ExecutionAuthority;
+  return { ...fake, authority, launchObserved, releaseLaunch };
+}
+
 test("starts one durable child step only through ExecutionAuthority", async () => {
   const fake = createWorkflowAuthority();
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   expect(await engine.start(startCommand)).toMatchObject({
@@ -46,7 +73,7 @@ test("starts one durable child step only through ExecutionAuthority", async () =
 
 test("production engine rejects caller-supplied definitions and launch snapshots", async () => {
   const fake = createWorkflowAuthority();
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({ database, authority: fake.authority, clockMs: () => 100 });
   expect(await engine.start(startCommand)).toMatchObject({
     ok: false,
     error: { code: "WORKFLOW_STORED_LAUNCH_REQUIRED" },
@@ -117,7 +144,7 @@ test("loads immutable template and exact preset bindings and snapshots typed inp
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
     resolveLaunches: async (input) => {
       resolutions.push(input);
@@ -157,7 +184,7 @@ test("the absolute deadline continues before dispatch and through restart", asyn
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => now,
+    clockMs: () => now,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(startCommand);
@@ -165,7 +192,7 @@ test("the absolute deadline continues before dispatch and through restart", asyn
   const restarted = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => now,
+    clockMs: () => now,
     allowInlineLaunchesForTesting: true,
   });
   await restarted.tick();
@@ -176,12 +203,41 @@ test("the absolute deadline continues before dispatch and through restart", asyn
   expect(fake.commands).toHaveLength(0);
 });
 
+test("absoluteDeadlineMs expires at exactly 60,000 milliseconds, not 60 seconds of clock ticks", async () => {
+  const startedAtMs = 1_700_000_000_000;
+  let nowMs = startedAtMs;
+  const fake = createWorkflowAuthority();
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clockMs: () => nowMs,
+    allowInlineLaunchesForTesting: true,
+  });
+  const started = await engine.start({
+    ...startCommand,
+    definition: { ...startCommand.definition, absoluteDeadlineMs: 60_000 },
+  });
+  if (!started.ok) throw new Error("EXPECTED_WORKFLOW_START");
+  expect(started.value.absoluteDeadlineAt).toBe(startedAtMs + 60_000);
+
+  nowMs = startedAtMs + 59_999;
+  await engine.tick();
+  expect(engine.inspect(started.value.id)).toMatchObject({ ok: true, value: { state: "ACTIVE" } });
+
+  nowMs = startedAtMs + 60_000;
+  await engine.tick();
+  expect(engine.inspect(started.value.id)).toMatchObject({
+    ok: true,
+    value: { state: "FAILED", terminalReason: "WORKFLOW_DEADLINE_EXCEEDED" },
+  });
+});
+
 test("durable cancel invalidates future launches and enqueues active child cancellation", async () => {
   const fake = createWorkflowAuthority();
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => 100,
+    clockMs: () => 100,
     allowInlineLaunchesForTesting: true,
   });
   const started = await engine.start(startCommand);
@@ -219,7 +275,7 @@ test("deadline expiry enqueues cancellation for a running child", async () => {
   const engine = createWorkflowEngine({
     database,
     authority: fake.authority,
-    clock: () => now,
+    clockMs: () => now,
     allowInlineLaunchesForTesting: true,
   });
   await engine.start(startCommand);
@@ -235,4 +291,174 @@ test("deadline expiry enqueues cancellation for a running child", async () => {
       .query<{ count: number }, []>("SELECT count(*) AS count FROM workflow_cancellation_outbox")
       .get()?.count,
   ).toBe(1);
+});
+
+test.each([
+  {
+    invalidation: "CANCEL" as const,
+    expectedState: "CANCELLED",
+    expectedReason: "WORKFLOW_CANCELLED",
+  },
+  {
+    invalidation: "DEADLINE" as const,
+    expectedState: "FAILED",
+    expectedReason: "WORKFLOW_DEADLINE_EXCEEDED",
+  },
+  {
+    invalidation: "REVOCATION" as const,
+    expectedState: "WAITING",
+    expectedReason: "WORKFLOW_AUTHORITY_REVOKED",
+  },
+])("records and cancellation-enqueues a child launched concurrently with $invalidation invalidation", async ({
+  invalidation,
+  expectedState,
+  expectedReason,
+}) => {
+  let now = 1_000;
+  const fake = deferredLaunchAuthority();
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clockMs: () => now,
+    allowInlineLaunchesForTesting: true,
+  });
+  const started = await engine.start(startCommand);
+  if (!started.ok) throw new Error("EXPECTED_WORKFLOW_START");
+
+  const dispatch = engine.tick();
+  await fake.launchObserved;
+  if (invalidation === "CANCEL") {
+    await engine.cancel({
+      idempotencyKey: "cancel_during_launch",
+      workflowExecutionId: started.value.id,
+      expectedRevision: started.value.revision,
+      actor: {
+        kind: "MEMBER",
+        memberId: "member_1" as never,
+        sessionId: "session_1" as never,
+        sessionProof: "x".repeat(32),
+      },
+    });
+  } else if (invalidation === "DEADLINE") {
+    now = started.value.absoluteDeadlineAt;
+    await createWorkflowEngine({
+      database,
+      authority: fake.authority,
+      clockMs: () => now,
+      allowInlineLaunchesForTesting: true,
+    }).tick();
+  } else {
+    engine.applyRevocation({ kind: "MEMBER", subjectId: "member_1", epoch: 2 });
+  }
+  fake.releaseLaunch();
+  await dispatch;
+
+  expect(engine.inspect(started.value.id)).toMatchObject({
+    ok: true,
+    value: { state: expectedState, terminalReason: expectedReason },
+  });
+  expect(
+    database
+      .query<{ state: string; agent_run_id: string | null }, []>(
+        "SELECT state, agent_run_id FROM workflow_step_occurrences WHERE id = 'implement-1'",
+      )
+      .get(),
+  ).toMatchObject({ state: "CANCELLED", agent_run_id: "run_1" });
+  expect(
+    database
+      .query<{ agent_run_id: string }, []>(
+        "SELECT agent_run_id FROM workflow_cancellation_outbox WHERE step_occurrence_id = 'implement-1'",
+      )
+      .get(),
+  ).toEqual({ agent_run_id: "run_1" });
+});
+
+test("declared cycle bounds are durable runtime limits across restart and event replay", async () => {
+  const fake = createWorkflowAuthority();
+  const boundedCommand = {
+    ...startCommand,
+    definition: {
+      ...startCommand.definition,
+      cycleBounds: { "implement->review->review_result": 1 },
+    },
+  };
+  let engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clockMs: () => 1_000,
+    allowInlineLaunchesForTesting: true,
+  });
+  const started = await engine.start(boundedCommand);
+  if (!started.ok) throw new Error("EXPECTED_WORKFLOW_START");
+
+  let replayCommand: WorkflowEventCommand | undefined;
+  const complete = async (nodeKey: string, resultKey: string, eventId: string) => {
+    const occurrence = database
+      .query<{ id: string; agent_run_id: string }, [string]>(
+        `SELECT id, agent_run_id FROM workflow_step_occurrences
+         WHERE workflow_execution_id = 'workflow_1' AND node_key = ?
+         ORDER BY occurrence DESC LIMIT 1`,
+      )
+      .get(nodeKey);
+    const execution = engine.inspect("workflow_1");
+    if (!occurrence || !execution.ok) throw new Error("EXPECTED_RUNNING_OCCURRENCE");
+    const command: WorkflowEventCommand = {
+      eventId,
+      actor: startCommand.schedulerActor,
+      workflowExecutionId: "workflow_1",
+      expectedRevision: execution.value.revision,
+      stepOccurrenceId: occurrence.id,
+      runId: occurrence.agent_run_id,
+      result: {
+        stepOccurrenceId: occurrence.id,
+        runId: occurrence.agent_run_id,
+        key: resultKey,
+        artifacts: [],
+      },
+    };
+    if (eventId === "review_2_done") replayCommand = command;
+    return engine.accept(command);
+  };
+
+  await engine.tick();
+  await complete("implement", "READY_FOR_REVIEW", "implement_1_done");
+  await engine.tick();
+  await complete("review", "CHANGES_REQUESTED", "review_1_done");
+  await engine.tick();
+  await complete("implement", "READY_FOR_REVIEW", "implement_2_done");
+  await engine.tick();
+  const exceeded = await complete("review", "CHANGES_REQUESTED", "review_2_done");
+  expect(exceeded).toMatchObject({
+    ok: true,
+    value: { state: "FAILED", terminalReason: "WORKFLOW_CYCLE_BOUND_EXCEEDED" },
+  });
+  expect(
+    database
+      .query<{ completed_count: number }, []>(
+        `SELECT completed_count FROM workflow_cycle_counters
+         WHERE workflow_execution_id = 'workflow_1'
+           AND cycle_signature = 'implement->review->review_result'`,
+      )
+      .get(),
+  ).toEqual({ completed_count: 2 });
+
+  engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clockMs: () => 1_000,
+    allowInlineLaunchesForTesting: true,
+  });
+  if (!replayCommand) throw new Error("EXPECTED_REPLAY_COMMAND");
+  expect(await engine.accept(replayCommand)).toMatchObject({
+    ok: true,
+    value: { state: "FAILED", terminalReason: "WORKFLOW_CYCLE_BOUND_EXCEEDED" },
+  });
+  await engine.tick();
+  expect(
+    database
+      .query<{ count: number }, []>(
+        "SELECT count(*) AS count FROM workflow_step_occurrences WHERE node_key = 'implement'",
+      )
+      .get()?.count,
+  ).toBe(2);
 });

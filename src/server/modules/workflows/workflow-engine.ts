@@ -27,7 +27,7 @@ import type { TeamRunTemplateVersion } from "../../../shared/contracts/templates
 type Dependencies = Readonly<{
   database: Database;
   authority: ExecutionAuthority;
-  clock: () => number;
+  clockMs: () => number;
   allowInlineLaunchesForTesting?: boolean;
   resolveLaunches?: (
     input: Readonly<{
@@ -75,6 +75,8 @@ type IntentRow = Readonly<{
   step_occurrence_id: string;
   workflow_revision: number;
   command_json: string;
+  dispatched_at: number | null;
+  invalidated_reason: string | null;
 }>;
 
 function failure<T>(
@@ -266,6 +268,70 @@ function enqueueActiveChildCancellations(database: Database, workflowExecutionId
         child.agent_run_id,
       );
 }
+type TraversedEdge = readonly [from: string, to: string];
+function recordCycleTraversals(
+  database: Database,
+  row: ExecutionRow,
+  snapshotValue: WorkflowExecutionSnapshot,
+  edges: readonly TraversedEdge[],
+  now: number,
+): boolean {
+  let exceeded = false;
+  for (const [signature, bound] of Object.entries(snapshotValue.definition.cycleBounds)) {
+    const keys = signature.split("->");
+    const cycleEdges = keys.map(
+      (key, index) => [key, keys[(index + 1) % keys.length] as string] as const,
+    );
+    for (const [from, to] of edges) {
+      if (!cycleEdges.some(([cycleFrom, cycleTo]) => cycleFrom === from && cycleTo === to))
+        continue;
+      database
+        .query<void, [string, string, string, string]>(
+          `INSERT INTO workflow_cycle_edge_counters(
+             workflow_execution_id, cycle_signature, edge_from, edge_to, traversal_count
+           ) VALUES (?, ?, ?, ?, 1)
+           ON CONFLICT(workflow_execution_id, cycle_signature, edge_from, edge_to)
+           DO UPDATE SET traversal_count = traversal_count + 1`,
+        )
+        .run(row.id, signature, from, to);
+      const closingEdge = cycleEdges.at(-1);
+      if (closingEdge?.[0] !== from || closingEdge[1] !== to) continue;
+      database
+        .query<void, [string, string]>(
+          `INSERT INTO workflow_cycle_counters(
+             workflow_execution_id, cycle_signature, completed_count
+           ) VALUES (?, ?, 1)
+           ON CONFLICT(workflow_execution_id, cycle_signature)
+           DO UPDATE SET completed_count = completed_count + 1`,
+        )
+        .run(row.id, signature);
+      const completed = database
+        .query<{ completed_count: number }, [string, string]>(
+          `SELECT completed_count FROM workflow_cycle_counters
+           WHERE workflow_execution_id = ? AND cycle_signature = ?`,
+        )
+        .get(row.id, signature)?.completed_count;
+      if ((completed ?? 0) > bound) exceeded = true;
+    }
+  }
+  if (!exceeded) return true;
+  database
+    .query(
+      `UPDATE workflow_launch_intents
+       SET invalidated_reason = 'WORKFLOW_CYCLE_BOUND_EXCEEDED'
+       WHERE workflow_execution_id = ? AND dispatched_at IS NULL`,
+    )
+    .run(row.id);
+  enqueueActiveChildCancellations(database, row.id);
+  updateExecution(database, row, {
+    state: "FAILED",
+    currentNodeKey: row.current_node_key ?? undefined,
+    terminalReason: "WORKFLOW_CYCLE_BOUND_EXCEEDED",
+    now,
+    bumpRevision: true,
+  });
+  return false;
+}
 function applyTarget(
   database: Database,
   row: ExecutionRow,
@@ -332,6 +398,7 @@ function applyTarget(
 }
 
 export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine {
+  const clockMs = dependencies.clockMs;
   let crashBeforeDispatch = false;
   const inspect = (workflowExecutionId: string): Result<WorkflowExecution> => {
     const row = executionRow(dependencies.database, workflowExecutionId);
@@ -363,7 +430,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       const snapshotValue = snapshot(row);
       if (snapshotValue.schedulerActor.originalDispatcherId !== command.actor.memberId)
         return failure("WORKFLOW_ACTOR_INVALID", "The workflow control actor is invalid.");
-      const now = dependencies.clock();
+      const now = clockMs();
       if (action === "CANCEL") {
         dependencies.database
           .query(
@@ -472,7 +539,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
                 state: "WAITING",
                 currentNodeKey: row.current_node_key ?? undefined,
                 terminalReason: "WORKFLOW_AUTHORITY_REVOKED",
-                now: dependencies.clock(),
+                now: clockMs(),
                 bumpRevision: true,
               }),
             ),
@@ -628,7 +695,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
         return failure("WORKFLOW_INVALID", "The Workflow Definition is invalid.");
       try {
         return inImmediateTransaction(dependencies.database, () => {
-          const now = dependencies.clock();
+          const now = clockMs();
           const snapshotValue: WorkflowExecutionSnapshot = {
             definition,
             schedulerActor: command.schedulerActor,
@@ -683,7 +750,17 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
             dependencies.database,
             command.workflowExecutionId,
           ) as ExecutionRow;
-          row = applyTarget(dependencies.database, row, snapshotValue, transition.to, now, false);
+          if (
+            recordCycleTraversals(
+              dependencies.database,
+              row,
+              snapshotValue,
+              [[start.key, transition.to]],
+              now,
+            )
+          )
+            row = applyTarget(dependencies.database, row, snapshotValue, transition.to, now, false);
+          else row = executionRow(dependencies.database, row.id) as ExecutionRow;
           const result = { ok: true as const, value: executionView(row) };
           dependencies.database
             .query<void, [string, string, string, string, number]>(
@@ -711,7 +788,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       }
     },
     async tick(): Promise<void> {
-      const now = dependencies.clock();
+      const now = clockMs();
       inImmediateTransaction(dependencies.database, () => {
         const expired = dependencies.database
           .query<ExecutionRow, [number]>(
@@ -738,7 +815,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       const intents = dependencies.database
         .query<IntentRow, []>(
           `SELECT idempotency_key, workflow_execution_id, step_occurrence_id,
-                  workflow_revision, command_json
+                  workflow_revision, command_json, dispatched_at, invalidated_reason
            FROM workflow_launch_intents
            WHERE dispatched_at IS NULL AND invalidated_reason IS NULL
            ORDER BY rowid`,
@@ -750,7 +827,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       }
       for (const intentRow of intents) {
         let row = executionRow(dependencies.database, intentRow.workflow_execution_id);
-        if (row?.state !== "ACTIVE" || dependencies.clock() >= row.absolute_deadline_at) continue;
+        if (row?.state !== "ACTIVE" || clockMs() >= row.absolute_deadline_at) continue;
         const snapshotValue = snapshot(row);
         if (snapshotValue.presetBindings) {
           if (!dependencies.resolveLaunches) continue;
@@ -786,7 +863,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
                 state: "WAITING",
                 currentNodeKey: current.current_node_key ?? undefined,
                 terminalReason: "WORKFLOW_PRESET_BINDING_STALE",
-                now: dependencies.clock(),
+                now: clockMs(),
                 bumpRevision: true,
               });
             });
@@ -817,28 +894,95 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
         if (!launched.ok) continue;
         inImmediateTransaction(dependencies.database, () => {
           const current = executionRow(dependencies.database, row.id);
-          if (current?.state !== "ACTIVE" || current.revision !== row.revision) return;
+          const currentIntent = dependencies.database
+            .query<IntentRow, [string]>(
+              `SELECT idempotency_key, workflow_execution_id, step_occurrence_id,
+                      workflow_revision, command_json, dispatched_at, invalidated_reason
+               FROM workflow_launch_intents WHERE idempotency_key = ?`,
+            )
+            .get(intent.idempotencyKey);
+          if (!current || !currentIntent || currentIntent.dispatched_at !== null) return;
+          const completedAt = clockMs();
+          if (
+            completedAt >= current.absolute_deadline_at &&
+            currentIntent.invalidated_reason === null
+          ) {
+            dependencies.database
+              .query(
+                `UPDATE workflow_launch_intents
+                 SET invalidated_reason = 'WORKFLOW_DEADLINE_EXCEEDED'
+                 WHERE idempotency_key = ? AND invalidated_reason IS NULL`,
+              )
+              .run(intent.idempotencyKey);
+            if (!["COMPLETED", "FAILED", "CANCELLED"].includes(current.state))
+              updateExecution(dependencies.database, current, {
+                state: "FAILED",
+                currentNodeKey: current.current_node_key ?? undefined,
+                terminalReason: "WORKFLOW_DEADLINE_EXCEEDED",
+                now: completedAt,
+                bumpRevision: true,
+              });
+          }
+          const reconciledIntent = dependencies.database
+            .query<{ invalidated_reason: string | null }, [string]>(
+              "SELECT invalidated_reason FROM workflow_launch_intents WHERE idempotency_key = ?",
+            )
+            .get(intent.idempotencyKey);
           dependencies.database
             .query<void, [number, string]>(
               "UPDATE workflow_launch_intents SET dispatched_at = ? WHERE idempotency_key = ? AND dispatched_at IS NULL",
             )
-            .run(dependencies.clock(), intent.idempotencyKey);
+            .run(completedAt, intent.idempotencyKey);
+          const launchRemainsValid =
+            reconciledIntent?.invalidated_reason === null &&
+            ["ACTIVE", "PAUSED"].includes(
+              (executionRow(dependencies.database, current.id) as ExecutionRow).state,
+            );
           dependencies.database
-            .query<void, [string, string]>(
-              "UPDATE workflow_step_occurrences SET state = 'RUNNING', agent_run_id = ? WHERE id = ?",
+            .query<void, [string, string, string]>(
+              `UPDATE workflow_step_occurrences
+               SET state = ?, agent_run_id = ?
+               WHERE id = ? AND agent_run_id IS NULL`,
             )
-            .run(launched.value.run.id, intent.stepOccurrenceId);
+            .run(
+              launchRemainsValid ? "RUNNING" : "CANCELLED",
+              launched.value.run.id,
+              intent.stepOccurrenceId,
+            );
+          if (!launchRemainsValid) {
+            dependencies.database
+              .query<void, [string, string, string, string]>(
+                `INSERT OR IGNORE INTO workflow_cancellation_outbox(
+                   idempotency_key, workflow_execution_id, step_occurrence_id, agent_run_id
+                 ) VALUES (?, ?, ?, ?)`,
+              )
+              .run(
+                `workflow-cancel-${current.id}-${intent.stepOccurrenceId}`,
+                current.id,
+                intent.stepOccurrenceId,
+                launched.value.run.id,
+              );
+            const invalidated = executionRow(dependencies.database, current.id) as ExecutionRow;
+            dependencies.database
+              .query<void, [number, number, number, string]>(
+                `UPDATE workflow_executions
+                 SET coordination_revision = ?, revision = ?, updated_at = ? WHERE id = ?`,
+              )
+              .run(
+                launched.value.record.revision,
+                invalidated.revision + 1,
+                completedAt,
+                invalidated.id,
+              );
+            return;
+          }
+          const latest = executionRow(dependencies.database, current.id) as ExecutionRow;
           dependencies.database
             .query<void, [number, number, number, string]>(
               `UPDATE workflow_executions
                SET coordination_revision = ?, revision = ?, updated_at = ? WHERE id = ?`,
             )
-            .run(
-              launched.value.record.revision,
-              current.revision + 1,
-              dependencies.clock(),
-              current.id,
-            );
+            .run(launched.value.record.revision, latest.revision + 1, completedAt, latest.id);
         });
       }
       const cancellations = dependencies.database
@@ -879,7 +1023,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
           .query(
             "UPDATE workflow_cancellation_outbox SET requested_at = ? WHERE idempotency_key = ?",
           )
-          .run(dependencies.clock(), cancellation.idempotency_key);
+          .run(clockMs(), cancellation.idempotency_key);
       }
     },
     async accept(command: WorkflowEventCommand): Promise<Result<WorkflowExecution>> {
@@ -975,12 +1119,14 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
             .query<void, [string, string, string, number]>(
               "INSERT INTO workflow_event_receipts(event_id, workflow_execution_id, event_digest, accepted_at) VALUES (?, ?, ?, ?)",
             )
-            .run(command.eventId, row.id, digest, dependencies.clock());
+            .run(command.eventId, row.id, digest, clockMs());
           const join = snapshotValue.definition.nodes.find(
             (node) => node.kind === "JOIN" && node.branchKeys.includes(occurrence.node_key),
           );
           let targetKey: string | undefined;
+          const traversedEdges: TraversedEdge[] = [];
           if (join?.kind === "JOIN") {
+            traversedEdges.push([occurrence.node_key, join.key]);
             const priorJoin = dependencies.database
               .query<{ state_json: string; revision: number }, [string, string]>(
                 "SELECT state_json, revision FROM workflow_join_states WHERE workflow_execution_id = ? AND join_node_key = ?",
@@ -1044,6 +1190,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
                   item.from === join.key && item.resultKey === evaluated.transition?.targetKey,
               );
               targetKey = transition?.to ?? evaluated.transition.targetKey;
+              traversedEdges.push([join.key, targetKey]);
             }
           } else {
             const transition = snapshotValue.definition.transitions.find(
@@ -1051,11 +1198,26 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
             );
             if (transition) {
               const target = nodeByKey(snapshotValue, transition.to);
-              targetKey =
-                target?.kind === "RESULT_ROUTER"
-                  ? routeTypedResult(target, result).targetKey
-                  : transition.to;
+              if (target?.kind === "RESULT_ROUTER") {
+                targetKey = routeTypedResult(target, result).targetKey;
+                traversedEdges.push([step.key, target.key], [target.key, targetKey]);
+              } else {
+                targetKey = transition.to;
+                traversedEdges.push([step.key, targetKey]);
+              }
             }
+          }
+          if (
+            !recordCycleTraversals(
+              dependencies.database,
+              current,
+              snapshotValue,
+              traversedEdges,
+              clockMs(),
+            )
+          ) {
+            current = executionRow(dependencies.database, current.id) as ExecutionRow;
+            return { ok: true as const, value: executionView(current) };
           }
           current = targetKey
             ? current.state === "PAUSED"
@@ -1063,7 +1225,7 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
                   state: "PAUSED",
                   currentNodeKey: occurrence.node_key,
                   pendingTargetKey: targetKey,
-                  now: dependencies.clock(),
+                  now: clockMs(),
                   bumpRevision: true,
                 })
               : applyTarget(
@@ -1071,14 +1233,14 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
                   current,
                   snapshotValue,
                   targetKey,
-                  dependencies.clock(),
+                  clockMs(),
                   true,
                 )
             : updateExecution(dependencies.database, current, {
                 state: "WAITING",
                 currentNodeKey: occurrence.node_key,
                 terminalReason: "WORKFLOW_TRANSITION_REQUIRED",
-                now: dependencies.clock(),
+                now: clockMs(),
                 bumpRevision: true,
               });
           return { ok: true as const, value: executionView(current) };
@@ -1156,27 +1318,38 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
               command.choice,
               command.actor.memberId,
               command.expectedRevision,
-              dependencies.clock(),
+              clockMs(),
             );
           const transition = snapshotValue.definition.transitions.find(
             (item) => item.from === node.key && item.resultKey === command.choice,
           );
-          row = transition
-            ? applyTarget(
-                dependencies.database,
-                row,
-                snapshotValue,
-                transition.to,
-                dependencies.clock(),
-                true,
-              )
-            : updateExecution(dependencies.database, row, {
-                state: "WAITING",
-                currentNodeKey: node.key,
-                terminalReason: "WORKFLOW_TRANSITION_REQUIRED",
-                now: dependencies.clock(),
-                bumpRevision: true,
-              });
+          const withinCycleBound =
+            !transition ||
+            recordCycleTraversals(
+              dependencies.database,
+              row,
+              snapshotValue,
+              [[node.key, transition.to]],
+              clockMs(),
+            );
+          row = !withinCycleBound
+            ? (executionRow(dependencies.database, row.id) as ExecutionRow)
+            : transition
+              ? applyTarget(
+                  dependencies.database,
+                  row,
+                  snapshotValue,
+                  transition.to,
+                  clockMs(),
+                  true,
+                )
+              : updateExecution(dependencies.database, row, {
+                  state: "WAITING",
+                  currentNodeKey: node.key,
+                  terminalReason: "WORKFLOW_TRANSITION_REQUIRED",
+                  now: clockMs(),
+                  bumpRevision: true,
+                });
           return { ok: true as const, value: executionView(row) };
         });
       } catch {

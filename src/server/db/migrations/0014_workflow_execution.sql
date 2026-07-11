@@ -59,6 +59,22 @@ CREATE TABLE workflow_join_states (
   PRIMARY KEY(workflow_execution_id, join_node_key)
 ) STRICT;
 
+CREATE TABLE workflow_cycle_edge_counters (
+  workflow_execution_id TEXT NOT NULL REFERENCES workflow_executions(id),
+  cycle_signature TEXT NOT NULL CHECK(length(cycle_signature) BETWEEN 1 AND 512),
+  edge_from TEXT NOT NULL CHECK(length(edge_from) BETWEEN 1 AND 128),
+  edge_to TEXT NOT NULL CHECK(length(edge_to) BETWEEN 1 AND 128),
+  traversal_count INTEGER NOT NULL CHECK(traversal_count > 0),
+  PRIMARY KEY(workflow_execution_id, cycle_signature, edge_from, edge_to)
+) STRICT;
+
+CREATE TABLE workflow_cycle_counters (
+  workflow_execution_id TEXT NOT NULL REFERENCES workflow_executions(id),
+  cycle_signature TEXT NOT NULL CHECK(length(cycle_signature) BETWEEN 1 AND 512),
+  completed_count INTEGER NOT NULL CHECK(completed_count > 0),
+  PRIMARY KEY(workflow_execution_id, cycle_signature)
+) STRICT;
+
 CREATE TABLE workflow_decisions (
   id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
   workflow_execution_id TEXT NOT NULL REFERENCES workflow_executions(id),
