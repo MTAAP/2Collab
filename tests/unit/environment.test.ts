@@ -8,6 +8,7 @@ describe("readServerEnvironment", () => {
       hostname: "127.0.0.1",
       mode: "development",
       port: 3210,
+      runnerCompositionModule: undefined,
       sessionSecret: undefined,
     });
   });

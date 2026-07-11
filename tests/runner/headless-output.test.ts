@@ -1,20 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { createCodexExecutionAdapter } from "../../src/runner/adapters/runtime/codex.ts";
 import { createHeadlessOutputProducer } from "../../src/runner/headless-output.ts";
-import { RunnerEnvelopeSchema, type RunnerEnvelope } from "../../src/shared/contracts/protocol.ts";
+import {
+  type RunnerEnvelope,
+  RunnerMessageBodySchema,
+} from "../../src/shared/contracts/protocol.ts";
+
+type OutputBody = Extract<RunnerEnvelope["body"], { kind: "HEADLESS_OUTPUT_CHUNK" }>;
 
 describe("headless runtime output producer", () => {
   test("redacts split secrets per stream and flushes them through real outbound envelopes", async () => {
-    const sent: RunnerEnvelope[] = [];
-    let message = 0;
+    const sent: OutputBody[] = [];
     const producer = createHeadlessOutputProducer({
       adapter: createCodexExecutionAdapter(),
       target: { kind: "ATTEMPT", attemptId: "attempt_1" },
-      protocolVersion: "1.0",
-      now: () => 1_000,
-      messageId: () => `message_${++message}`,
-      send: async (envelope) => {
-        sent.push(RunnerEnvelopeSchema.parse(envelope));
+      send: async (body) => {
+        sent.push(RunnerMessageBodySchema.parse(body) as OutputBody);
       },
     });
 
@@ -42,8 +43,13 @@ describe("headless runtime output producer", () => {
     expect(wire).toContain("[REDACTED_GITHUB_TOKEN]");
     expect(wire).toContain("Authorization: Bearer [REDACTED]");
     expect(wire).toContain("[REDACTED_PRIVATE_KEY]");
-    expect(sent.every((entry) => entry.body.kind === "HEADLESS_OUTPUT_CHUNK")).toBeTrue();
-    expect(sent.map((entry) => entry.sequence)).toEqual(sent.map((_, index) => index + 1));
+    expect(sent.every((entry) => entry.kind === "HEADLESS_OUTPUT_CHUNK")).toBeTrue();
+    for (const stream of ["STDOUT", "STDERR"] as const) {
+      const sequences = sent
+        .filter((entry) => entry.stream === stream)
+        .map((entry) => entry.sequence);
+      expect(sequences).toEqual(sequences.map((_, index) => index + 1));
+    }
   });
 
   test("bounds queued runtime output while a slow outbound send is active", async () => {
@@ -51,9 +57,6 @@ describe("headless runtime output producer", () => {
     const producer = createHeadlessOutputProducer({
       adapter: createCodexExecutionAdapter(),
       target: { kind: "ATTEMPT", attemptId: "attempt_1" },
-      protocolVersion: "1.0",
-      now: () => 1_000,
-      messageId: () => "message_1",
       maximumPendingItems: 2,
       maximumPendingBytes: 400,
       redactionHoldbackBytes: 128,

@@ -2,16 +2,18 @@ import type { Database } from "bun:sqlite";
 import foundationMigration from "./migrations/0001_profiles_processes.sql" with { type: "text" };
 import failedStartsMigration from "./migrations/0002_failed_starts.sql" with { type: "text" };
 import startFenceMigration from "./migrations/0003_start_fence.sql" with { type: "text" };
+import semanticOutboxMigration from "./migrations/0004_semantic_outbox.sql" with { type: "text" };
 
 function verify(database: Database): void {
   const history = database
     .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
     .all();
   if (
-    history.length !== 3 ||
+    history.length !== 4 ||
     history[0]?.version !== 1 ||
     history[1]?.version !== 2 ||
-    history[2]?.version !== 3
+    history[2]?.version !== 3 ||
+    history[3]?.version !== 4
   ) {
     throw new Error("RUNNER_STATE_CORRUPT");
   }
@@ -25,7 +27,8 @@ function verify(database: Database): void {
     tables.get("schema_migrations") !== 1 ||
     tables.get("local_profile_versions") !== 1 ||
     tables.get("local_processes") !== 1 ||
-    tables.get("local_diagnostic_tails") !== 1
+    tables.get("local_diagnostic_tails") !== 1 ||
+    tables.get("local_semantic_outbox") !== 1
   ) {
     throw new Error("RUNNER_STATE_CORRUPT");
   }
@@ -83,6 +86,7 @@ export function migrateRunnerDatabase(database: Database, fresh: boolean): void 
       database.exec(foundationMigration);
       database.exec(failedStartsMigration);
       database.exec(startFenceMigration);
+      database.exec(semanticOutboxMigration);
       verify(database);
       database.exec("COMMIT");
     } catch (error) {
@@ -101,13 +105,15 @@ export function migrateRunnerDatabase(database: Database, fresh: boolean): void 
     .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
     .all();
   if (
-    (history.length === 1 && history[0]?.version === 1) ||
-    (history.length === 2 && history[0]?.version === 1 && history[1]?.version === 2)
+    history.length >= 1 &&
+    history.length <= 3 &&
+    history.every((entry, index) => entry.version === index + 1)
   ) {
     database.exec("BEGIN IMMEDIATE");
     try {
       if (history.length === 1) database.exec(failedStartsMigration);
-      database.exec(startFenceMigration);
+      if (history.length <= 2) database.exec(startFenceMigration);
+      database.exec(semanticOutboxMigration);
       verify(database);
       database.exec("COMMIT");
     } catch (error) {

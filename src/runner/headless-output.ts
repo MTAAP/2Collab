@@ -12,10 +12,7 @@ type Target = OutputBody["target"];
 type Output = Extract<NormalizedRuntimeEvent, Readonly<{ kind: "OUTPUT" }>>;
 
 export type HeadlessOutputTransport = Readonly<{
-  protocolVersion: string;
-  now: () => number;
-  messageId: () => string;
-  send: (envelope: RunnerEnvelope) => Promise<void>;
+  send: (body: OutputBody) => Promise<void>;
   maximumPendingItems?: number;
   maximumPendingBytes?: number;
   redactionHoldbackBytes?: number;
@@ -69,7 +66,6 @@ export function createHeadlessOutputProducer(dependencies: Dependencies) {
   });
   const queue: Queued[] = [];
   const streamSequences = new Map<Output["stream"], number>();
-  let envelopeSequence = 0;
   let pendingItems = 0;
   let pendingBytes = 0;
   let draining: Promise<void> | null = null;
@@ -79,7 +75,6 @@ export function createHeadlessOutputProducer(dependencies: Dependencies) {
     for (const chunk of utf8Chunks(text, 16 * 1024)) {
       const streamSequence = (streamSequences.get(stream) ?? 0) + 1;
       streamSequences.set(stream, streamSequence);
-      const issuedAt = dependencies.now();
       const body: OutputBody = {
         kind: "HEADLESS_OUTPUT_CHUNK",
         target: dependencies.target,
@@ -89,14 +84,7 @@ export function createHeadlessOutputProducer(dependencies: Dependencies) {
         text: chunk,
         truncated: false,
       };
-      await dependencies.send({
-        protocolVersion: dependencies.protocolVersion,
-        messageId: dependencies.messageId(),
-        sequence: ++envelopeSequence,
-        issuedAt,
-        expiresAt: issuedAt + 30,
-        body,
-      });
+      await dependencies.send(body);
     }
   };
 

@@ -1,11 +1,11 @@
 import type { ServerEnvelope } from "../../../shared/contracts/protocol.ts";
 import { ServerEnvelopeSchema } from "../../../shared/contracts/protocol.ts";
-import type { LiveOutputHub } from "./live-output.ts";
-import { BoundedSendQueue } from "./rate-limits.ts";
 import {
   RunnerConnectionRegistry,
   type RunnerTransportDisposition,
 } from "./connection-registry.ts";
+import type { LiveOutputHub } from "./live-output.ts";
+import { BoundedSendQueue } from "./rate-limits.ts";
 
 export type CommittedRunnerOperation = Readonly<{
   outboxId: string;
@@ -325,6 +325,29 @@ export function createRunnerChannel(dependencies: Dependencies) {
         .filter((operation) => operation.runnerId === runnerId)
         .sort((left, right) => left.deliveryId.localeCompare(right.deliveryId))
         .map((operation) => transmit(operation, connection));
+    },
+
+    sendTransient(runnerId: string, body: ServerEnvelope["body"]): boolean {
+      const connection = connections.get(runnerId);
+      if (!connection || quiesced) return false;
+      connection.sequence.value += 1;
+      const issuedAt = dependencies.now();
+      const envelope: ServerEnvelope = {
+        protocolVersion,
+        messageId: dependencies.messageId(),
+        sequence: connection.sequence.value,
+        issuedAt,
+        expiresAt: issuedAt + 30,
+        body,
+      };
+      if (!ServerEnvelopeSchema.safeParse(envelope).success) {
+        throw new Error("TRANSIENT_RUNNER_ENVELOPE_INVALID");
+      }
+      try {
+        return sendDisposition(connection.send(envelope)) === "SENT";
+      } catch {
+        return false;
+      }
     },
 
     acknowledge(runnerId: string, deliveryId: string, semanticDigest: string) {

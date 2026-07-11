@@ -4,12 +4,14 @@ import {
   createInMemoryRunnerControlAdapter,
   type RunnerControlSocket,
 } from "../../src/server/adapters/wss/bun-runner-control.ts";
+import {
+  createServerEntrypoint,
+  requireProductionRunnerPorts,
+} from "../../src/server/adapters/wss/production.ts";
 import { createRunnerChannel } from "../../src/server/adapters/wss/runner-channel.ts";
+import { createApp } from "../../src/server/app.ts";
 import type { VerifiedRunnerPrincipal } from "../../src/shared/contracts/actors.ts";
 import type { RunnerEnvelope } from "../../src/shared/contracts/protocol.ts";
-import { createApp } from "../../src/server/app.ts";
-import { createServerEntrypoint } from "../../src/server/index.ts";
-import productionServer from "../../src/server/index.ts";
 
 const principal = {
   kind: "VERIFIED_RUNNER",
@@ -163,12 +165,123 @@ for (const kind of ["in-memory", "bun"] as const) {
 }
 
 describe("Bun runner control adapter", () => {
-  test("the default production export mounts the fail-closed runner upgrade path", async () => {
-    expect(productionServer).toHaveProperty("websocket");
-    const response = await productionServer.fetch(new Request("https://collab.test/runner/v1"), {
-      upgrade: () => true,
-    } as never);
-    expect(response?.status).toBe(401);
+  test("sends a committed authority response before ACK and replays both on duplicate event", async () => {
+    const scheduler = new FakeScheduler();
+    let effects = 0;
+    const deps = dependencies(scheduler, []);
+    const adapter = createInMemoryRunnerControlAdapter({
+      ...deps,
+      createRouter: () => ({
+        route: async () => {
+          effects += 1;
+          return {
+            accepted: true as const,
+            disposition: "APPLIED" as const,
+            response: {
+              kind: "AUTHORITY_RESPONSE" as const,
+              requestId: "request_1",
+              result: {
+                kind: "AUTHORIZE_OPERATION" as const,
+                authorizationId: "authorization_1",
+                operationDigest: "a".repeat(64),
+                expiresAt: 1_010,
+              },
+            },
+          };
+        },
+      }),
+    });
+    const connection = adapter.connect(principal);
+    const socket = connection.socket as FakeSocket;
+    await negotiate(socket, connection.receive);
+    const body = {
+      kind: "AUTHORIZE_OPERATION",
+      eventId: "event_1",
+      requestId: "request_1",
+      payload: {
+        sessionId: "session_1",
+        sessionFence: 1,
+        operation: { kind: "MUTATE_REPOSITORY", expectedHead: "b".repeat(40) },
+      },
+    } as const;
+    connection.receive(JSON.stringify({ ...heartbeat(1), body }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(socket.sent.slice(1).map((wire) => JSON.parse(wire).body.kind)).toEqual([
+      "AUTHORITY_RESPONSE",
+      "SEMANTIC_EVENT_ACK",
+    ]);
+
+    connection.receive(JSON.stringify({ ...heartbeat(2), messageId: "message_2", body }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(effects).toBe(1);
+    expect(socket.sent.slice(3).map((wire) => JSON.parse(wire).body)).toMatchObject([
+      { kind: "AUTHORITY_RESPONSE", requestId: "request_1" },
+      { kind: "SEMANTIC_EVENT_ACK", eventId: "event_1", disposition: "DUPLICATE" },
+    ]);
+  });
+
+  test("acknowledges committed semantic events and rejects changed event replay", async () => {
+    const scheduler = new FakeScheduler();
+    const effects: RunnerEnvelope[] = [];
+    const adapter = createInMemoryRunnerControlAdapter(dependencies(scheduler, effects));
+    const connection = adapter.connect(principal);
+    const socket = connection.socket as FakeSocket;
+    await negotiate(socket, connection.receive);
+    const body = {
+      kind: "ATTEMPT_EVENT",
+      eventId: "event_1",
+      payload: {
+        runId: "run_1",
+        expectedRunRevision: 1,
+        attemptId: "attempt_1",
+        expectedAttemptRevision: 1,
+        event: { kind: "PROCESS_STARTED", observedAt: 1_000 },
+      },
+    } as const;
+    connection.receive(JSON.stringify({ ...heartbeat(1), messageId: "runner_message_1", body }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(effects).toHaveLength(1);
+    expect(JSON.parse(socket.sent[1] ?? "null")).toMatchObject({
+      body: { kind: "SEMANTIC_EVENT_ACK", eventId: "event_1", disposition: "APPLIED" },
+    });
+
+    connection.receive(JSON.stringify({ ...heartbeat(2), messageId: "runner_message_2", body }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(effects).toHaveLength(1);
+    expect(JSON.parse(socket.sent[2] ?? "null")).toMatchObject({
+      body: { kind: "SEMANTIC_EVENT_ACK", eventId: "event_1", disposition: "DUPLICATE" },
+    });
+
+    connection.receive(
+      JSON.stringify({
+        ...heartbeat(3),
+        messageId: "runner_message_3",
+        body: {
+          ...body,
+          payload: {
+            ...body.payload,
+            event: { kind: "PROCESS_EXITED", observedAt: 1_000, exitCode: 1 },
+          },
+        },
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(socket.closes).toContainEqual([1002, "SEMANTIC_EVENT_CONFLICT"]);
+    expect(effects).toHaveLength(1);
+  });
+
+  test("production startup fails explicitly when runner ports were not installed", () => {
+    expect(() => requireProductionRunnerPorts()).toThrow("RUNNER_PRODUCTION_PORTS_REQUIRED");
   });
 
   test("the server entrypoint composes runner upgrades before the Hono fallback", async () => {

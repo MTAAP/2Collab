@@ -7,6 +7,7 @@ const serverEnvironmentSchema = z.object({
   HOST: z.string().min(1).default("127.0.0.1"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3210),
+  RUNNER_COMPOSITION_MODULE: z.string().min(1).optional(),
   SESSION_SECRET: z.string().min(32).optional(),
 });
 
@@ -15,6 +16,7 @@ export type ServerEnvironment = {
   hostname: string;
   mode: "development" | "test" | "production";
   port: number;
+  runnerCompositionModule: string | undefined;
   sessionSecret: string | undefined;
 };
 
@@ -44,6 +46,7 @@ export function readServerEnvironment(
     hostname: parsed.data.HOST,
     mode: parsed.data.NODE_ENV,
     port: parsed.data.PORT,
+    runnerCompositionModule: parsed.data.RUNNER_COMPOSITION_MODULE,
     sessionSecret: parsed.data.SESSION_SECRET,
   };
 }

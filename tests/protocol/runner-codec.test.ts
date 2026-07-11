@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createInMemoryRunnerChannel, validRunnerHeartbeat } from "../fixtures/runner-channel.ts";
 import { RunnerEnvelopeSchema, ServerEnvelopeSchema } from "../../src/shared/contracts/protocol.ts";
+import { createInMemoryRunnerChannel, validRunnerHeartbeat } from "../fixtures/runner-channel.ts";
 
 describe("runner wire codec", () => {
   test("rejects unknown kinds, binary, compression, invalid UTF-8, and oversized frames", () => {
@@ -119,6 +119,7 @@ describe("runner wire codec", () => {
           schemaVersion: 1,
           contextRecipe: { id: "recipe_1", version: 1, digest: "b".repeat(64) },
           references: [],
+          omissions: [],
         },
         projectMappingRevision: 1,
         repositoryMode: "INSPECT_ONLY",

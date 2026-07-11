@@ -1,9 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  type ClientHello,
   ClientHelloSchema,
   RunnerEnvelopeSchema,
   RunnerMessageBodySchema,
-  type ClientHello,
 } from "../../../shared/contracts/protocol.ts";
 import { TokenBucket } from "./rate-limits.ts";
 
@@ -292,8 +292,9 @@ export class InMemoryRunnerProtocolChannel {
   }
 
   #runScope(body: (typeof RunnerEnvelopeSchema)["_output"]["body"]): string | null {
-    if ("attemptId" in body) return `ATTEMPT:${body.attemptId}`;
-    if ("gateEvaluationId" in body) return `GATE:${body.gateEvaluationId}`;
+    if ("payload" in body && "attemptId" in body.payload) {
+      return `ATTEMPT:${body.payload.attemptId}`;
+    }
     if (body.kind === "HEADLESS_OUTPUT_CHUNK") {
       return body.target.kind === "ATTEMPT"
         ? `ATTEMPT:${body.target.attemptId}`

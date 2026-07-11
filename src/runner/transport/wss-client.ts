@@ -1,17 +1,39 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
+  type ClientHello,
   ClientHelloSchema,
+  type RunnerEnvelope,
+  RunnerEnvelopeSchema,
+  RunnerMessageBodySchema,
+  type ServerEnvelope,
   ServerEnvelopeSchema,
   ServerWelcomeSchema,
-  type ClientHello,
-  type ServerEnvelope,
 } from "../../shared/contracts/protocol.ts";
+import type { Result } from "../../shared/contracts/result.ts";
 import { RunnerReconnectState } from "./reconnect.ts";
+
+type DurableBody = Exclude<
+  RunnerEnvelope["body"],
+  Readonly<{ kind: "HEARTBEAT" | "HEADLESS_OUTPUT_CHUNK" }>
+>;
+
+export type DurableRunnerEvent = Readonly<{
+  eventId: string;
+  digest: string;
+  body: DurableBody;
+}>;
+
+export interface RunnerOutboundStore {
+  load(): readonly DurableRunnerEvent[];
+  put(event: DurableRunnerEvent): void;
+  remove(eventId: string): void;
+}
 
 export type RunnerClientSocket = EventTarget &
   Readonly<{
     send(value: string): void;
     close(code: number, reason: string): void;
+    readonly bufferedAmount?: number;
   }>;
 
 type AccessIssue = Readonly<{ accessToken: string; proof: string; nonce: string }>;
@@ -25,11 +47,31 @@ type Dependencies = Readonly<{
   supportedRanges: ClientHello["ranges"];
   onEnvelope: (envelope: ServerEnvelope) => Promise<void>;
   now?: () => number;
+  messageId?: () => string;
+  maximumOutboundItems?: number;
+  maximumOutboundBytes?: number;
+  outboundStore: RunnerOutboundStore;
+  scheduleDrain?: (callback: () => void, milliseconds: number) => unknown;
+  clearDrain?: (handle: unknown) => void;
+  waitForDrain?: (deadline: number) => Promise<void>;
+  reconnectJitter?: () => number;
+  scheduleReconnect?: (callback: () => void, milliseconds: number) => unknown;
+  clearReconnect?: (handle: unknown) => void;
 }>;
 
 const MAXIMUM_FUTURE_SKEW_SECONDS = 30;
 const MAXIMUM_SERVER_ENVELOPE_LIFETIME_SECONDS = 5 * 60;
 const MAXIMUM_REPLAY_ENTRIES = 32_768;
+type Outbound = Readonly<{
+  body: RunnerEnvelope["body"];
+  bytes: number;
+  durable: boolean;
+  digest?: string;
+}>;
+
+function outboundFailure<T>(code: string, message: string): Result<T> {
+  return { ok: false, error: { code, message, retry: "REFRESH" } };
+}
 
 function defaultSocketFactory(
   url: string,
@@ -74,9 +116,48 @@ function boundedAccess(issue: AccessIssue): boolean {
 }
 
 export function createRunnerWssClient(dependencies: Dependencies) {
-  const reconnect = new RunnerReconnectState();
+  const reconnect = new RunnerReconnectState({ jitter: dependencies.reconnectJitter });
   const socketFactory = dependencies.socketFactory ?? defaultSocketFactory;
   const now = dependencies.now ?? (() => Date.now() / 1_000);
+  const messageId =
+    dependencies.messageId ?? (() => `runner_message_${randomBytes(24).toString("base64url")}`);
+  const maximumOutboundItems = dependencies.maximumOutboundItems ?? 1_024;
+  const maximumOutboundBytes = dependencies.maximumOutboundBytes ?? 1024 * 1024;
+  const outboundStore = dependencies.outboundStore;
+  const scheduleDrain =
+    dependencies.scheduleDrain ??
+    ((callback: () => void, milliseconds: number) => {
+      const handle = setTimeout(callback, milliseconds);
+      handle.unref?.();
+      return handle;
+    });
+  const clearDrain =
+    dependencies.clearDrain ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const waitForDrain =
+    dependencies.waitForDrain ??
+    ((deadline: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(25, Math.max(0, deadline - now()) * 1_000));
+      }));
+  const scheduleReconnect =
+    dependencies.scheduleReconnect ??
+    ((callback: () => void, milliseconds: number) => {
+      const handle = setTimeout(callback, milliseconds);
+      handle.unref?.();
+      return handle;
+    });
+  const clearReconnect =
+    dependencies.clearReconnect ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  if (
+    !Number.isSafeInteger(maximumOutboundItems) ||
+    maximumOutboundItems < 1 ||
+    !Number.isSafeInteger(maximumOutboundBytes) ||
+    maximumOutboundBytes < 1
+  ) {
+    throw new Error("RUNNER_OUTBOUND_LIMIT_INVALID");
+  }
   const hello = ClientHelloSchema.parse({
     kind: "CLIENT_HELLO",
     ranges: dependencies.supportedRanges,
@@ -87,10 +168,92 @@ export function createRunnerWssClient(dependencies: Dependencies) {
   let failed = false;
   let effects = Promise.resolve();
   const seen = new Map<string, Readonly<{ sequence: number; digest: string }>>();
+  const outbound: Outbound[] = [];
+  const inFlight = new Map<string, Outbound>();
+  const processedResponses = new Set<string>();
+  const pendingAcknowledgements = new Set<string>();
+  let outboundBytes = 0;
+  let outboundSequence = 0;
+  let drainTimer: unknown;
+  let reconnectTimer: unknown;
+  let terminalDisconnect: "PROTOCOL" | "POLICY" | null = null;
+
+  const bodyDigest = (body: RunnerEnvelope["body"]): string =>
+    createHash("sha256").update(JSON.stringify(body), "utf8").digest("hex");
+
+  const durableEventId = (body: RunnerEnvelope["body"]): string | null =>
+    body.kind === "HEARTBEAT" || body.kind === "HEADLESS_OUTPUT_CHUNK" ? null : body.eventId;
+
+  for (const event of outboundStore.load()) {
+    const parsed = RunnerMessageBodySchema.safeParse(event.body);
+    if (
+      !parsed.success ||
+      durableEventId(parsed.data) !== event.eventId ||
+      bodyDigest(parsed.data) !== event.digest
+    ) {
+      throw new Error("RUNNER_OUTBOUND_STORE_CORRUPT");
+    }
+    const bytes = Buffer.byteLength(JSON.stringify(parsed.data), "utf8") + 256;
+    outbound.push({ body: parsed.data, bytes, durable: true, digest: event.digest });
+    outboundBytes += bytes;
+  }
+  if (outbound.length > maximumOutboundItems || outboundBytes > maximumOutboundBytes) {
+    throw new Error("RUNNER_OUTBOUND_STORE_LIMIT_EXCEEDED");
+  }
 
   const fail = (code: number, reason: string): void => {
     failed = true;
+    if (code === 1002) terminalDisconnect = "PROTOCOL";
+    else if (code === 1008 || code === 4003) terminalDisconnect = "POLICY";
     socket?.close(code, reason);
+  };
+
+  const cancelReconnect = (): void => {
+    if (reconnectTimer !== undefined) clearReconnect(reconnectTimer);
+    reconnectTimer = undefined;
+  };
+
+  const requestReconnect = (): void => {
+    if (reconnect.state !== "BACKING_OFF" || reconnectTimer !== undefined) return;
+    const delay = reconnect.nextDelaySeconds();
+    if (delay === null) return;
+    reconnectTimer = scheduleReconnect(() => {
+      reconnectTimer = undefined;
+      void client.start().catch(() => undefined);
+    }, delay * 1_000);
+  };
+
+  const cancelDrain = (): void => {
+    if (drainTimer !== undefined) clearDrain(drainTimer);
+    drainTimer = undefined;
+  };
+
+  const requeueDurable = (): void => {
+    const replay = [...inFlight.values()].filter((entry) => entry.durable);
+    inFlight.clear();
+    outbound.unshift(...replay);
+  };
+
+  const retainedEvent = (eventId: string): Outbound | undefined =>
+    inFlight.get(eventId) ?? outbound.find((entry) => durableEventId(entry.body) === eventId);
+
+  const eventForRequest = (requestId: string): string | undefined => {
+    const entry = [...inFlight.values(), ...outbound].find(
+      (candidate) => "requestId" in candidate.body && candidate.body.requestId === requestId,
+    );
+    return entry ? (durableEventId(entry.body) ?? undefined) : undefined;
+  };
+
+  const completeEvent = (eventId: string): void => {
+    const retained = retainedEvent(eventId);
+    if (!retained) return;
+    inFlight.delete(eventId);
+    const ready = outbound.findIndex((entry) => durableEventId(entry.body) === eventId);
+    if (ready >= 0) outbound.splice(ready, 1);
+    outboundBytes -= retained.bytes;
+    processedResponses.delete(eventId);
+    pendingAcknowledgements.delete(eventId);
+    outboundStore.remove(eventId);
   };
 
   const acceptEnvelope = (candidate: unknown, wire: string): void => {
@@ -129,37 +292,123 @@ export function createRunnerWssClient(dependencies: Dependencies) {
       if (oldest !== undefined) seen.delete(oldest);
     }
     effects = effects
-      .then(() => dependencies.onEnvelope(envelope.data))
+      .then(async () => {
+        await dependencies.onEnvelope(envelope.data);
+        if (envelope.data.body.kind === "AUTHORITY_RESPONSE") {
+          const eventId = eventForRequest(envelope.data.body.requestId);
+          if (eventId) {
+            processedResponses.add(eventId);
+            if (pendingAcknowledgements.has(eventId)) completeEvent(eventId);
+          }
+        }
+        if (envelope.data.body.kind === "SEMANTIC_EVENT_ACK") {
+          const eventId = envelope.data.body.eventId;
+          const retained = retainedEvent(eventId);
+          if (!retained) return;
+          if ("requestId" in retained.body && !processedResponses.has(eventId)) {
+            pendingAcknowledgements.add(eventId);
+            return;
+          }
+          completeEvent(eventId);
+        }
+      })
       .catch(() => fail(1011, "INTERNAL_ERROR"));
   };
 
-  return {
+  const requestDrain = (): void => {
+    if (drainTimer !== undefined || outbound.length === 0 || reconnect.state !== "ACTIVE") return;
+    drainTimer = scheduleDrain(() => {
+      drainTimer = undefined;
+      flushOutbound();
+    }, 25);
+  };
+
+  const flushOutbound = (): number => {
+    if (reconnect.state !== "ACTIVE" || !socket || !selectedVersion) return 0;
+    cancelDrain();
+    let sent = 0;
+    while (outbound.length > 0 && (socket.bufferedAmount ?? 0) < 1024 * 1024) {
+      const entry = outbound[0];
+      if (!entry) break;
+      const issuedAt = now();
+      const envelope: RunnerEnvelope = {
+        protocolVersion: selectedVersion,
+        messageId: messageId(),
+        sequence: ++outboundSequence,
+        issuedAt,
+        expiresAt: issuedAt + 30,
+        body: entry.body,
+      };
+      if (!RunnerEnvelopeSchema.safeParse(envelope).success) {
+        fail(1002, "PROTOCOL_ERROR");
+        break;
+      }
+      try {
+        socket.send(JSON.stringify(envelope));
+      } catch {
+        outboundSequence -= 1;
+        break;
+      }
+      outbound.shift();
+      const eventId = durableEventId(entry.body);
+      if (eventId) inFlight.set(eventId, entry);
+      else outboundBytes -= entry.bytes;
+      sent += 1;
+    }
+    requestDrain();
+    return sent;
+  };
+
+  const client = {
     get state() {
       return reconnect.state;
     },
 
     async start(): Promise<void> {
+      cancelReconnect();
       const endpoint = validateEndpoint(dependencies.endpoint);
-      reconnect.authenticating();
-      const issue = await dependencies.issueAccess();
-      if (!boundedAccess(issue)) throw new Error("RUNNER_ACCESS_ISSUE_INVALID");
-      socket = socketFactory(endpoint, {
-        headers: {
-          authorization: `DPoP ${issue.accessToken}`,
-          dpop: issue.proof,
-          "dpop-nonce": issue.nonce,
-        },
-      });
+      if (reconnect.state === "BACKING_OFF") reconnect.retrying();
+      else reconnect.authenticating();
+      let issue: AccessIssue;
+      try {
+        issue = await dependencies.issueAccess();
+      } catch (error) {
+        reconnect.disconnected("AUTHENTICATION", now());
+        throw error;
+      }
+      if (!boundedAccess(issue)) {
+        reconnect.disconnected("AUTHENTICATION", now());
+        throw new Error("RUNNER_ACCESS_ISSUE_INVALID");
+      }
+      let connection: RunnerClientSocket;
+      try {
+        connection = socketFactory(endpoint, {
+          headers: {
+            authorization: `DPoP ${issue.accessToken}`,
+            dpop: issue.proof,
+            "dpop-nonce": issue.nonce,
+          },
+        });
+      } catch (error) {
+        reconnect.disconnected("UNAVAILABLE", now());
+        requestReconnect();
+        throw error;
+      }
+      socket = connection;
       failed = false;
+      terminalDisconnect = null;
       selectedVersion = null;
       lastSequence = 0;
+      outboundSequence = 0;
       effects = Promise.resolve();
       seen.clear();
-      socket.addEventListener("open", () => {
+      connection.addEventListener("open", () => {
+        if (socket !== connection) return;
         reconnect.negotiating();
-        socket?.send(JSON.stringify(hello));
+        connection.send(JSON.stringify(hello));
       });
-      socket.addEventListener("message", (event) => {
+      connection.addEventListener("message", (event) => {
+        if (socket !== connection) return;
         const data = (event as MessageEvent<unknown>).data;
         if (typeof data !== "string" || Buffer.byteLength(data, "utf8") > 65_536) {
           fail(1002, "PROTOCOL_ERROR");
@@ -192,6 +441,7 @@ export function createRunnerWssClient(dependencies: Dependencies) {
           }
           selectedVersion = welcome.data.selectedVersion;
           reconnect.active(now());
+          flushOutbound();
           return;
         }
         if (reconnect.state !== "ACTIVE") {
@@ -200,17 +450,117 @@ export function createRunnerWssClient(dependencies: Dependencies) {
         }
         acceptEnvelope(raw, data);
       });
-      socket.addEventListener("close", () => {
+      connection.addEventListener("close", () => {
+        if (socket !== connection) return;
         if (reconnect.state !== "STOPPED") {
-          reconnect.disconnected("NETWORK", now());
+          cancelDrain();
+          outbound.splice(0, outbound.length, ...outbound.filter((entry) => entry.durable));
+          requeueDurable();
+          outboundBytes = [...outbound, ...inFlight.values()].reduce(
+            (total, entry) => total + entry.bytes,
+            0,
+          );
+          reconnect.disconnected(terminalDisconnect ?? "NETWORK", now());
+          terminalDisconnect = null;
+          requestReconnect();
         }
       });
     },
 
     stop(): void {
+      cancelReconnect();
+      cancelDrain();
       reconnect.stop();
       fail(1000, "CLIENT_STOP");
       socket = null;
+      outbound.length = 0;
+      inFlight.clear();
+      processedResponses.clear();
+      pendingAcknowledgements.clear();
+      outboundBytes = 0;
+    },
+
+    send(body: RunnerEnvelope["body"]): Result<Readonly<{ queued: boolean }>> {
+      if (reconnect.state !== "ACTIVE" || !socket || !selectedVersion) {
+        return outboundFailure("RUNNER_CONNECTION_INACTIVE", "Runner connection is inactive.");
+      }
+      const parsed = RunnerMessageBodySchema.safeParse(body);
+      if (!parsed.success) {
+        return outboundFailure("RUNNER_OUTBOUND_INVALID", "Runner outbound message is invalid.");
+      }
+      const bytes = Buffer.byteLength(JSON.stringify(parsed.data), "utf8") + 256;
+      const eventId = durableEventId(parsed.data);
+      const digest = bodyDigest(parsed.data);
+      if (eventId) {
+        const prior =
+          inFlight.get(eventId) ?? outbound.find((entry) => durableEventId(entry.body) === eventId);
+        if (prior) {
+          if (prior.digest !== digest) {
+            return outboundFailure(
+              "RUNNER_EVENT_ID_CONFLICT",
+              "Runner event identifier conflicts with retained content.",
+            );
+          }
+          return { ok: true, value: { queued: true } };
+        }
+      }
+      if (
+        outbound.length >= maximumOutboundItems ||
+        bytes > maximumOutboundBytes ||
+        outboundBytes + bytes > maximumOutboundBytes
+      ) {
+        return outboundFailure(
+          "RUNNER_OUTBOUND_BACKPRESSURE",
+          "Runner outbound backpressure limit was reached.",
+        );
+      }
+      const entry: Outbound = {
+        body: parsed.data,
+        bytes,
+        durable: eventId !== null,
+        ...(eventId ? { digest } : {}),
+      };
+      if (eventId) {
+        try {
+          outboundStore.put({ eventId, digest, body: parsed.data as DurableBody });
+        } catch (error) {
+          const code =
+            error instanceof Error && error.message === "RUNNER_EVENT_ID_CONFLICT"
+              ? "RUNNER_EVENT_ID_CONFLICT"
+              : "RUNNER_OUTBOUND_BACKPRESSURE";
+          return outboundFailure(
+            code,
+            code === "RUNNER_EVENT_ID_CONFLICT"
+              ? "Runner event identifier conflicts with retained content."
+              : "Runner durable outbound store is unavailable or full.",
+          );
+        }
+      }
+      outbound.push(entry);
+      outboundBytes += bytes;
+      flushOutbound();
+      return { ok: true, value: { queued: outbound.length > 0 } };
+    },
+
+    flushOutbound,
+
+    async quiesce(deadline: number): Promise<Readonly<{ closed: number; pending: number }>> {
+      if (!Number.isFinite(deadline) || deadline < 0)
+        throw new Error("RUNNER_QUIESCE_DEADLINE_INVALID");
+      while (outbound.length > 0 && reconnect.state === "ACTIVE" && now() < deadline) {
+        flushOutbound();
+        if (outbound.length === 0 || now() >= deadline) break;
+        await waitForDrain(deadline);
+      }
+      const pending = new Set(
+        [...outbound, ...inFlight.values()]
+          .map((entry) => durableEventId(entry.body))
+          .filter((value): value is string => value !== null),
+      ).size;
+      const closed = socket === null ? 0 : 1;
+      this.stop();
+      return { closed, pending };
     },
   };
+  return client;
 }

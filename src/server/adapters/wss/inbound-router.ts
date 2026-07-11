@@ -1,8 +1,13 @@
 import type { VerifiedRunnerPrincipal } from "../../../shared/contracts/actors.ts";
-import { RunnerEnvelopeSchema, type RunnerEnvelope } from "../../../shared/contracts/protocol.ts";
+import { type RunnerEnvelope, RunnerEnvelopeSchema } from "../../../shared/contracts/protocol.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
+import type { RunnerSemanticAcceptance } from "./execution-authority.ts";
 
-type Accepted = Readonly<{ accepted: true }>;
+type Accepted = Readonly<{
+  accepted: true;
+  disposition?: "APPLIED" | "REJECTED";
+  response?: RunnerSemanticAcceptance["response"];
+}>;
 type Routed = Accepted | Readonly<{ accepted: false; code: string }>;
 
 type Dependencies = Readonly<{
@@ -13,16 +18,35 @@ type Dependencies = Readonly<{
   ) => Promise<Result<unknown>>;
   acknowledgeDelivery: (deliveryId: string, semanticDigest: string) => Routed;
   acceptSemantic: (
-    body: Exclude<RunnerEnvelope["body"], Readonly<{ kind: "HEARTBEAT" }>>,
+    body: Exclude<
+      RunnerEnvelope["body"],
+      Readonly<{
+        kind: "HEARTBEAT" | "HEADLESS_OUTPUT_CHUNK" | "OPERATION_ACKNOWLEDGEMENT" | "GATE_EVENT";
+      }>
+    >,
     actor: VerifiedRunnerPrincipal,
-  ) => Promise<Result<unknown>>;
+  ) => Promise<Result<RunnerSemanticAcceptance>>;
   acceptOutput: (
     body: Extract<RunnerEnvelope["body"], Readonly<{ kind: "HEADLESS_OUTPUT_CHUNK" }>>,
   ) => Routed;
+  acceptGateEvent: (
+    body: Extract<RunnerEnvelope["body"], Readonly<{ kind: "GATE_EVENT" }>>,
+    actor: VerifiedRunnerPrincipal,
+  ) => Promise<Result<unknown>>;
 }>;
 
 function fromResult(result: Result<unknown>): Routed {
   return result.ok ? { accepted: true } : { accepted: false, code: result.error.code };
+}
+
+function fromSemanticResult(result: Result<RunnerSemanticAcceptance>): Routed {
+  return result.ok
+    ? {
+        accepted: true,
+        disposition: result.value.disposition,
+        ...(result.value.response ? { response: result.value.response } : {}),
+      }
+    : { accepted: false, code: result.error.code };
 }
 
 export function createRunnerInboundRouter(dependencies: Dependencies) {
@@ -45,7 +69,10 @@ export function createRunnerInboundRouter(dependencies: Dependencies) {
       if (body.kind === "HEADLESS_OUTPUT_CHUNK") {
         return dependencies.acceptOutput(body);
       }
-      return fromResult(await dependencies.acceptSemantic(body, dependencies.principal));
+      if (body.kind === "GATE_EVENT") {
+        return fromResult(await dependencies.acceptGateEvent(body, dependencies.principal));
+      }
+      return fromSemanticResult(await dependencies.acceptSemantic(body, dependencies.principal));
     },
   };
 }

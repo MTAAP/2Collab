@@ -1,14 +1,25 @@
+import { createHash } from "node:crypto";
 import type { VerifiedRunnerPrincipal } from "../../../shared/contracts/actors.ts";
-import { RunnerEnvelopeSchema, type RunnerEnvelope } from "../../../shared/contracts/protocol.ts";
+import {
+  type RunnerEnvelope,
+  RunnerEnvelopeSchema,
+  type ServerEnvelope,
+} from "../../../shared/contracts/protocol.ts";
+import { createInMemoryRunnerProtocolChannel } from "./protocol.ts";
+import type { createRunnerChannel } from "./runner-channel.ts";
 import {
   createRunnerUpgradeAuthenticator,
   type RunnerUpgradeAuthenticationAuthority,
 } from "./upgrade-auth.ts";
-import { createInMemoryRunnerProtocolChannel } from "./protocol.ts";
-import type { createRunnerChannel } from "./runner-channel.ts";
 
 type RunnerChannel = ReturnType<typeof createRunnerChannel>;
-type Routed = Readonly<{ accepted: true }> | Readonly<{ accepted: false; code: string }>;
+type Routed =
+  | Readonly<{
+      accepted: true;
+      disposition?: "APPLIED" | "REJECTED";
+      response?: ServerEnvelope["body"];
+    }>
+  | Readonly<{ accepted: false; code: string }>;
 
 export interface RunnerControlSocket {
   readonly data: unknown;
@@ -37,6 +48,7 @@ type CoreDependencies = Readonly<{
   createRouter: (
     principal: VerifiedRunnerPrincipal,
     currentFence: () => boolean,
+    connectionId: string,
   ) => Readonly<{ route(envelope: RunnerEnvelope): Promise<Routed> }>;
 }>;
 
@@ -76,6 +88,28 @@ function createCore(dependencies: CoreDependencies) {
   const sessions = new Set<Session>();
   const bySocket = new WeakMap<object, Session>();
   let quiesced = false;
+  const acceptedEvents = new Map<
+    string,
+    Readonly<{
+      digest: string;
+      disposition: "APPLIED" | "REJECTED";
+      response?: ServerEnvelope["body"];
+    }>
+  >();
+  const maximumAcceptedEvents = 32_768;
+
+  const eventFacts = (
+    principal: VerifiedRunnerPrincipal,
+    envelope: RunnerEnvelope,
+  ): Readonly<{ key: string; eventId: string; digest: string }> | null => {
+    const body = envelope.body;
+    if (body.kind === "HEARTBEAT" || body.kind === "HEADLESS_OUTPUT_CHUNK") return null;
+    return {
+      key: `${principal.runnerId}:${body.eventId}`,
+      eventId: body.eventId,
+      digest: createHash("sha256").update(JSON.stringify(body), "utf8").digest("hex"),
+    };
+  };
 
   const cancelTimer = (session: Session): void => {
     if (session.timer !== undefined) scheduler.clearTimeout(session.timer);
@@ -125,12 +159,15 @@ function createCore(dependencies: CoreDependencies) {
       principal,
       ...registered,
       protocol,
-      router: dependencies.createRouter(principal, () =>
-        dependencies.channel.isCurrent(
-          principal.runnerId,
-          registered.connectionId,
-          registered.fence,
-        ),
+      router: dependencies.createRouter(
+        principal,
+        () =>
+          dependencies.channel.isCurrent(
+            principal.runnerId,
+            registered.connectionId,
+            registered.fence,
+          ),
+        registered.connectionId,
       ),
       effects: Promise.resolve(),
       closed: false,
@@ -159,6 +196,9 @@ function createCore(dependencies: CoreDependencies) {
         return;
       }
       scheduleTimeout(session, 30);
+      void dependencies.channel
+        .resendPending(session.principal.runnerId)
+        .catch(() => close(session, 1011, "INTERNAL_ERROR"));
       return;
     }
     if (result.duplicate || typeof message !== "string") return;
@@ -177,9 +217,64 @@ function createCore(dependencies: CoreDependencies) {
     if (envelope.data.body.kind === "HEARTBEAT") scheduleTimeout(session, 30);
     session.effects = session.effects
       .then(async () => {
+        const facts = eventFacts(session.principal, envelope.data);
+        const prior = facts ? acceptedEvents.get(facts.key) : undefined;
+        if (facts && prior !== undefined) {
+          if (prior.digest !== facts.digest) {
+            close(session, 1002, "SEMANTIC_EVENT_CONFLICT");
+            return;
+          }
+          if (
+            prior.response &&
+            !dependencies.channel.sendTransient(session.principal.runnerId, prior.response)
+          ) {
+            return;
+          }
+          dependencies.channel.sendTransient(session.principal.runnerId, {
+            kind: "SEMANTIC_EVENT_ACK",
+            eventId: facts.eventId,
+            disposition: "DUPLICATE",
+          });
+          return;
+        }
         const routed = await session.router.route(envelope.data);
         if (!routed.accepted && routed.code === "CONNECTION_FENCED") {
           close(session, 4001, "CONNECTION_FENCED");
+          return;
+        }
+        if (envelope.data.body.kind === "HEARTBEAT" && routed.accepted) {
+          const receivedAt = dependencies.now();
+          dependencies.channel.sendTransient(session.principal.runnerId, {
+            kind: "HEARTBEAT_ACK",
+            receivedAt,
+            nextHeartbeatAt: receivedAt + 10,
+          });
+          return;
+        }
+        if (facts) {
+          if (routed.accepted) {
+            const accepted = {
+              digest: facts.digest,
+              disposition: routed.disposition ?? "APPLIED",
+              ...(routed.response ? { response: routed.response } : {}),
+            } as const;
+            acceptedEvents.set(facts.key, accepted);
+            if (acceptedEvents.size > maximumAcceptedEvents) {
+              const oldest = acceptedEvents.keys().next().value;
+              if (oldest !== undefined) acceptedEvents.delete(oldest);
+            }
+            if (
+              accepted.response &&
+              !dependencies.channel.sendTransient(session.principal.runnerId, accepted.response)
+            ) {
+              return;
+            }
+          }
+          dependencies.channel.sendTransient(session.principal.runnerId, {
+            kind: "SEMANTIC_EVENT_ACK",
+            eventId: facts.eventId,
+            disposition: routed.accepted ? (routed.disposition ?? "APPLIED") : "REJECTED",
+          });
         }
       })
       .catch(() => close(session, 1011, "INTERNAL_ERROR"));

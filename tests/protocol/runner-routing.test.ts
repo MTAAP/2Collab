@@ -31,7 +31,7 @@ describe("runner inbound semantic routing", () => {
       currentFence: () => true,
       heartbeat: async (command) => {
         calls.push(["heartbeat", command]);
-        return { ok: true, value: { accepted: true } };
+        return { ok: true, value: { disposition: "APPLIED" } };
       },
       acknowledgeDelivery: (deliveryId, digest) => {
         calls.push(["delivery", { deliveryId, digest }]);
@@ -39,11 +39,15 @@ describe("runner inbound semantic routing", () => {
       },
       acceptSemantic: async (body, actor) => {
         calls.push(["semantic", { body, actor }]);
-        return { ok: true, value: { accepted: true } };
+        return { ok: true, value: { disposition: "APPLIED" } };
       },
       acceptOutput: (body) => {
         calls.push(["output", body]);
         return { accepted: true };
+      },
+      acceptGateEvent: async (body, actor) => {
+        calls.push(["gate", { body, actor }]);
+        return { ok: true, value: { accepted: true } };
       },
     });
 
@@ -52,6 +56,7 @@ describe("runner inbound semantic routing", () => {
       await router.route(
         envelope({
           kind: "OPERATION_ACKNOWLEDGEMENT",
+          eventId: "event_delivery_1",
           deliveryId: "delivery_1",
           semanticDigest: "a".repeat(64),
         }),
@@ -61,12 +66,17 @@ describe("runner inbound semantic routing", () => {
       await router.route(
         envelope({
           kind: "ATTEMPT_EVENT",
-          attemptId: "attempt_1",
-          event: "PROCESS_STARTED",
-          observedAt: 1_000,
+          eventId: "event_attempt_1",
+          payload: {
+            runId: "run_1",
+            expectedRunRevision: 1,
+            attemptId: "attempt_1",
+            expectedAttemptRevision: 1,
+            event: { kind: "PROCESS_STARTED", observedAt: 1_000 },
+          },
         }),
       ),
-    ).toEqual({ accepted: true });
+    ).toEqual({ accepted: true, disposition: "APPLIED" });
     expect(
       await router.route(
         envelope({
@@ -107,11 +117,15 @@ describe("runner inbound semantic routing", () => {
       },
       acceptSemantic: async () => {
         effects += 1;
-        return { ok: true, value: { accepted: true } };
+        return { ok: true, value: { disposition: "APPLIED" } };
       },
       acceptOutput: () => {
         effects += 1;
         return { accepted: true };
+      },
+      acceptGateEvent: async () => {
+        effects += 1;
+        return { ok: true, value: { accepted: true } };
       },
     });
     expect(await router.route(envelope({ kind: "HEARTBEAT" }))).toEqual({

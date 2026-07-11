@@ -1,6 +1,18 @@
 import { z } from "zod";
+import {
+  AcceptAttemptEventPayloadSchema,
+  AuthorizeOperationPayloadSchema,
+  ConsumePermitPayloadSchema,
+  RecordCheckpointPayloadSchema,
+  RecordEvidencePayloadSchema,
+  RecordRunResultPayloadSchema,
+  ReleaseAuthoritySessionPayloadSchema,
+  RenewAuthoritySessionPayloadSchema,
+} from "./commands.ts";
+import { ReferenceFirstBootstrapEnvelopeSchema } from "./context.ts";
 import { CommitShaSchema, IdentifierSchema, InstantSchema, Sha256Schema } from "./ids.ts";
-import { BootstrapEnvelopeSchema } from "./context.ts";
+import { RetryDispositionSchema } from "./result.ts";
+import { AuthoritySessionViewSchema } from "./runs.ts";
 
 export const RunnerOperationSchema = z.discriminatedUnion("kind", [
   z
@@ -96,6 +108,7 @@ export const RunnerMessageBodySchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("OPERATION_ACKNOWLEDGEMENT"),
+      eventId: IdentifierSchema,
       deliveryId: IdentifierSchema,
       semanticDigest: Sha256Schema,
     })
@@ -103,68 +116,71 @@ export const RunnerMessageBodySchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("CONSUME_DISPATCH_PERMIT"),
-      attemptId: IdentifierSchema,
-      permit: z.string().min(32).max(8_192),
+      eventId: IdentifierSchema,
+      requestId: IdentifierSchema,
+      payload: ConsumePermitPayloadSchema.omit({
+        runnerId: true,
+        runnerEpoch: true,
+        connectionId: true,
+      }),
     })
     .strict(),
   z
     .object({
       kind: z.literal("RENEW_AUTHORITY_SESSION"),
-      attemptId: IdentifierSchema,
-      expectedFence: z.number().int().positive(),
+      eventId: IdentifierSchema,
+      requestId: IdentifierSchema,
+      payload: RenewAuthoritySessionPayloadSchema.omit({ runnerEpoch: true }),
     })
     .strict(),
   z
     .object({
       kind: z.literal("RELEASE_AUTHORITY_SESSION"),
-      attemptId: IdentifierSchema,
-      expectedFence: z.number().int().positive(),
+      eventId: IdentifierSchema,
+      requestId: IdentifierSchema,
+      payload: ReleaseAuthoritySessionPayloadSchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("AUTHORIZE_OPERATION"),
-      attemptId: IdentifierSchema,
+      eventId: IdentifierSchema,
       requestId: IdentifierSchema,
-      operationDigest: Sha256Schema,
+      payload: AuthorizeOperationPayloadSchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("ATTEMPT_EVENT"),
-      attemptId: IdentifierSchema,
-      event: z.enum(["PROCESS_STARTED", "PROCESS_EXITED", "TERMINATION_CONFIRMED"]),
-      observedAt: InstantSchema,
+      eventId: IdentifierSchema,
+      payload: AcceptAttemptEventPayloadSchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("CHECKPOINT"),
-      attemptId: IdentifierSchema,
-      checkpointId: IdentifierSchema,
-      sequence: z.number().int().nonnegative(),
+      eventId: IdentifierSchema,
+      payload: RecordCheckpointPayloadSchema.omit({ runnerId: true }),
     })
     .strict(),
   z
     .object({
       kind: z.literal("EVIDENCE"),
-      attemptId: IdentifierSchema,
-      evidenceId: IdentifierSchema,
-      evidenceKind: z.enum(["GIT_REFERENCE", "CHANGED_PATHS", "GATE_RESULT"]),
-      digest: Sha256Schema,
+      eventId: IdentifierSchema,
+      payload: RecordEvidencePayloadSchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("RUN_RESULT"),
-      attemptId: IdentifierSchema,
-      resultDigest: Sha256Schema,
-      disposition: z.enum(["SUCCEEDED", "FAILED", "CANCELLED"]),
+      eventId: IdentifierSchema,
+      payload: RecordRunResultPayloadSchema,
     })
     .strict(),
   z
     .object({
       kind: z.literal("GATE_EVENT"),
+      eventId: IdentifierSchema,
       gateEvaluationId: IdentifierSchema,
       event: z.enum(["STARTED", "COMPLETED", "TERMINATED"]),
       observedAt: InstantSchema,
@@ -196,10 +212,10 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
       attemptId: IdentifierSchema,
       dispatchPermit: z.string().min(32).max(8_192),
       goal: z.string().min(1).max(16_384),
-      bootstrap: BootstrapEnvelopeSchema,
+      bootstrap: ReferenceFirstBootstrapEnvelopeSchema,
       projectMappingRevision: z.number().int().positive(),
       repositoryMode: z.enum(["INSPECT_ONLY", "MUTATING"]),
-      repositoryAssurance: z.enum(["ADVISORY", "STRICT"]),
+      repositoryAssurance: z.enum(["ADVISORY", "ENFORCED"]),
       baseRevision: CommitShaSchema,
       host: z.enum(["NATIVE", "ORCA"]),
       interaction: z.enum(["HEADLESS", "INTERACTIVE"]),
@@ -241,9 +257,35 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("AUTHORITY_RESPONSE"),
       requestId: IdentifierSchema,
-      disposition: z.enum(["AUTHORIZED", "DENIED", "STALE"]),
-      authorizationId: IdentifierSchema.optional(),
-      expiresAt: InstantSchema.optional(),
+      result: z.discriminatedUnion("kind", [
+        z
+          .object({ kind: z.literal("CONSUME_PERMIT"), session: AuthoritySessionViewSchema })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("RENEW_AUTHORITY_SESSION"),
+            session: AuthoritySessionViewSchema,
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("AUTHORIZE_OPERATION"),
+            authorizationId: IdentifierSchema,
+            operationDigest: Sha256Schema,
+            expiresAt: InstantSchema,
+          })
+          .strict(),
+        z
+          .object({ kind: z.literal("RELEASE_AUTHORITY_SESSION"), released: z.literal(true) })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("ERROR"),
+            code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+            retry: RetryDispositionSchema,
+          })
+          .strict(),
+      ]),
     })
     .strict(),
   z

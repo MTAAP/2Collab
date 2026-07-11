@@ -83,7 +83,7 @@ export const BootstrapEnvelopeSchema = z
     contextRecipe: z
       .object({
         id: IdentifierSchema,
-        version: RevisionSchema,
+        version: z.number().int().positive(),
         digest: Sha256Schema,
       })
       .strict(),
@@ -111,19 +111,71 @@ export type ContextOmissionReason =
   | "CATEGORY_LIMIT"
   | "TOTAL_LIMIT";
 
-export type ReferenceFirstBootstrapEnvelope = Readonly<{
-  schemaVersion: 1;
-  contextRecipe: Readonly<{ id: string; version: number; digest: string }>;
-  references: readonly Readonly<{
-    category: ContextCategory;
-    referenceId: string;
-    observedRevision: string;
-    status: ContextReferenceStatus;
-    authoredPreview?: string;
-  }>[];
-  omissions: readonly Readonly<{
-    category: ContextCategory;
-    referenceId: string;
-    reason: ContextOmissionReason;
-  }>[];
-}>;
+const ContextCategorySchema = z.enum([
+  "COORDINATION",
+  "SOURCE",
+  "REPOSITORY",
+  "PUBLISHED_GIT_REFERENCE",
+  "INSTRUCTION",
+  "CHECKPOINT",
+  "EVIDENCE",
+  "GATE",
+]);
+
+const ReferenceFirstContextReferenceSchema = z
+  .object({
+    category: ContextCategorySchema,
+    referenceId: z.string().min(1).max(256),
+    observedRevision: z.string().min(1).max(128),
+    status: z.enum(["FRESH", "STALE"]),
+    authoredPreview: z
+      .string()
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 65_536)
+      .optional(),
+  })
+  .strict();
+
+const ReferenceFirstContextOmissionSchema = z
+  .object({
+    category: ContextCategorySchema,
+    referenceId: z.string().min(1).max(256),
+    reason: z.enum(["FORBIDDEN", "UNAVAILABLE", "DUPLICATE", "CATEGORY_LIMIT", "TOTAL_LIMIT"]),
+  })
+  .strict();
+
+export const ReferenceFirstBootstrapEnvelopeSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    contextRecipe: z
+      .object({
+        id: IdentifierSchema,
+        version: z.number().int().positive(),
+        digest: Sha256Schema,
+      })
+      .strict(),
+    references: z.array(ReferenceFirstContextReferenceSchema).max(64),
+    omissions: z.array(ReferenceFirstContextOmissionSchema).max(4_096),
+  })
+  .strict()
+  .refine(
+    (envelope) =>
+      envelope.references.reduce(
+        (bytes, reference) =>
+          bytes +
+          (reference.authoredPreview === undefined
+            ? 0
+            : new TextEncoder().encode(reference.authoredPreview).byteLength),
+        0,
+      ) <= 65_536,
+    "Authored previews exceed the bootstrap envelope byte limit",
+  )
+  .refine((envelope) => {
+    const keys = envelope.references.map(
+      (reference) => `${reference.category}\u0000${reference.referenceId}`,
+    );
+    return new Set(keys).size === keys.length;
+  }, "Bootstrap references must be unique");
+
+export type ReferenceFirstBootstrapEnvelope = Readonly<
+  z.infer<typeof ReferenceFirstBootstrapEnvelopeSchema>
+>;

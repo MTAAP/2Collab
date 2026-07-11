@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { createRunnerSupervisor } from "../../src/runner/supervisor.ts";
-import { createCodexExecutionAdapter } from "../../src/runner/adapters/runtime/codex.ts";
 import { createNativeExecutionHost } from "../../src/runner/adapters/host/native.ts";
+import { createCodexExecutionAdapter } from "../../src/runner/adapters/runtime/codex.ts";
 import { createRunnerEnvironmentBuilder } from "../../src/runner/environment.ts";
+import { createRunnerSupervisor } from "../../src/runner/supervisor.ts";
 import type { RunnerEnvelope } from "../../src/shared/contracts/protocol.ts";
 
 const profile = {
@@ -14,14 +14,12 @@ const profile = {
   fingerprint: "a".repeat(64),
 } as const;
 
-function outputTransport(sent: RunnerEnvelope[] = []) {
-  let message = 0;
+type OutputBody = Extract<RunnerEnvelope["body"], { kind: "HEADLESS_OUTPUT_CHUNK" }>;
+
+function outputTransport(sent: OutputBody[] = []) {
   return {
-    protocolVersion: "1.0",
-    now: () => 1_000,
-    messageId: () => `output_message_${++message}`,
-    send: async (envelope: RunnerEnvelope) => {
-      sent.push(envelope);
+    send: async (body: OutputBody) => {
+      sent.push(body);
     },
   };
 }
@@ -29,7 +27,7 @@ function outputTransport(sent: RunnerEnvelope[] = []) {
 describe("runner supervisor", () => {
   test("consumes a permit immediately before one reserved process start", async () => {
     const order: string[] = [];
-    const output: RunnerEnvelope[] = [];
+    const output: OutputBody[] = [];
     let starts = 0;
     const host = createNativeExecutionHost({
       async start(input) {
