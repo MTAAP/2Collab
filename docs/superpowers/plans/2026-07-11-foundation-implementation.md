@@ -763,25 +763,30 @@ git commit -m "feat: add secure runner registry"
 **Requirements:** transport portion of `FND-012`, `FND-004`, and `FND-007`; durable storage/process proofs remain `IN_PROGRESS` until Tasks 9, 10, and 14.
 
 **Files:**
-- Create: `src/server/adapters/wss/{protocol,runner-channel,revocations}.ts`
-- Create: `src/runner/transport/wss-client.ts`
+- Create: `src/server/adapters/wss/{protocol,upgrade-auth,connection-registry,runner-channel,rate-limits,live-output,revocations}.ts`
+- Create: `src/runner/transport/{wss-client,reconnect}.ts`
 - Modify: `src/shared/contracts/protocol.ts`
-- Create: `tests/protocol/runner-data-plane.test.ts`
+- Modify: `src/shared/contracts/context.ts`
+- Create: `tests/protocol/runner-{handshake,codec,ordering,limits,output,reconnect,revocation,shutdown}.test.ts`
 - Create: `tests/fixtures/runner-channel.ts`
 
 **Interfaces:**
-- Consumes: shared runner frame schemas and `ExecutionAuthority.execute`.
-- Produces: private `RunnerControlPort`, `BunWssRunnerControlAdapter`, `InMemoryRunnerControlAdapter`.
+- Consumes: Task 6 `RunnerAuthenticationAuthority`/heartbeat, shared execution commands, committed
+  dispatch outbox/ack port, semantic-event sink, `ExecutionAuthority`, and injected clocks/randomness.
+- Produces: separate handshake and directional codecs, `RunnerConnectionRegistry`, ephemeral
+  `LiveOutputHub`, private `RunnerControlPort`, `BunWssRunnerControlAdapter`, and the same conformance-
+  tested `InMemoryRunnerControlAdapter`.
 
 - [ ] **Step 1: Write failing frame and replay tests**
 
 ```ts
-test("rejects commands, oversized frames, and duplicate messages", async () => {
+test("rejects commands, oversized frames, and changed replay payloads", async () => {
   const channel = createInMemoryRunnerChannel({ maximumFrameBytes: 65_536 });
   expect(await channel.receiveText('{"kind":"SHELL","command":"rm -rf /"}')).toEqual({ accepted: false, code: "FRAME_KIND_DENIED" });
   const wire = encodeRunnerFrame(validFrame({ messageId: "msg_1", sequence: 1 }));
   expect(await channel.receiveText(wire)).toEqual({ accepted: true });
-  expect(await channel.receiveText(wire)).toEqual({ accepted: false, code: "FRAME_REPLAY" });
+  expect(await channel.receiveText(wire)).toEqual({ accepted: true, duplicate: true });
+  expect(await channel.receiveText(changedPayloadSameId(wire))).toEqual({ accepted: false, code: "FRAME_ID_CONFLICT" });
   const oversized = wire.replace("{", `{${" ".repeat(65_537)}`);
   expect(await channel.receiveText(oversized)).toEqual({ accepted: false, code: "FRAME_TOO_LARGE" });
 });
@@ -789,7 +794,7 @@ test("rejects commands, oversized frames, and duplicate messages", async () => {
 
 - [ ] **Step 2: Verify RED**
 
-Run: `bun test tests/protocol/runner-data-plane.test.ts`
+Run: `bun test tests/protocol/runner-*.test.ts`
 
 Expected: FAIL because runner-channel fixtures and adapters are missing.
 
@@ -797,23 +802,98 @@ Expected: FAIL because runner-channel fixtures and adapters are missing.
 
 ```ts
 export interface RunnerControlPort {
-  dispatchCommitted(outboxIds: readonly string[]): Promise<Result<readonly SemanticDeliveryReceipt[]>>;
-  closeStaleConnections(revocation: CommittedRunnerConnectionRevocation): Promise<Result<ConnectionCloseReceipt>>;
+  inspectCurrentConnection(runnerId: RegisteredRunnerId): CurrentConnection | undefined;
+  dispatchCommitted(outboxIds: readonly string[]): Promise<readonly DeliveryReceipt[]>;
+  applyCommittedDisposition(disposition: CommittedRunnerTransportDisposition): Promise<TransportReceipt>;
+  quiesce(deadline: Instant): Promise<QuiesceReceipt>;
 }
 ```
 
-The data plane has authenticated upgrade, `CLIENT_HELLO`/`SERVER_WELCOME` range negotiation, one current connection fence per runner, and separate strict direction-specific envelopes. Each origin assigns a message ID plus monotonically increasing per-connection sequence; actor/runner/epoch come from the authenticated connection, and durable semantic effects retain command/event idempotency across reconnect. Raw UTF-8 bytes are bounded before JSON parsing, binary and compressed application frames are rejected, and time/order/rate/assignment/backpressure checks precede `ExecutionAuthority.execute`. The committed outbox contains only safe permit claims/hash; the signed short-lived capability is reconstructed after commit. Socket send, semantic acknowledgement, and process start remain separate facts. Revocation transport accepts only a committed typed disposition and never infers process termination from a closed socket.
+`/runner/v1` authenticates headers before upgrade through `RunnerAuthenticationAuthority`; runner access
+is runner-audience, DPoP-bound to exact GET/normalized WSS URI/token hash/key/nonce/time/replay, and ten
+minutes maximum. Tokens/proofs in query, cookie, subprotocol, log, or close reason are rejected.
+Production TLS validation has no bypass. Authenticated upgrade immediately fences the prior connection;
+one concurrent upgrade wins. A 10-second bounded `CLIENT_HELLO` (at most eight distinct positive major/
+minor ranges) negotiates the highest common version and returns `SERVER_WELCOME` with unpredictable
+connection ID, increasing fence, and effective limits. No application traffic before welcome;
+duplicate/downgrade/no-overlap/version changes fail.
+
+Separate strict `ServerEnvelope` and `RunnerEnvelope` carry selected version, message ID, positive
+connection sequence, issued/expiry time, and a closed body. Runner/actor/epoch/connection facts derive
+only from authenticated context. Validate exact version, increasing sequence (gaps allowed), expiry,
+30-second future allowance and kind-specific exact IDs. Serialize inbound handling per connection and
+recheck current fence immediately before semantic effect.
+
+Server messages are closed variants: `LAUNCH_ATTEMPT`, `CANCEL_ATTEMPT`, `EXECUTE_LOCAL_GATE`,
+`CANCEL_GATE_EVALUATION`, `AUTHORITY_RESPONSE`, `SEMANTIC_EVENT_ACK`, and `HEARTBEAT_ACK`.
+`LAUNCH_ATTEMPT` contains stable delivery/digest, run/attempt, short-lived permit, bounded goal and
+structured Bootstrap Envelope, project mapping revision, repository mode/assurance/base revision,
+generic host/mode, exact profile version/fingerprint and finite policy/deadline—never runtime switches,
+arguments or environment. Gate messages carry key/revision/approved fingerprint, never command.
+Runner messages are `HEARTBEAT`, `OPERATION_ACKNOWLEDGEMENT`, `CONSUME_DISPATCH_PERMIT`,
+`RENEW_AUTHORITY_SESSION`, `RELEASE_AUTHORITY_SESSION`, `AUTHORIZE_OPERATION`, `ATTEMPT_EVENT`,
+`CHECKPOINT`, `EVIDENCE`, `RUN_RESULT`, `GATE_EVENT`, and `HEADLESS_OUTPUT_CHUNK`. The adapter
+reconstructs internal actors/epochs/connection IDs and routes heartbeat, authority, semantic events,
+delivery acknowledgements and live output to their distinct owners.
+
+Transport dedup keys origin/direction/connection/message ID. Same ID/sequence/digest returns prior
+transport acknowledgement without semantic replay; changed payload conflicts/closes; sequence
+regression has zero effect. Transport IDs reset on reconnect and never become domain idempotency keys.
+Committed server operations retain stable delivery ID/semantic digest across sockets. Socket write is
+`SOCKET_SENT`; only matching semantic acknowledgement is delivered. Disconnect leaves outbox pending;
+reconnect resends with new transport ID/sequence. A 10-second operation-ack timeout is bounded by the
+30-second permit; timeout leaves the attempt PENDING/retryable and never implies process start.
+Reconnect may receive the same unconsumed permit but cannot mint/extend it; stale fence consumption
+fails.
+
+Codecs inspect opcode/raw bytes, reject binary/compression/invalid UTF-8, measure bytes before JSON,
+and enforce 65,536-byte frames. Welcome advertises runner/run token buckets 100/50 frames/sec with
+200/100 bursts; send queue 1,024 items and 1 MiB; heartbeat 10 seconds; offline 30 seconds; output
+chunk 16 KiB and per-attempt reconnect buffer 1 MiB; reconnect backoff 30 seconds. Both inbound and
+outbound queues are bounded; either item/byte ceiling rejects enqueue without claiming delivery.
+Critical termination is prioritized or forces safe close while leaving intent unresolved. Invalid
+authenticated frames consume runner rate. A process-wide live-output ceiling is 64 MiB with
+deterministic oldest eviction and visible truncation.
+
+Only valid `HEARTBEAT` updates registry at server receive time; ping/pong/other traffic does not.
+Missing heartbeat at >=30 seconds closes/derives OFFLINE, never marks attempts LOST (Task 14 owns 90
+seconds). Headless output is a discriminated attempt-or-gate chunk with stream/chunk sequence/
+redaction version/truncation flag. Accept only active HEADLESS work, dedup/gap-mark, keep only in the
+bounded memory hub, and clear on terminal/eviction/shutdown/expiry. Interactive input/output/PTTY/
+attachments have no variant. Output never enters authority, SQLite, backup, outboxes, audit or logs;
+client redaction is required and server scanning is defense-in-depth only.
+
+The runner client states `DISCONNECTED -> AUTHENTICATING -> NEGOTIATING -> ACTIVE -> BACKING_OFF`,
+with exponential injected jitter capped 30 seconds and reset only after stable welcome. Retry network/
+restart/unavailability; stop tight-looping on auth/protocol/permanent policy errors. Reconnect never
+extends attempt/session/grace/deadline/permit, drains durable semantic events only after a new fence,
+and never durably queues live output.
+
+Committed transport disposition is `KEEP_CONNECTION` (deny future dispatch),
+`REQUEST_TERMINATION` (scoped attempts), or `CLOSE_RUNNER_IDENTITY` (new epoch). Exposure/audience/ack
+revocation keeps existing valid sessions; mapping authority requests affected termination; runner/
+member/restore revocation requests termination and closes identity. Send/close yields only
+`REQUESTED|UNREACHABLE`; host evidence later confirms cancellation, otherwise Task 14 may mark LOST.
+Revocation races recheck before send/consume. `quiesce` stops upgrades/dispatch/reconnect, drains only
+to deadline, resolves pending receipts retryably, closes 1012, cancels timers/clears memory, never
+changes attempt lifecycle, and leaves durable outbox pending.
+
+The shared conformance suite runs against Bun and in-memory adapters and covers auth/DPoP/TLS,
+negotiation/fencing, exact 65,536/65,537 and multibyte/invalid/binary/compressed frames, forbidden
+command/path/env/terminal fields, replay/order/async races, rate/refill/queue ceilings, durable resend/
+ack/permit expiry, heartbeat boundaries, output privacy/eviction, reconnect backoff, typed revocation
+and bounded shutdown.
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `bun test tests/protocol/runner-data-plane.test.ts`
+Run: `bun test tests/protocol/runner-*.test.ts`
 
 Expected: PASS; assignment, audience, replay, expiry, size, rate, heartbeat, idle, backpressure, and allowlisted-operation cases are deterministic.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/shared/contracts/protocol.ts src/server/adapters/wss src/runner/transport/wss-client.ts tests/protocol/runner-data-plane.test.ts tests/fixtures/runner-channel.ts
+git add src/shared/contracts/protocol.ts src/shared/contracts/context.ts src/server/adapters/wss src/runner/transport tests/protocol/runner-*.test.ts tests/fixtures/runner-channel.ts
 git commit -m "feat: add typed runner data plane"
 ```
 
