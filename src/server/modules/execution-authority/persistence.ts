@@ -9,16 +9,16 @@ import type {
   RegisteredRunnerId,
 } from "../../../shared/contracts/ids.ts";
 import { IdentifierSchema } from "../../../shared/contracts/ids.ts";
-import type { AttemptView, RunView } from "../../../shared/contracts/runs.ts";
 import type { DomainError, Result } from "../../../shared/contracts/result.ts";
+import type { AttemptView, RunView } from "../../../shared/contracts/runs.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import {
   coordinationRecordView,
   resolveCoordinationForLaunch,
 } from "../coordination-records/registry.ts";
 import {
-  LaunchAuthorityFactsSchema,
   type CommittedLaunch,
+  LaunchAuthorityFactsSchema,
   type LaunchPersistence,
   type LaunchPersistenceInput,
 } from "./contract.ts";
@@ -155,7 +155,7 @@ function currentFactsMatch(database: Database, input: LaunchPersistenceInput): b
     .get(
       command.execution.runnerId,
       command.execution.profileVersionId,
-      authority.profileVersion,
+      command.execution.expectedProfileVersion,
       authority.profileFingerprint,
     );
   const exactBaseMatches =
@@ -174,6 +174,7 @@ function currentFactsMatch(database: Database, input: LaunchPersistenceInput): b
     runner.security_digest !== authority.securityDigest ||
     mapping?.count !== 1 ||
     profile?.count !== 1 ||
+    authority.profileVersion !== command.execution.expectedProfileVersion ||
     !exactBaseMatches
   ) {
     return false;
@@ -266,6 +267,8 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
         permit: dependencies.id("permit"),
         outbox: dependencies.id("outbox"),
         audit: dependencies.id("audit"),
+        guard: dependencies.id("guard"),
+        guardOverride: dependencies.id("guard_override"),
       };
       if (
         !Number.isSafeInteger(now) ||
@@ -292,6 +295,7 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
       let snapshotDigest: string;
       let claimsHash: string;
       let semanticDigest: string;
+      let connectorEpochsDigest: string;
       try {
         const snapshotHash = await digest(snapshotCanonical);
         if (snapshotHash.byteLength !== 32) throw new Error("INVALID_DIGEST");
@@ -315,10 +319,16 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
             permitId: ids.permit,
           }),
         );
-        if (claims.byteLength !== 32 || semantic.byteLength !== 32)
+        const connectorEpochs = await digest(JSON.stringify(input.authority.connectorEpochs));
+        if (
+          claims.byteLength !== 32 ||
+          semantic.byteLength !== 32 ||
+          connectorEpochs.byteLength !== 32
+        )
           throw new Error("INVALID_DIGEST");
         claimsHash = hex(claims);
         semanticDigest = hex(semantic);
+        connectorEpochsDigest = hex(connectorEpochs);
       } catch {
         return error("RUN_LAUNCH_STORAGE_FAILED", "Run launch failed.", "SAME_INPUT");
       }
@@ -337,6 +347,37 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
             now,
             afterWrite,
           });
+          const heldGuard =
+            input.command.repository.mode === "MUTATING"
+              ? dependencies.database
+                  .query<{ id: string; run_id: string; fence: number; revision: number }, [string]>(
+                    `SELECT id, run_id, fence, revision FROM work_item_mutation_guards
+                     WHERE coordination_record_id = ? AND state = 'HELD'`,
+                  )
+                  .get(record.id)
+              : null;
+          if (input.command.repository.mode === "MUTATING" && heldGuard) {
+            const override = input.command.mutationGuardOverride;
+            const guardedRun = dependencies.database
+              .query<{ revision: number; state: string }, [string]>(
+                "SELECT revision, state FROM agent_runs WHERE id = ?",
+              )
+              .get(heldGuard.run_id);
+            if (!override) throw new Error("MUTATION_GUARD_HELD");
+            if (
+              input.command.actor.kind !== "MEMBER" ||
+              override.guardedRunId !== heldGuard.run_id ||
+              override.expectedGuardedRunRevision !== guardedRun?.revision ||
+              override.expectedGuardFence !== heldGuard.fence ||
+              override.expectedGuardRevision !== heldGuard.revision ||
+              !guardedRun ||
+              ["COMPLETED", "FAILED", "CANCELLED"].includes(guardedRun.state)
+            ) {
+              throw new Error("MUTATION_GUARD_OVERRIDE_STALE");
+            }
+          } else if (input.command.mutationGuardOverride) {
+            throw new Error("MUTATION_GUARD_OVERRIDE_INVALID");
+          }
           const baseOrigin =
             input.command.repository.base.kind === "EXACT" ? "EXACT" : "RESOLVED_DEFAULT";
           dependencies.database
@@ -396,6 +437,83 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
               now,
             );
           afterWrite("agent_runs");
+          dependencies.database
+            .query(
+              `INSERT INTO run_execution_policies(
+                 run_id, maximum_attempts, deadline_at, permit_seconds,
+                 authority_session_seconds, authority_renewal_seconds,
+                 mutation_disconnect_grace_seconds, connector_epochs_digest, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              ids.run,
+              input.authority.maximumAttempts,
+              input.authority.deadlineAt,
+              input.authority.permitSeconds,
+              input.authority.authoritySessionSeconds,
+              input.authority.authorityRenewalSeconds,
+              input.authority.mutationDisconnectGraceSeconds,
+              connectorEpochsDigest,
+              now,
+            );
+          afterWrite("run_execution_policies");
+          for (const [connectorId, connectorEpoch] of Object.entries(
+            input.authority.connectorEpochs,
+          )) {
+            dependencies.database
+              .query(
+                `INSERT INTO run_execution_connector_epochs(run_id, connector_id, connector_epoch)
+                 VALUES (?, ?, ?)`,
+              )
+              .run(ids.run, connectorId, connectorEpoch);
+          }
+          if (Object.keys(input.authority.connectorEpochs).length > 0) {
+            afterWrite("run_execution_connector_epochs");
+          }
+          if (input.command.repository.mode === "MUTATING") {
+            if (!heldGuard) {
+              dependencies.database
+                .query(
+                  `INSERT INTO work_item_mutation_guards(
+                     id, coordination_record_id, run_id, fence, state, revision, reserved_at
+                   ) VALUES (?, ?, ?, 1, 'HELD', 1, ?)`,
+                )
+                .run(ids.guard, record.id, ids.run, now);
+              afterWrite("work_item_mutation_guards");
+            } else {
+              const override = input.command.mutationGuardOverride;
+              if (!override) throw new Error("MUTATION_GUARD_OVERRIDE_INVALID");
+              dependencies.database
+                .query(
+                  `INSERT INTO mutation_guard_overrides(
+                     id, coordination_record_id, mutation_guard_id, guarded_run_id,
+                     guarded_run_revision, colliding_run_id, colliding_run_revision,
+                     guard_fence, guard_revision, actor_member_id, reason, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+                )
+                .run(
+                  ids.guardOverride,
+                  record.id,
+                  heldGuard.id,
+                  heldGuard.run_id,
+                  override.expectedGuardedRunRevision,
+                  ids.run,
+                  heldGuard.fence,
+                  heldGuard.revision,
+                  actor.id,
+                  override.reason,
+                  now,
+                );
+              dependencies.database
+                .query(
+                  `UPDATE work_item_mutation_guards
+                   SET fence = fence + 1, revision = revision + 1
+                   WHERE id = ? AND fence = ? AND revision = ? AND state = 'HELD'`,
+                )
+                .run(heldGuard.id, heldGuard.fence, heldGuard.revision);
+              afterWrite("mutation_guard_overrides");
+            }
+          }
           dependencies.database
             .query<
               void,
@@ -591,6 +709,15 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
         }
         if (code === "COORDINATION_REVISION_CONFLICT") {
           return error(code, "Coordination Record revision is stale.", "REFRESH");
+        }
+        if (code === "MUTATION_GUARD_HELD") {
+          return error(code, "Work Item Mutation Guard is already held.", "EXPLICIT_RESUME");
+        }
+        if (code === "MUTATION_GUARD_OVERRIDE_STALE") {
+          return error(code, "Mutation Guard override facts are stale.", "REFRESH");
+        }
+        if (code === "MUTATION_GUARD_OVERRIDE_INVALID") {
+          return error(code, "Mutation Guard override is invalid.");
         }
         return error("RUN_LAUNCH_STORAGE_FAILED", "Run launch failed.", "SAME_INPUT");
       }

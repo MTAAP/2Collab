@@ -3,8 +3,8 @@ import {
   CollabCommandSchema,
   CommandResultSchema,
 } from "../../../src/shared/contracts/commands.ts";
-import { EvidenceInputSchema } from "../../../src/shared/contracts/runs.ts";
 import { ResultSchema } from "../../../src/shared/contracts/result.ts";
+import { EvidenceInputSchema } from "../../../src/shared/contracts/runs.ts";
 import { validateImportEdge } from "./dependency-rules.ts";
 
 const actor = {
@@ -34,14 +34,14 @@ function reconciliation(availability: string, observedRevision?: string) {
   };
 }
 
-function cancellation(termination: Record<string, unknown>) {
+function cancellation(termination?: Record<string, unknown>) {
   return {
     ...commandBase,
     kind: "CANCEL_RUN",
     runId: "run_1",
     expectedRunRevision: 2,
     reason: "MEMBER_REQUEST",
-    termination,
+    ...(termination === undefined ? {} : { termination }),
   };
 }
 
@@ -99,6 +99,7 @@ describe("Task 1 second review regressions", () => {
         expectedRunnerEpoch: 1,
         projectMappingRevision: 1,
         profileVersionId: "profile_1",
+        expectedProfileVersion: 1,
         host: "NATIVE",
         interaction: "HEADLESS",
       },
@@ -191,15 +192,13 @@ describe("Task 1 second review regressions", () => {
     );
   });
 
-  test("distinguishes no active attempt from a termination request", () => {
-    expect(CollabCommandSchema.safeParse(cancellation({ kind: "NO_ACTIVE_ATTEMPT" })).success).toBe(
-      true,
-    );
+  test("derives cancellation termination instead of accepting caller authority", () => {
+    expect(CollabCommandSchema.safeParse(cancellation()).success).toBe(true);
     expect(
       CollabCommandSchema.safeParse(
         cancellation({ kind: "REQUEST_TERMINATION", attemptId: "attempt_1" }),
       ).success,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       CollabCommandSchema.safeParse(
         cancellation({ kind: "NO_ACTIVE_ATTEMPT", attemptId: "attempt_1" }),

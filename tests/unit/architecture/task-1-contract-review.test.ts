@@ -42,6 +42,7 @@ function launchCommand(intendedBranch = "feature/contracts") {
       expectedRunnerEpoch: 1,
       projectMappingRevision: 1,
       profileVersionId: "profile_1",
+      expectedProfileVersion: 1,
       host: "NATIVE",
       interaction: "HEADLESS",
     },
@@ -130,7 +131,9 @@ describe("reviewed shared contracts", () => {
     }>();
     expectTypeOf<CommandResultFor<AuthorizeAttempt>>().toMatchTypeOf<{
       kind: "AUTHORIZE_ATTEMPT";
-      dispatch: { state: "QUEUED" };
+      decision: {
+        outcome: "AUTHORIZED" | "WAITING" | "DENIED";
+      };
     }>();
     expectTypeOf<QueryResultFor<InspectRun>>().toMatchTypeOf<{
       kind: "INSPECT_RUN";

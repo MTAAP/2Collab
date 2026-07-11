@@ -32,6 +32,13 @@ import {
 } from "./ids.ts";
 import type { EffectiveRunConfigurationRef } from "./presets.ts";
 import { EffectiveRunConfigurationRefSchema } from "./presets.ts";
+import type { ExecutionSelection, RepositoryRequest, RunnerPolicyReplacement } from "./runners.ts";
+import {
+  EligibleTargetSchema,
+  ExecutionSelectionSchema,
+  GitRefSchema,
+  RepositoryRequestSchema,
+} from "./runners.ts";
 import type {
   AttemptView,
   AuthoritySessionView,
@@ -42,7 +49,6 @@ import type {
   EvidenceRecord,
   ProjectionView,
   QueuedDispatchMetadata,
-  RunResultKind,
   RunView,
 } from "./runs.ts";
 import {
@@ -58,13 +64,6 @@ import {
   QueuedDispatchMetadataSchema,
   RunViewSchema,
 } from "./runs.ts";
-import type { ExecutionSelection, RepositoryRequest, RunnerPolicyReplacement } from "./runners.ts";
-import {
-  EligibleTargetSchema,
-  ExecutionSelectionSchema,
-  GitRefSchema,
-  RepositoryRequestSchema,
-} from "./runners.ts";
 
 export type CommandBase = Readonly<{
   idempotencyKey: IdempotencyKey;
@@ -97,6 +96,13 @@ export type LaunchRun = CommandBase &
     execution: ExecutionSelection;
     effectiveConfiguration: EffectiveRunConfigurationRef;
     workflow?: WorkflowAuthorityRef;
+    mutationGuardOverride?: Readonly<{
+      guardedRunId: AgentRunId;
+      expectedGuardedRunRevision: number;
+      expectedGuardFence: number;
+      expectedGuardRevision: number;
+      reason: string;
+    }>;
   }>;
 
 export type AuthorizeAttempt = CommandBase &
@@ -118,9 +124,6 @@ export type CancelRun = CommandBase &
     runId: AgentRunId;
     expectedRunRevision: number;
     reason: "MEMBER_REQUEST" | "DEADLINE" | "WORKFLOW" | "REVOCATION";
-    termination:
-      | Readonly<{ kind: "NO_ACTIVE_ATTEMPT" }>
-      | Readonly<{ kind: "REQUEST_TERMINATION"; attemptId: ExecutionAttemptId }>;
   }>;
 
 export type ReconciliationObservation =
@@ -178,7 +181,13 @@ export type RecordCheckpoint = CommandBase &
     reason: DurableCheckpoint["reason"];
     requestedAction: DurableCheckpoint["requestedAction"];
     summary: string;
-    publishedCommit?: CommitSha;
+    runnerId: RegisteredRunnerId;
+    worktreeIdentity: string;
+    currentCommit?: CommitSha;
+    recoverableRemoteReference?: DurableCheckpoint["recoverableRemoteReference"];
+    evidenceIds: readonly EvidenceId[];
+    sourceRevisions: Readonly<Record<string, string>>;
+    resumeGuidance: string;
   }>;
 
 export type RecordEvidence = CommandBase &
@@ -190,16 +199,29 @@ export type RecordEvidence = CommandBase &
     evidence: EvidenceInput;
   }>;
 
-export type RecordRunResult = CommandBase &
+type RecordRunResultBase = CommandBase &
   Readonly<{
     kind: "RECORD_RUN_RESULT";
     runId: AgentRunId;
     expectedRunRevision: number;
     attemptId: ExecutionAttemptId;
-    result: RunResultKind;
-    summary: string;
-    evidenceIds: readonly EvidenceId[];
   }>;
+
+export type RecordRunResult = RecordRunResultBase &
+  (
+    | Readonly<{
+        result: "DELIVERED" | "NO_CHANGES";
+        summary: string;
+        evidenceIds: readonly EvidenceId[];
+      }>
+    | Readonly<{
+        result: "BLOCKED" | "ESCALATED";
+        summary: string;
+        reason: string;
+        requestedAction: "RESPOND" | "RESUME" | "SELECT_RUNNER" | "ADOPT_FOLLOW_UP" | "NONE";
+        evidenceIds: readonly EvidenceId[];
+      }>
+  );
 
 export type LinkSourceReference = CommandBase &
   Readonly<{
@@ -214,7 +236,12 @@ export type AcknowledgeCollision = CommandBase &
     kind: "ACKNOWLEDGE_COLLISION";
     coordinationRecordId: CoordinationRecordId;
     expectedRevision: number;
+    guardedRunId: AgentRunId;
+    expectedGuardedRunRevision: number;
     collidingRunId: AgentRunId;
+    expectedCollidingRunRevision: number;
+    expectedGuardFence: number;
+    expectedGuardRevision: number;
     reason: string;
   }>;
 
@@ -446,9 +473,20 @@ export type CommandResult =
     }>
   | Readonly<{
       kind: "AUTHORIZE_ATTEMPT";
-      run: RunView;
-      attempt: AttemptView;
-      dispatch: QueuedDispatchMetadata;
+      decision:
+        | Readonly<{
+            outcome: "AUTHORIZED";
+            run: RunView;
+            attempt: AttemptView;
+            dispatch: QueuedDispatchMetadata;
+          }>
+        | Readonly<{
+            outcome: "WAITING";
+            run: RunView;
+            code: string;
+            retry: "EXPLICIT_RESUME" | "SELECT_ANOTHER_TARGET";
+          }>
+        | Readonly<{ outcome: "DENIED"; code: string }>;
     }>
   | Readonly<{
       kind: "CANCEL_RUN";
@@ -464,7 +502,12 @@ export type CommandResult =
   | Readonly<{ kind: "ACKNOWLEDGE_COLLISION"; record: CoordinationRecordView }>
   | Readonly<{ kind: "CONSUME_PERMIT"; session: AuthoritySessionView }>
   | Readonly<{ kind: "RENEW_AUTHORITY_SESSION"; session: AuthoritySessionView }>
-  | Readonly<{ kind: "AUTHORIZE_OPERATION"; authorizationId: string; expiresAt: number }>
+  | Readonly<{
+      kind: "AUTHORIZE_OPERATION";
+      authorizationId: string;
+      operationDigest: string;
+      expiresAt: number;
+    }>
   | Readonly<{ kind: "RELEASE_AUTHORITY_SESSION"; released: true }>
   | Readonly<{
       kind: "REPLACE_RUNNER_POLICY";
@@ -492,7 +535,100 @@ const RevisionedRunSchema = {
   expectedRunRevision: RevisionSchema,
 };
 
-const SensitiveOperationSchema = z.discriminatedUnion("kind", [
+export const AcceptAttemptEventPayloadSchema = z
+  .object({
+    ...RevisionedRunSchema,
+    attemptId: IdentifierSchema,
+    expectedAttemptRevision: RevisionSchema,
+    event: AttemptEventSchema,
+  })
+  .strict();
+
+const CheckpointReasonSchema = z.enum([
+  "HUMAN_INPUT",
+  "RECOVERY",
+  "MUTATION_LEASE_EXPIRED",
+  "CANCELLATION",
+]);
+const CheckpointRequestedActionSchema = z.enum(["RESPOND", "RESUME", "ADOPT_FOLLOW_UP", "NONE"]);
+const EvidenceIdsSchema = z.array(IdentifierSchema).max(128);
+
+export const RecordCheckpointPayloadSchema = z
+  .object({
+    ...RevisionedRunSchema,
+    attemptId: IdentifierSchema,
+    reason: CheckpointReasonSchema,
+    requestedAction: CheckpointRequestedActionSchema,
+    summary: z.string().min(1).max(2_048),
+    runnerId: IdentifierSchema,
+    worktreeIdentity: IdentifierSchema,
+    currentCommit: CommitShaSchema.optional(),
+    recoverableRemoteReference: z
+      .object({
+        remoteIdentity: z.string().min(1).max(128),
+        remoteRef: GitRefSchema,
+        commitSha: CommitShaSchema,
+        verifiedAt: InstantSchema,
+      })
+      .strict()
+      .optional(),
+    evidenceIds: EvidenceIdsSchema,
+    sourceRevisions: z
+      .record(z.string().min(1).max(256), z.string().min(1).max(128))
+      .refine((revisions) => Object.keys(revisions).length <= 128),
+    resumeGuidance: z.string().min(1).max(2_048),
+  })
+  .strict();
+
+export const RecordEvidencePayloadSchema = z
+  .object({
+    ...RevisionedRunSchema,
+    attemptId: IdentifierSchema.optional(),
+    evidence: EvidenceInputSchema,
+  })
+  .strict();
+
+const RunResultPayloadBase = {
+  ...RevisionedRunSchema,
+  attemptId: IdentifierSchema,
+  summary: z.string().min(1).max(2_048),
+  evidenceIds: EvidenceIdsSchema,
+};
+export const RunResultReasonSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/);
+export const RunResultRequestedActionSchema = z.enum([
+  "RESPOND",
+  "RESUME",
+  "SELECT_RUNNER",
+  "ADOPT_FOLLOW_UP",
+  "NONE",
+]);
+export const RecordRunResultPayloadSchema = z.discriminatedUnion("result", [
+  z.object({ ...RunResultPayloadBase, result: z.literal("DELIVERED") }).strict(),
+  z.object({ ...RunResultPayloadBase, result: z.literal("NO_CHANGES") }).strict(),
+  z
+    .object({
+      ...RunResultPayloadBase,
+      result: z.literal("BLOCKED"),
+      reason: RunResultReasonSchema,
+      requestedAction: RunResultRequestedActionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...RunResultPayloadBase,
+      result: z.literal("ESCALATED"),
+      reason: RunResultReasonSchema,
+      requestedAction: RunResultRequestedActionSchema,
+    })
+    .strict(),
+]);
+
+export type AcceptAttemptEventPayload = Readonly<z.infer<typeof AcceptAttemptEventPayloadSchema>>;
+export type RecordCheckpointPayload = Readonly<z.infer<typeof RecordCheckpointPayloadSchema>>;
+export type RecordEvidencePayload = Readonly<z.infer<typeof RecordEvidencePayloadSchema>>;
+export type RecordRunResultPayload = Readonly<z.infer<typeof RecordRunResultPayloadSchema>>;
+
+export const SensitiveOperationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("MUTATE_REPOSITORY"), expectedHead: CommitShaSchema }).strict(),
   z
     .object({
@@ -543,6 +679,45 @@ const SensitiveOperationSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("DISCARD_RETAINED_WORK"), retainedWorkId: IdentifierSchema }).strict(),
 ]);
 
+export const AuthorizeOperationPayloadSchema = z
+  .object({
+    sessionId: IdentifierSchema,
+    sessionFence: RevisionSchema,
+    operation: SensitiveOperationSchema,
+  })
+  .strict();
+export type AuthorizeOperationPayload = Readonly<z.infer<typeof AuthorizeOperationPayloadSchema>>;
+
+export const ConsumePermitPayloadSchema = z
+  .object({
+    permit: z.string().min(1).max(8_192),
+    runnerId: IdentifierSchema,
+    runnerEpoch: RevisionSchema,
+    connectionId: IdentifierSchema,
+  })
+  .strict();
+export const RenewAuthoritySessionPayloadSchema = z
+  .object({
+    sessionId: IdentifierSchema,
+    sessionFence: RevisionSchema,
+    runnerEpoch: RevisionSchema,
+  })
+  .strict();
+export const ReleaseAuthoritySessionPayloadSchema = z
+  .object({
+    sessionId: IdentifierSchema,
+    sessionFence: RevisionSchema,
+    reason: z.enum(["ATTEMPT_EXITED", "CHECKPOINTED", "CANCELLED", "TIMED_OUT"]),
+  })
+  .strict();
+export type ConsumePermitPayload = Readonly<z.infer<typeof ConsumePermitPayloadSchema>>;
+export type RenewAuthoritySessionPayload = Readonly<
+  z.infer<typeof RenewAuthoritySessionPayloadSchema>
+>;
+export type ReleaseAuthoritySessionPayload = Readonly<
+  z.infer<typeof ReleaseAuthoritySessionPayloadSchema>
+>;
+
 export const CollabCommandSchema = z.discriminatedUnion("kind", [
   CommandBaseSchema.extend({
     kind: z.literal("LAUNCH_RUN"),
@@ -553,6 +728,16 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     execution: ExecutionSelectionSchema,
     effectiveConfiguration: EffectiveRunConfigurationRefSchema,
     workflow: WorkflowAuthorityRefSchema.optional(),
+    mutationGuardOverride: z
+      .object({
+        guardedRunId: IdentifierSchema,
+        expectedGuardedRunRevision: RevisionSchema,
+        expectedGuardFence: RevisionSchema,
+        expectedGuardRevision: RevisionSchema,
+        reason: z.string().min(1).max(240),
+      })
+      .strict()
+      .optional(),
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("AUTHORIZE_ATTEMPT"),
@@ -571,10 +756,6 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     kind: z.literal("CANCEL_RUN"),
     ...RevisionedRunSchema,
     reason: z.enum(["MEMBER_REQUEST", "DEADLINE", "WORKFLOW", "REVOCATION"]),
-    termination: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("NO_ACTIVE_ATTEMPT") }).strict(),
-      z.object({ kind: z.literal("REQUEST_TERMINATION"), attemptId: IdentifierSchema }).strict(),
-    ]),
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RECONCILE_OBSERVATION"),
@@ -625,25 +806,15 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("ACCEPT_ATTEMPT_EVENT"),
-    ...RevisionedRunSchema,
-    attemptId: IdentifierSchema,
-    expectedAttemptRevision: RevisionSchema,
-    event: AttemptEventSchema,
+    ...AcceptAttemptEventPayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RECORD_CHECKPOINT"),
-    ...RevisionedRunSchema,
-    attemptId: IdentifierSchema,
-    reason: z.enum(["HUMAN_INPUT", "RECOVERY", "MUTATION_LEASE_EXPIRED", "CANCELLATION"]),
-    requestedAction: z.enum(["RESPOND", "RESUME", "ADOPT_FOLLOW_UP", "NONE"]),
-    summary: z.string().min(1).max(2_048),
-    publishedCommit: CommitShaSchema.optional(),
+    ...RecordCheckpointPayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RECORD_EVIDENCE"),
-    ...RevisionedRunSchema,
-    attemptId: IdentifierSchema.optional(),
-    evidence: EvidenceInputSchema,
+    ...RecordEvidencePayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RECORD_RUN_RESULT"),
@@ -651,7 +822,9 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     attemptId: IdentifierSchema,
     result: z.enum(["DELIVERED", "NO_CHANGES", "BLOCKED", "ESCALATED"]),
     summary: z.string().min(1).max(2_048),
-    evidenceIds: z.array(IdentifierSchema).max(128),
+    reason: RunResultReasonSchema.optional(),
+    requestedAction: RunResultRequestedActionSchema.optional(),
+    evidenceIds: EvidenceIdsSchema,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("LINK_SOURCE_REFERENCE"),
@@ -663,33 +836,29 @@ export const CollabCommandSchema = z.discriminatedUnion("kind", [
     kind: z.literal("ACKNOWLEDGE_COLLISION"),
     coordinationRecordId: IdentifierSchema,
     expectedRevision: RevisionSchema,
+    guardedRunId: IdentifierSchema,
+    expectedGuardedRunRevision: RevisionSchema,
     collidingRunId: IdentifierSchema,
+    expectedCollidingRunRevision: RevisionSchema,
+    expectedGuardFence: RevisionSchema,
+    expectedGuardRevision: RevisionSchema,
     reason: z.string().min(1).max(240),
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("CONSUME_PERMIT"),
-    permit: z.string().min(1).max(8_192),
-    runnerId: IdentifierSchema,
-    runnerEpoch: RevisionSchema,
-    connectionId: IdentifierSchema,
+    ...ConsumePermitPayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RENEW_AUTHORITY_SESSION"),
-    sessionId: IdentifierSchema,
-    sessionFence: RevisionSchema,
-    runnerEpoch: RevisionSchema,
+    ...RenewAuthoritySessionPayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("AUTHORIZE_OPERATION"),
-    sessionId: IdentifierSchema,
-    sessionFence: RevisionSchema,
-    operation: SensitiveOperationSchema,
+    ...AuthorizeOperationPayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("RELEASE_AUTHORITY_SESSION"),
-    sessionId: IdentifierSchema,
-    sessionFence: RevisionSchema,
-    reason: z.enum(["ATTEMPT_EXITED", "CHECKPOINTED", "CANCELLED", "TIMED_OUT"]),
+    ...ReleaseAuthoritySessionPayloadSchema.shape,
   }).strict(),
   CommandBaseSchema.extend({
     kind: z.literal("REPLACE_RUNNER_POLICY"),
@@ -760,9 +929,30 @@ export const CommandResultSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("AUTHORIZE_ATTEMPT"),
-      run: RunViewSchema,
-      attempt: AttemptViewSchema,
-      dispatch: QueuedDispatchMetadataSchema,
+      decision: z.discriminatedUnion("outcome", [
+        z
+          .object({
+            outcome: z.literal("AUTHORIZED"),
+            run: RunViewSchema,
+            attempt: AttemptViewSchema,
+            dispatch: QueuedDispatchMetadataSchema,
+          })
+          .strict(),
+        z
+          .object({
+            outcome: z.literal("WAITING"),
+            run: RunViewSchema,
+            code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+            retry: z.enum(["EXPLICIT_RESUME", "SELECT_ANOTHER_TARGET"]),
+          })
+          .strict(),
+        z
+          .object({
+            outcome: z.literal("DENIED"),
+            code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+          })
+          .strict(),
+      ]),
     })
     .strict(),
   z
@@ -803,6 +993,7 @@ export const CommandResultSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("AUTHORIZE_OPERATION"),
       authorizationId: IdentifierSchema,
+      operationDigest: Sha256Schema,
       expiresAt: z.number().int().nonnegative(),
     })
     .strict(),

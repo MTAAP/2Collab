@@ -63,7 +63,18 @@ export type DurableCheckpoint = Readonly<{
   reason: "HUMAN_INPUT" | "RECOVERY" | "MUTATION_LEASE_EXPIRED" | "CANCELLATION";
   requestedAction: "RESPOND" | "RESUME" | "ADOPT_FOLLOW_UP" | "NONE";
   summary: string;
-  publishedCommit?: CommitSha;
+  runnerId: RegisteredRunnerId;
+  worktreeIdentity: string;
+  currentCommit?: CommitSha;
+  recoverableRemoteReference?: Readonly<{
+    remoteIdentity: string;
+    remoteRef: string;
+    commitSha: CommitSha;
+    verifiedAt: Instant;
+  }>;
+  evidenceIds: readonly EvidenceId[];
+  sourceRevisions: Readonly<Record<string, string>>;
+  resumeGuidance: string;
   createdAt: Instant;
 }>;
 
@@ -131,6 +142,8 @@ export const AttemptEventSchema = z.discriminatedUnion("kind", [
       kind: z.literal("PROCESS_EXITED"),
       observedAt: InstantSchema,
       exitCode: z.number().int(),
+      signal: z.string().min(1).max(32).optional(),
+      correlationId: IdentifierSchema.optional(),
     })
     .strict(),
   z
@@ -138,6 +151,7 @@ export const AttemptEventSchema = z.discriminatedUnion("kind", [
       kind: z.literal("FAILED_TO_START"),
       observedAt: InstantSchema,
       code: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+      correlationId: IdentifierSchema.optional(),
     })
     .strict(),
   z
@@ -334,7 +348,23 @@ export const DurableCheckpointSchema = z
     reason: z.enum(["HUMAN_INPUT", "RECOVERY", "MUTATION_LEASE_EXPIRED", "CANCELLATION"]),
     requestedAction: z.enum(["RESPOND", "RESUME", "ADOPT_FOLLOW_UP", "NONE"]),
     summary: SafeSummarySchema,
-    publishedCommit: CommitShaSchema.optional(),
+    runnerId: IdentifierSchema,
+    worktreeIdentity: IdentifierSchema,
+    currentCommit: CommitShaSchema.optional(),
+    recoverableRemoteReference: z
+      .object({
+        remoteIdentity: z.string().min(1).max(128),
+        remoteRef: GitRefSchema,
+        commitSha: CommitShaSchema,
+        verifiedAt: InstantSchema,
+      })
+      .strict()
+      .optional(),
+    evidenceIds: z.array(IdentifierSchema).max(128),
+    sourceRevisions: z
+      .record(z.string().min(1).max(256), z.string().min(1).max(128))
+      .refine((revisions) => Object.keys(revisions).length <= 128),
+    resumeGuidance: SafeSummarySchema,
     createdAt: InstantSchema,
   })
   .strict();

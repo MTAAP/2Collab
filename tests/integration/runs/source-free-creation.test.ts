@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
 import { migrate } from "../../../src/server/db/migrate.ts";
 import { canonicalSourceReferenceKey } from "../../../src/server/modules/coordination-records/canonical-key.ts";
 import {
@@ -70,6 +70,7 @@ function launchInput(overrides: Partial<LaunchPersistenceInput> = {}): LaunchPer
         expectedRunnerEpoch: 1,
         projectMappingRevision: 1,
         profileVersionId: "profile_1" as never,
+        expectedProfileVersion: 1,
         host: "NATIVE",
         interaction: "HEADLESS",
       },
@@ -94,6 +95,9 @@ function launchInput(overrides: Partial<LaunchPersistenceInput> = {}): LaunchPer
       authoritySessionSeconds: 30,
       authorityRenewalSeconds: 10,
       mutationDisconnectGraceSeconds: 15,
+      maximumAttempts: 3,
+      deadlineAt: 1_000,
+      connectorEpochs: {},
     },
     ...overrides,
   } as LaunchPersistenceInput;

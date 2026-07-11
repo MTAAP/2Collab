@@ -1,16 +1,16 @@
 import { z } from "zod";
+import type { MemberActor, VerifiedDevicePrincipal, VerifiedRunnerPrincipal } from "./actors.ts";
 import type {
   CommitSha,
   ConnectedRepositoryId,
   CustomLaunchProfileVersionId,
-  RegisteredRunnerId,
   ExposureAcknowledgementId,
   MemberId,
   ProjectId,
+  RegisteredRunnerId,
   SafeProfileId,
 } from "./ids.ts";
 import { CommitShaSchema, IdentifierSchema, RevisionSchema } from "./ids.ts";
-import type { MemberActor, VerifiedDevicePrincipal, VerifiedRunnerPrincipal } from "./actors.ts";
 
 const forbiddenGitRefCharacters = new Set(["~", "^", ":", "?", "*", "[", "\\"]);
 
@@ -80,6 +80,7 @@ export type ExecutionSelection = Readonly<{
   expectedRunnerEpoch: number;
   projectMappingRevision: number;
   profileVersionId: CustomLaunchProfileVersionId;
+  expectedProfileVersion: number;
   exposureRevision?: number;
   host: ExecutionHost;
   interaction: InteractionMode;
@@ -117,6 +118,7 @@ export const ExecutionSelectionSchema = z
     expectedRunnerEpoch: RevisionSchema,
     projectMappingRevision: RevisionSchema,
     profileVersionId: IdentifierSchema,
+    expectedProfileVersion: z.number().int().positive(),
     exposureRevision: RevisionSchema.optional(),
     host: z.enum(["NATIVE", "ORCA"]),
     interaction: z.enum(["HEADLESS", "INTERACTIVE"]),
