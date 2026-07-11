@@ -139,6 +139,12 @@ For every task group in a phase plan:
 
 Local implementation may proceed into a later phase after the earlier phase's shared interfaces, migrations, local security suites, and strict fixture contracts pass, even when a timed or disposable-provider dogfood proof is still `IN_PROGRESS` or `BLOCKED`. This code-ahead rule does not convert mocked or unexecuted behavior into `PASS`: the Acceptance Matrix status changes only when its exact observable proof is captured from running software. GitHub and Outline may therefore be implemented against strict local adapters after Foundation's local prerequisites exist, and bounded automation may be implemented after local GitHub exact-revision and check-observation contracts exist.
 
+### Integration policy
+
+`main` is the integration trunk. A phase implementation may advance `main` after its locally achievable package, security, migration, and composition gates pass, while separately identified live-provider, multi-machine, reviewer, or timed evidence remains `IN_PROGRESS_EXTERNAL`. Later phase work branches from that verified integration revision and must not relabel pending external evidence as `PASS`.
+
+GitHub coordination and Outline collaboration may proceed in parallel after the Foundation local gate. Bounded automation may begin after the integrated GitHub exact-revision mutation and check-observation contracts pass locally. Each parallel stream owns its phase-specific adapters, migrations, modules, UI, tests, and evidence; changes to shared contracts or authority behavior require integration review before another stream builds on them.
+
 ## Fifteen orphan risks: master disposition
 
 | ID | Risk | Phase/task owner |
