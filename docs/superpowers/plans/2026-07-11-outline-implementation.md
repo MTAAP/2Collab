@@ -4,7 +4,12 @@
 
 **Goal:** Implement `OUT-001` through `OUT-010` so two members and authorized Agent Runs collaborate bidirectionally through Outline with native attribution, exact grants/revisions, safe conflict proposals, revocation, and source-body minimization.
 
-**Architecture:** A narrow `OutlinePort` is the true-external seam, with a production adapter and strict stateful fixture adapter. Delegated member OAuth performs direct human creation/edits; one team bot identity performs agent reads, proposals, and exact-grant writes. All paths consume Foundation credential encryption, connector epochs/scopes, exact-revision operation authorization, audit, reconciliation, Context Recipe, source-reference, and `ExecutionAuthority` primitives.
+**Architecture:** Separate narrow `OutlineContentPort` and `OutlineOAuthProviderPort` true-external
+seams prevent live document bodies/token sets from entering persistent projection contracts. Delegated
+member OAuth performs direct human creation/edits; one team bot identity performs agent reads,
+proposals, and exact-grant writes. All paths consume Foundation credential encryption, connector
+epochs/scopes, exact-revision operation authorization, audit, reconciliation, Context Recipe,
+source-reference, and `ExecutionAuthority` primitives.
 
 **Tech Stack:** Bun 1.3.10, TypeScript 7.0.2, Hono 4.12.29, React 19.2.7, Zod 4.4.3, `bun:sqlite`, OAuth 2.0 with PKCE, Bun test, Playwright 1.61.1, Outline API.
 
@@ -32,7 +37,7 @@
 - `src/server/db/migrations/0009_outline.sql`: bot connection, delegated OAuth metadata, Context Read Scopes, document references, and access provenance.
 - `src/server/db/migrations/0010_outline_grants.sql`: exact write grants and additional-document requests.
 - `src/server/db/migrations/0011_outline_proposals.sql`: proposals, conflicts, and working-document references/dispositions without fetched bodies.
-- `src/server/adapters/outline/contract.ts`: narrow `OutlinePort` interface.
+- `src/server/adapters/outline/{contract,oauth-provider-contract}.ts`: body-safe content and internal OAuth provider ports.
 - `src/server/adapters/outline/{oauth,bot-auth,client,scope,search,documents,human-editing,revision-cas}.ts`: production provider adapter.
 - `src/server/modules/documents/{human-editing,write-grants,additional-document-requests,agent-operations,proposals,conflicts,working-documents,revocation}.ts`: document collaboration policy over Foundation authority.
 - `src/server/modules/federated-search/{contract,search}.ts`, `src/server/modules/context/outline-reference-provider.ts`: live reference-first search/read integration.
@@ -48,33 +53,51 @@
 
 **Files:**
 - Create: `src/shared/contracts/outline.ts`
-- Create: `src/server/adapters/outline/contract.ts`
+- Create: `src/server/adapters/outline/{contract,oauth-provider-contract}.ts`
+- Create: `src/server/modules/connectors/outline-credentials.ts`
 - Create: `src/server/db/migrations/0009_outline.sql`
 - Create: `src/server/db/migrations/0009_outline.verify.ts`
 - Modify: `src/server/db/migrate.ts`
+- Modify: `src/server/operations/{backup,restore}.ts`
 - Test: `tests/unit/outline/contracts.test.ts`
 - Test: `tests/integration/outline/migration-0009.test.ts`
+- Test: `tests/integration/outline/{oauth-transaction,projection-storage-safety}.test.ts`
+- Test: `tests/drills/backup-restore.test.ts`
 
 **Interfaces:**
-- Consumes: Foundation `Result<T>`, `Observed<T>`, `ExactRevisionMutation<T>`, `ScopedSearch`, `ContextReference`, and `ContextConnector<TReference,TDocument,TMutation>`.
+- Consumes: Foundation `Result<T>`, `EphemeralObserved<T>`, `Observed<T>`, typed-precondition
+  `ExactRevisionMutation<T>`, `ScopedSearch`, `ContextReference`, and body-safe
+  `ContextConnector<TReference,TLiveRead,TProjection,TMutation>`.
 - Produces:
 
 ```ts
-export interface OutlinePort
-  extends ContextConnector<OutlineReference, OutlineDocument, OutlineMutation> {
-  exchangeMemberGrant(command: ExchangeOutlineOAuthGrant): Promise<Result<DelegatedOutlineGrant>>;
-  revokeMemberGrant(command: RevokeOutlineOAuthGrant): Promise<Result<GrantRevocation>>;
-  inspectBotConnection(query: InspectOutlineBot): Promise<Result<OutlineBotConnection>>;
+export interface OutlineContentPort
+  extends ContextConnector<OutlineReference, OutlineReadResult, OutlineDocumentProjection, OutlineMutation> {}
+export interface OutlineOAuthProviderPort {
+  discover(origin: CanonicalOutlineOrigin): Promise<Result<VerifiedOutlineOAuthMetadata>>;
+  exchange(transaction: VerifiedOutlineOAuthTransaction, authorizationCode: string): Promise<Result<ProviderTokenSet>>;
+  refresh(grant: EncryptedOutlineOAuthGrant): Promise<Result<ProviderTokenSet>>;
+  revoke(grant: EncryptedOutlineOAuthGrant): Promise<Result<ProviderRevocationResult>>;
+  inspectIdentity(access: EphemeralProviderAccess): Promise<Result<OutlineProviderIdentity>>;
 }
 
 export type OutlineMutation =
-  | { kind: "CREATE_DOCUMENT_AS_MEMBER"; identity: DelegatedMemberIdentityRef; collectionId: string; title: string; body: string }
-  | { kind: "EDIT_DOCUMENT_AS_MEMBER"; identity: DelegatedMemberIdentityRef; documentId: string; expectedRevision: string; authoredPatch: AuthoredDocumentPatch }
-  | { kind: "EDIT_DOCUMENT_AS_BOT"; runId: AgentRunId; grantId: DocumentWriteGrantId; documentId: string; expectedRevision: string; authoredPatch: AuthoredDocumentPatch }
-  | { kind: "APPLY_PROPOSAL_AS_MEMBER"; identity: DelegatedMemberIdentityRef; proposalId: DocumentProposalId; documentId: string; expectedRevision: string }
-  | { kind: "PROMOTE_WORKING_DOCUMENT"; identity: DelegatedMemberIdentityRef; workingDocumentId: WorkingDocumentId; expectedRevision: string; targetCollectionId: string; title: string }
-  | { kind: "ARCHIVE_WORKING_DOCUMENT"; identity: DelegatedMemberIdentityRef; workingDocumentId: WorkingDocumentId; expectedRevision: string };
+  | { kind: "CREATE_DOCUMENT_AS_MEMBER"; collectionId: string; title: string; body: string }
+  | { kind: "EDIT_DOCUMENT_AS_MEMBER"; documentId: string; authoredPatch: AuthoredDocumentPatch }
+  | { kind: "EDIT_DOCUMENT_AS_BOT"; provenance: BotDocumentOperationProvenance; documentId: string; authoredPatch: AuthoredDocumentPatch }
+  | { kind: "APPLY_PROPOSAL_AS_MEMBER"; proposalId: DocumentProposalId; documentId: string }
+  | { kind: "PROMOTE_WORKING_DOCUMENT"; workingDocumentId: WorkingDocumentId; targetCollectionId: string; title: string }
+  | { kind: "ARCHIVE_WORKING_DOCUMENT"; workingDocumentId: WorkingDocumentId };
 ```
+
+`OutlineReadResult` may contain the response-only live body and never enters ConnectorAuthority.
+`OutlineDocumentProjection` contains only immutable document/workspace identity, observed current
+collection, bounded title, source revision/comparable digest/source time/freshness/archive state and
+safe provider actor provenance. Mutation confirmation reparses through its strict codec, persists and
+idempotently replays only that projection, and cannot accept a live-read value. Human provider identity
+is derived from the authenticated Member's current `(connector, member)` OAuth grant; callers cannot
+select a delegated identity. Bot provenance binds run, attempt, grant ID/revision, grantor Member,
+connector epoch and edited source revision.
 
 - [ ] **Step 1: Write schema and identity-separation tests**
 
@@ -95,60 +118,148 @@ Expected: FAIL with missing `src/shared/contracts/outline.ts`.
 
 ```sql
 CREATE TABLE outline_connections (
-  connector_id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL UNIQUE,
-  bot_credential_id TEXT NOT NULL,
-  connector_epoch INTEGER NOT NULL CHECK (connector_epoch > 0),
-  revision INTEGER NOT NULL CHECK (revision > 0)
-);
-CREATE TABLE outline_member_grants (
+  connector_id TEXT PRIMARY KEY REFERENCES connector_epochs(connector_id),
+  origin TEXT NOT NULL CHECK(length(origin) BETWEEN 8 AND 2048),
+  workspace_id TEXT NOT NULL CHECK(length(workspace_id) BETWEEN 1 AND 128),
+  bot_provider_user_id TEXT NOT NULL CHECK(length(bot_provider_user_id) BETWEEN 1 AND 128),
+  bot_credential_id TEXT NOT NULL REFERENCES encrypted_credentials(id),
+  oauth_client_id TEXT NOT NULL CHECK(length(oauth_client_id) BETWEEN 1 AND 256),
+  oauth_client_secret_credential_id TEXT REFERENCES encrypted_credentials(id),
+  oauth_metadata_digest TEXT NOT NULL CHECK(length(oauth_metadata_digest) = 64 AND oauth_metadata_digest NOT GLOB '*[^a-f0-9]*'),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  UNIQUE(origin, workspace_id)
+) STRICT;
+CREATE TABLE outline_member_oauth_grants (
+  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
   connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
-  member_id TEXT NOT NULL,
-  outline_user_id TEXT NOT NULL,
-  credential_id TEXT NOT NULL,
-  grant_revision INTEGER NOT NULL CHECK (grant_revision > 0),
-  revoked_at TEXT,
-  PRIMARY KEY (connector_id, member_id)
-);
-CREATE TABLE outline_context_read_scopes (
-  project_id TEXT NOT NULL,
+  member_id TEXT NOT NULL REFERENCES members(id),
+  outline_user_id TEXT NOT NULL CHECK(length(outline_user_id) BETWEEN 1 AND 128),
+  credential_id TEXT NOT NULL REFERENCES encrypted_credentials(id),
+  granted_scope_digest TEXT NOT NULL CHECK(length(granted_scope_digest) = 64 AND granted_scope_digest NOT GLOB '*[^a-f0-9]*'),
+  access_expires_at INTEGER NOT NULL CHECK(access_expires_at >= 0),
+  refresh_status TEXT NOT NULL CHECK(refresh_status IN ('READY','ROTATING','REAUTHORIZATION_REQUIRED','REVOKED')),
+  credential_revision INTEGER NOT NULL CHECK(credential_revision > 0),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  revoked_at INTEGER CHECK(revoked_at >= created_at),
+  UNIQUE(connector_id, member_id),
+  UNIQUE(connector_id, outline_user_id)
+) STRICT;
+CREATE TABLE outline_oauth_transactions (
+  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
   connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
-  collection_id TEXT NOT NULL,
-  scope_revision INTEGER NOT NULL CHECK (scope_revision > 0),
-  PRIMARY KEY (project_id, connector_id, collection_id)
-);
+  member_id TEXT NOT NULL REFERENCES members(id),
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  state_hash BLOB NOT NULL UNIQUE CHECK(length(state_hash) = 32),
+  redirect_origin_digest TEXT NOT NULL CHECK(length(redirect_origin_digest) = 64 AND redirect_origin_digest NOT GLOB '*[^a-f0-9]*'),
+  pkce_challenge TEXT NOT NULL CHECK(length(pkce_challenge) BETWEEN 43 AND 128),
+  pkce_method TEXT NOT NULL CHECK(pkce_method = 'S256'),
+  verifier_credential_id TEXT NOT NULL REFERENCES encrypted_credentials(id),
+  requested_scope_digest TEXT NOT NULL CHECK(length(requested_scope_digest) = 64 AND requested_scope_digest NOT GLOB '*[^a-f0-9]*'),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  consumed_at INTEGER CHECK(consumed_at >= created_at),
+  revoked_at INTEGER CHECK(revoked_at >= created_at),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  CHECK(expires_at = created_at + 600)
+) STRICT;
 CREATE TABLE outline_document_references (
-  project_id TEXT NOT NULL,
-  connector_id TEXT NOT NULL,
-  document_id TEXT NOT NULL,
-  collection_id TEXT NOT NULL,
-  observed_revision TEXT NOT NULL,
-  safe_title TEXT NOT NULL,
-  observed_at TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
+  document_id TEXT NOT NULL CHECK(length(document_id) BETWEEN 1 AND 128),
+  observed_collection_id TEXT NOT NULL CHECK(length(observed_collection_id) BETWEEN 1 AND 128),
+  safe_title TEXT NOT NULL CHECK(length(safe_title) BETWEEN 1 AND 240),
+  source_revision TEXT NOT NULL CHECK(length(source_revision) BETWEEN 1 AND 256),
+  comparable_digest TEXT NOT NULL CHECK(length(comparable_digest) = 64 AND comparable_digest NOT GLOB '*[^a-f0-9]*'),
+  source_updated_at INTEGER CHECK(source_updated_at >= 0),
+  observed_at INTEGER NOT NULL CHECK(observed_at >= 0),
+  freshness TEXT NOT NULL CHECK(freshness IN ('FRESH','STALE','UNAVAILABLE','REDACTED')),
+  provenance_kind TEXT NOT NULL CHECK(provenance_kind IN ('SEARCH','READ','MUTATION_CONFIRMATION','RECONCILIATION')),
+  provider_actor_id TEXT CHECK(provider_actor_id IS NULL OR length(provider_actor_id) BETWEEN 1 AND 128),
+  revision INTEGER NOT NULL CHECK(revision > 0),
   PRIMARY KEY (project_id, connector_id, document_id)
-);
+) STRICT;
+CREATE TABLE outline_access_provenance (
+  id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES outline_connections(connector_id),
+  actor_kind TEXT NOT NULL CHECK(actor_kind IN ('MEMBER','RUN_ATTEMPT')),
+  member_id TEXT REFERENCES members(id),
+  run_id TEXT REFERENCES agent_runs(id),
+  attempt_id TEXT REFERENCES execution_attempts(id),
+  document_id TEXT,
+  observed_revision TEXT CHECK(observed_revision IS NULL OR length(observed_revision) BETWEEN 1 AND 256),
+  result TEXT NOT NULL CHECK(result IN ('ALLOWED','STALE','UNAVAILABLE','FORBIDDEN','REDACTED')),
+  connector_epoch INTEGER NOT NULL CHECK(connector_epoch > 0),
+  occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+  correlation_digest TEXT CHECK(correlation_digest IS NULL OR (length(correlation_digest) = 64 AND correlation_digest NOT GLOB '*[^a-f0-9]*')),
+  CHECK((actor_kind = 'MEMBER' AND member_id IS NOT NULL AND run_id IS NULL AND attempt_id IS NULL) OR (actor_kind = 'RUN_ATTEMPT' AND member_id IS NULL AND run_id IS NOT NULL AND attempt_id IS NOT NULL)),
+  FOREIGN KEY(project_id, connector_id, document_id) REFERENCES outline_document_references(project_id, connector_id, document_id)
+) STRICT;
 ```
 
-- [ ] **Step 4: Implement the closed schemas and `OutlinePort` exactly as shown**
+Foundation `connector_scope_references` remains the only Context Read Scope authority, using canonical
+`OUTLINE_COLLECTION:<immutable-id>` entries; there is no duplicate Outline scope revision. Document
+collection in a reference is observed metadata only. Search returns only scoped collections; read/
+write refresh current native collection and intersect provider permission with current Foundation
+scope. A move to denied scope before read/write redacts/fails without leaking identifier/title/body.
+
+V1 uses a registered confidential OAuth client plus authorization-code PKCE `S256`; connector setup
+discovers and pins the exact Outline origin/workspace OAuth metadata digest and fails
+`OUTLINE_OAUTH_CAPABILITY_UNSUPPORTED` unless authorization, token, refresh, revocation and PKCE S256
+capabilities are confirmed. It does not depend on optional dynamic client registration. Transactions
+are restart-safe, ten-minute, state-hash/session/member/connector/redirect/scope-bound, single-use, and
+store the verifier only through the encrypted credential store. Outline access/refresh lifetimes are
+provider-observed; refresh rotation/replay and local revocation remain Foundation authority.
+
+Member OAuth, configured bot identity, Context Read Scope, and Document Write Grant are independent
+authorities. Token sets pass directly from the provider port to encrypted storage and never appear in
+shared schemas. Local revoke/epoch advance commits before best-effort provider revocation and cannot be
+reactivated by provider failure. Bot inspection proves the configured provider user exactly.
+
+- [ ] **Step 4: Implement the closed schemas and split ports exactly as shown**
 
 ```ts
 export const AuthoredDocumentPatchSchema = z.object({
   format: z.literal("UNIFIED_TEXT_PATCH_V1"),
-  value: z.string().min(1).max(131_072),
+  value: z.string().min(1),
   digest: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+export async function validateAuthoredDocumentPatch(input: unknown): Promise<Result<AuthoredDocumentPatch>> {
+  const parsed = AuthoredDocumentPatchSchema.safeParse(input);
+  if (!parsed.success) return failure("OUTLINE_PATCH_INVALID", "NEVER");
+  const bytes = new TextEncoder().encode(parsed.data.value);
+  if (bytes.byteLength > 131_072 || !isValidUnifiedTextPatch(bytes) || await sha256Hex(bytes) !== parsed.data.digest) return failure("OUTLINE_PATCH_INVALID", "NEVER");
+  return success(parsed.data);
+}
 ```
+
+Reject binary/control content, malformed/oversized hunks, digest mismatch, no-op mutations, unknown
+nested keys, identity selection, and nested authority/revision fields. `ABSENT` is the outer
+precondition for creation; edits/apply/promote/archive use `EXACT_REVISION`. Re-read current document
+revision and native collection immediately before write, serialize bot writes per document, then
+read/normalize confirmation and report `ATOMIC` only when the pinned provider explicitly proves CAS;
+otherwise `RESIDUAL_RACE`. Conflicts create authored proposals, never overwrite retries. Durable
+patches are deliberate bounded deltas and cannot contain a disguised full fetched body.
 
 - [ ] **Step 5: Run GREEN**
 
-Run: `bun test tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0009.test.ts && bun run typecheck`
+Run: `bun test tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0009.test.ts tests/integration/outline/oauth-transaction.test.ts tests/integration/outline/projection-storage-safety.test.ts src/server/db/migrations/0009_outline.verify.ts tests/drills/backup-restore.test.ts && bun run typecheck`
 
-Expected: PASS and exit 0.
+Expected: PASS and exit 0. Verify empty-to-v9 and v8-to-v9 upgrade, rollback/history/integrity/FKs,
+preserved Foundation/GitHub data, and authenticated schema-8 backup restore through isolated staged
+migration. Restore advances the Outline connector epoch, marks it `REVIEW_REQUIRED`, invalidates member
+OAuth/bot operation authorizations, holds pending writes, and never resumes an old grant/token. Body
+canaries are absent from projections, idempotency, intents, audit, SQLite/WAL/SHM and restored logical
+backup data.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/outline.ts src/server/adapters/outline/contract.ts src/server/db/migrations/0009_outline.sql src/server/db/migrations/0009_outline.verify.ts src/server/db/migrate.ts tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0009.test.ts
+git add src/shared/contracts/outline.ts src/server/adapters/outline/contract.ts src/server/adapters/outline/oauth-provider-contract.ts src/server/modules/connectors/outline-credentials.ts src/server/db/migrations/0009_outline.sql src/server/db/migrations/0009_outline.verify.ts src/server/db/migrate.ts src/server/operations/backup.ts src/server/operations/restore.ts tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0009.test.ts tests/integration/outline/oauth-transaction.test.ts tests/integration/outline/projection-storage-safety.test.ts tests/drills/backup-restore.test.ts
 git commit -m "feat(outline): define split-identity contracts"
 ```
 
@@ -166,17 +277,19 @@ git commit -m "feat(outline): define split-identity contracts"
 
 **Interfaces:**
 - Consumes: Foundation encrypted credential store, connector epochs/scopes, authenticated Member identity, CSRF/session policy, and audit.
-- Produces: `beginOutlineOAuth`, `finishOutlineOAuth`, `resolveOutlineIdentity`, `assertOutlineScope`, and `StrictOutlineAdapter implements OutlinePort`.
+- Produces: `beginOutlineOAuth`, `finishOutlineOAuth`, `resolveOutlineIdentity`,
+  `assertOutlineScope`, `StrictOutlineContentAdapter implements OutlineContentPort`, and a separate
+  `StrictOutlineOAuthProvider implements OutlineOAuthProviderPort`.
 
 - [ ] **Step 1: Write OAuth, attribution, and denied-collection tests**
 
 ```ts
 test("keeps delegated member and bot authority distinct", async () => {
   const outline = StrictOutlineAdapter.seed({ allowedCollections: ["allowed"], deniedCollections: ["denied"] });
-  await outline.mutate(memberEdit({ memberId: "mem_a", documentId: "doc_a" }));
-  await outline.mutate(botEdit({ runId: "run_a", documentId: "doc_a" }));
+  await outline.mutate(memberAuthorization("mem_a"), memberEdit({ documentId: "doc_a" }));
+  await outline.mutate(botAuthorization({ runId: "run_a", attemptId: "att_a", grantId: "grant_a" }), botEdit({ documentId: "doc_a" }));
   expect(outline.calls.map((call) => call.actor)).toEqual(["OUTLINE_MEMBER:mem_a", "OUTLINE_BOT:run_a"]);
-  const denied = await outline.read({ documentId: "doc_denied", collectionId: "denied" });
+  const denied = await outline.read(scopedCollections(["allowed"]), { workspaceId: "ws_a", documentId: "doc_denied" });
   expect(denied.ok).toBe(false);
   if (denied.ok) throw new Error("expected scope denial");
   expect(denied.error.code).toBe("OUTLINE_SCOPE_DENIED");
@@ -193,43 +306,47 @@ Expected: FAIL with missing strict adapter and OAuth modules.
 
 ```ts
 export function resolveOutlineIdentity(request: OutlineIdentityRequest): Result<OutlineIdentity> {
-  if (request.operation === "HUMAN_WRITE" && !request.memberGrant) return failure("OUTLINE_MEMBER_GRANT_REQUIRED", "EXPLICIT_RESUME");
-  if (request.operation === "AGENT_OPERATION" && !request.runId) return failure("RUN_AUTHORITY_REQUIRED", "NEVER");
+  if (request.operation === "HUMAN_WRITE" && !request.authorization.memberOAuthGrant) return failure("OUTLINE_MEMBER_GRANT_REQUIRED", "EXPLICIT_RESUME");
+  if (request.operation === "AGENT_OPERATION" && !request.authorization.botProvenance) return failure("RUN_AUTHORITY_REQUIRED", "NEVER");
   return success(request.operation === "HUMAN_WRITE"
-    ? { kind: "MEMBER", memberId: request.memberId, grantRevision: request.memberGrant!.revision }
-    : { kind: "BOT", runId: request.runId! });
+    ? deriveMemberIdentityFromAuthorization(request.authorization)
+    : deriveBotIdentityAndProvenance(request.authorization));
 }
 ```
+
+OAuth callbacks bind connector, authenticated Member, browser session/device, state hash, exact
+redirect origin, PKCE verifier/challenge and requested scope digest. Reject replay, expiry, redirect/
+member/session/connector swap, code reuse, callback after epoch change, provider identity change, and
+offboarding races. Concurrent refresh rotation has one winner and reuse forces local reauthorization.
+Human and bot credential classes cannot be swapped. Provider failure after local revoke never
+reactivates authority.
 
 - [ ] **Step 4: Implement the stateful strict adapter with revision and fault controls**
 
 ```ts
-export class StrictOutlineAdapter implements OutlinePort {
+export class StrictOutlineContentAdapter implements OutlineContentPort {
   readonly calls: OutlineCall[] = [];
   private readonly documents = new Map<string, FixtureDocument>();
   private nextFault: OutlineFixtureFault | undefined;
   changeExternally(documentId: string, body: string): void { this.replace(documentId, body, "EXTERNAL_MEMBER"); }
   failNext(fault: OutlineFixtureFault): void { this.nextFault = fault; }
-  async search(query: ScopedSearch): Promise<Result<readonly ContextReference[]>> {
-    return searchFixtureDocuments(this.documents, this.calls, query);
+  async search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<readonly ContextReference[]>> {
+    return searchFixtureDocuments(this.documents, this.calls, scope, query);
   }
-  async read(reference: OutlineReference): Promise<Result<Observed<OutlineDocument>>> {
-    return readFixtureDocument(this.documents, this.calls, reference);
+  async read(scope: ConnectorScope, reference: OutlineReference): Promise<Result<EphemeralObserved<OutlineReadResult>>> {
+    return readFixtureDocument(this.documents, this.calls, scope, reference);
   }
-  async mutate(command: ExactRevisionMutation<OutlineMutation>): Promise<Result<Observed<OutlineDocument>>> {
-    return mutateFixtureDocument(this.documents, this.calls, command, this.consumeFault());
-  }
-  async exchangeMemberGrant(command: ExchangeOutlineOAuthGrant): Promise<Result<DelegatedOutlineGrant>> {
-    return exchangeFixtureGrant(this.calls, command);
-  }
-  async revokeMemberGrant(command: RevokeOutlineOAuthGrant): Promise<Result<GrantRevocation>> {
-    return revokeFixtureGrant(this.calls, command);
-  }
-  async inspectBotConnection(query: InspectOutlineBot): Promise<Result<OutlineBotConnection>> {
-    return inspectFixtureBot(this.calls, query);
+  async mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<OutlineMutation>): Promise<Result<Observed<OutlineDocumentProjection>>> {
+    return mutateFixtureDocument(this.documents, this.calls, authorization, command, this.consumeFault());
   }
 }
 ```
+
+The strict content adapter re-resolves the document's actual current collection on every search/read/
+write and intersects it with Foundation collection references; a caller-supplied/old collection is
+never authority. It satisfies the port at compile time. The separate strict OAuth provider returns
+internal token sets to encrypted storage and simulates metadata capabilities, rotation, identity
+changes, revoke failure and expiry without exposing tokens through shared/browser types.
 
 - [ ] **Step 5: Run GREEN and browser proof**
 
@@ -259,8 +376,10 @@ git commit -m "feat(outline): separate member and bot authority"
 - Test: `tests/protocol/outline-surface-parity.test.ts`
 
 **Interfaces:**
-- Consumes: `OutlinePort.search/read`, Foundation Context Recipe budgets, connector epoch/scope, source-reference provenance, and bounded preview schema.
-- Produces: `FederatedSearch.search(query): Promise<Result<FederatedSearchResult>>` and `OutlineReferenceProvider.get(reference): Promise<Result<Observed<OutlineReadResult>>>`.
+- Consumes: `OutlineContentPort.search/read`, Foundation Context Recipe budgets, connector epoch/scope,
+  source-reference provenance, and bounded preview schema.
+- Produces: `FederatedSearch.search(query): Promise<Result<FederatedSearchResult>>` and
+  `OutlineReferenceProvider.get(reference): Promise<Result<EphemeralObserved<OutlineReadResult>>>`.
 
 - [ ] **Step 1: Write reference-first and canary tests**
 
@@ -326,8 +445,10 @@ git commit -m "feat(outline): add reference-first live retrieval"
 - Test: `tests/e2e/outline-coediting.spec.ts`
 
 **Interfaces:**
-- Consumes: delegated member identity, current Context Read Scope, `ExecutionAuthority.execute({ kind: "AUTHORIZE_OPERATION", ... })`, and `OutlinePort.mutate`.
-- Produces: `createDocumentAsMember` and `editDocumentAsMember`, both returning confirmed `Observed<OutlineDocumentReference>`.
+- Consumes: authenticated Member plus server-derived current OAuth grant, current Context Read Scope,
+  Foundation `ConnectorAuthority`, and `OutlineContentPort.mutate`.
+- Produces: `createDocumentAsMember` and `editDocumentAsMember`, both returning confirmed
+  `Observed<OutlineDocumentProjection>`.
 
 - [ ] **Step 1: Write two-writer and create-attribution tests**
 
@@ -353,21 +474,27 @@ Expected: FAIL because human editing is missing.
 - [ ] **Step 3: Implement member-only provider-first writes**
 
 ```ts
-export async function editDocumentAsMember(command: EditDocumentAsMember): Promise<Result<Observed<OutlineDocumentReference>>> {
-  const identity = resolveOutlineIdentity({ operation: "HUMAN_WRITE", memberId: command.memberId, memberGrant: command.grant });
-  if (!identity.ok) return identity;
-  const authorization = await authority.execute(toOutlineAuthorization(command));
-  if (!authorization.ok) return authorization;
-  return outline.mutate({ mutation: toMemberMutation(command), expectedRevision: command.expectedRevision });
+export async function editDocumentAsMember(command: EditDocumentAsMember): Promise<Result<Observed<OutlineDocumentProjection>>> {
+  const prepared = await connectorAuthority.prepareOperation(toMemberExactRevisionOperation(command));
+  if (!prepared.ok) return prepared;
+  const observed = await outline.mutate(prepared.value.authorization, prepared.value.command);
+  if (!observed.ok) return recordVisibleProviderFailure(prepared.value.intentId, observed.error);
+  return connectorAuthority.confirmMutation(toSafeOutlineConfirmation(prepared.value.intentId, observed.value));
 }
 ```
 
 - [ ] **Step 4: Implement direct creation and residual-race reporting**
 
 ```ts
-const created = await outline.mutate({ mutation: { kind: "CREATE_DOCUMENT_AS_MEMBER", identity, collectionId, title, body }, expectedRevision: "ABSENT" });
+const prepared = await connectorAuthority.prepareOperation(toMemberCreateOperation({ collectionId, title, body, precondition: { kind: "ABSENT" } }));
+const created = prepared.ok ? await outline.mutate(prepared.value.authorization, prepared.value.command) : prepared;
 return created.ok ? recordConfirmedReference(created.value) : recordVisibleProviderFailure(created.error);
 ```
+
+Member OAuth identity/grant revision is derived during `prepareOperation` from the authenticated
+Member and bound into the authorization digest; request payloads cannot select it. Re-read current
+native collection/revision immediately before write and read-confirm afterward. Lost-response recovery
+uses the Foundation operation intent and exact provider object/action marker, never body matching.
 
 - [ ] **Step 5: Run GREEN and two-browser co-edit proof**
 
@@ -496,7 +623,8 @@ git commit -m "feat(outline): authorize exact agent document grants"
 - Test: `tests/e2e/outline-proposals.spec.ts`
 
 **Interfaces:**
-- Consumes: exact source reference/revision, bounded `AuthoredDocumentPatch`, current member/grant/connector authority, and `OutlinePort.read/mutate`.
+- Consumes: exact source reference/revision, bounded `AuthoredDocumentPatch`, current
+  member/grant/connector authority, and `OutlineContentPort.read/mutate`.
 - Produces: immutable `DocumentProposal`, `DocumentConflict`, and disposition `KEEP|PROMOTE|ARCHIVE`.
 
 - [ ] **Step 1: Write external-change and no-body-persistence tests**

@@ -398,6 +398,15 @@ export interface SourceConnector<R, P, M> {
   mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<M>): Promise<Result<Observed<P>>>;
   scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<P>>>;
 }
+export interface ContextConnector<R, LiveRead, Projection, M> {
+  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
+  read(scope: ConnectorScope, reference: R): Promise<Result<EphemeralObserved<LiveRead>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<M>): Promise<Result<Observed<Projection>>>;
+}
+export interface ConnectorProjectionCodec<P> {
+  parseSafeProjection(input: unknown): Result<P>;
+  serializeSafeProjection(value: P): Result<string>;
+}
 ```
 
 `ConnectorAuthority` owns connector scope, epoch, human authorization, attempt-operation
@@ -407,6 +416,14 @@ does not need an `AuthoritySession`. An attempt-originated write first consumes 
 `ExecutionAuthority` operation authorization, then enters the same connector command. Provider ports
 receive an opaque short-lived `ConnectorOperationAuthorization`; they never decide actor authority,
 persist idempotency/audit/projections, or mutate epochs.
+
+`EphemeralObserved<T>` is response-only and intentionally incompatible with `Observed<Projection>`;
+the authority has no API that persists a live read. Mutation confirmation requires an injected closed
+`ConnectorProjectionCodec`, reparses the normalized provider result, enforces byte/schema bounds, and
+persists/idempotently replays only that safe projection. Provider bodies, snippets, patches, raw
+payloads, token sets, or error objects cannot be typed or cast into the persistence path. Connector
+credential owner identity always includes connector ID plus an opaque owner/grant row ID so one Member
+can connect multiple workspaces and bot/member credentials cannot be swapped.
 
 Provider-first writes are crash-safe before any provider phase exists. Schema v1 includes a generic
 STRICT `connector_operation_intents` table with operation/idempotency identity, canonical input hash,

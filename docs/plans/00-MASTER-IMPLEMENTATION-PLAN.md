@@ -87,10 +87,10 @@ export interface SourceConnector<TReference, TProjection, TMutation> {
   mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
   scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<TProjection>>>;
 }
-export interface ContextConnector<TReference, TDocument, TMutation> {
+export interface ContextConnector<TReference, TLiveRead, TProjection, TMutation> {
   search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
-  read(scope: ConnectorScope, reference: TReference): Promise<Result<Observed<TDocument>>>;
-  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TDocument>>>;
+  read(scope: ConnectorScope, reference: TReference): Promise<Result<EphemeralObserved<TLiveRead>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
 }
 
 // src/server/modules/workflows/contract.ts
