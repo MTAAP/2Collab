@@ -1243,6 +1243,9 @@ V1 ships finite defaults for every security-sensitive lifetime and buffer. Deplo
 | Runner WSS future-issued clock allowance | 30 seconds |
 | Live output chunk / in-memory reconnect buffer | 16 KiB / 1 MiB per attempt |
 | Runner reconnect maximum backoff | 30 seconds |
+| Runner safe context cache | 64 MiB total, 4 MiB per run, 7 days |
+| Runner durable semantic outbox | 10,000 events and 64 MiB, with 10% reserved for terminal/checkpoint events |
+| Accepted runner-event dedup retention | 90 days |
 | Source-unavailable automatic refresh grace | 5 minutes |
 | Encrypted local diagnostic tail | 2 MiB and 24 hours |
 | Resolved Inbox retention | 90 days |

@@ -595,6 +595,8 @@ git commit -m "feat: add typed runner data plane"
 - Create: `src/runner/{daemon,supervisor,local-diagnostics}.ts`
 - Create: `src/runner/{profiles,process-state,environment}.ts`
 - Create: `src/runner/credentials/os-store.ts`
+- Create: `src/runner/db/{connection,migrate}.ts`
+- Create: `src/runner/db/migrations/0001_profiles_processes.sql`
 - Create: `src/runner/adapters/runtime/{contract,claude,codex}.ts`
 - Create: `src/runner/adapters/host/{contract,native,orca}.ts`
 - Create: `src/runner/adapters/enforcement/{contract,trusted-host}.ts`
@@ -1077,13 +1079,16 @@ git commit -m "feat: expose equivalent foundation surfaces"
 
 ### Task 14: Offline cache, durable outbox, cancellation, and reconciliation
 
-**Requirements:** `FND-009`, remaining `FND-008`, `ORP-10`.
+**Requirements:** `FND-009`, remaining `FND-008`, `ORP-10`; supplies the durable fault proof deferred by Tasks 7 and 10.
 
 **Files:**
 - Create: `src/server/db/migrations/0004_foundation_operations.sql`
 - Create: `src/server/db/migrations/0004_foundation_operations.verify.ts`
 - Create: `src/runner/{cache,outbox,offline-policy}.ts`
+- Create: `src/runner/db/migrations/0002_continuity.sql`
+- Modify: `src/runner/db/migrate.ts`
 - Create: `src/server/modules/runs/{event-deduplication,reconciliation}.ts`
+- Modify: `src/shared/contracts/{protocol,commands,runs}.ts`
 - Test: `tests/drills/{network-partition,cancellation,runner-loss}.test.ts`
 
 **Interfaces:**
@@ -1094,11 +1099,11 @@ git commit -m "feat: expose equivalent foundation surfaces"
 
 ```ts
 test("mutation stops after grace while inspect-only continues to deadline", async () => {
-  const f = createPartitionFixture({ disconnectGraceMs: 15_000 });
+  const f = createPartitionFixture({ disconnectGraceSeconds: 15 });
   const mutating = await f.start("MUTATING");
   const inspectOnly = await f.start("INSPECT_ONLY");
   f.disconnect();
-  f.clock.advance(15_001);
+  f.clock.advance(16);
   expect(f.offlinePolicy.decide(mutating)).toEqual({ action: "CHECKPOINT_AND_STOP", code: "MUTATION_LEASE_EXPIRED" });
   expect(f.offlinePolicy.decide(inspectOnly)).toEqual({ action: "CONTINUE_INSPECTION" });
   await f.reconnectWithDuplicates();
@@ -1115,22 +1120,22 @@ Expected: FAIL because local continuity and reconciliation modules are missing.
 
 - [ ] **Step 3: Add operation persistence and offline policy**
 
-```sql
-CREATE TABLE accepted_runner_events(runner_id TEXT NOT NULL, message_id TEXT NOT NULL, input_hash TEXT NOT NULL, accepted_at INTEGER NOT NULL, PRIMARY KEY(runner_id,message_id));
-CREATE TABLE backup_metadata(id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, key_id TEXT NOT NULL, manifest_digest TEXT NOT NULL, created_at INTEGER NOT NULL, verified_at INTEGER);
-CREATE TABLE operation_intents(id TEXT PRIMARY KEY, kind TEXT NOT NULL, safe_payload TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('PENDING','COMMITTED','REJECTED')), created_at INTEGER NOT NULL, resolved_at INTEGER);
-INSERT INTO schema_migrations(version, applied_at) VALUES (4, unixepoch());
-```
+Server migration 0004 creates durable semantic-event acceptance and closed revocation/operation intent state. Accepted events key on authenticated runner plus stable semantic event ID, not connection message ID, and persist run/attempt, schema/event kind, positive local sequence/predecessor, canonical input hash, committed result reference/disposition, and accepted time. The dedup row, lifecycle/evidence/checkpoint/result effect, audit, and acknowledgement intent commit together. Same ID/same hash replays the result; changed hash conflicts. Closed operation kinds use kind-specific validated fields/digests and never arbitrary payload JSON or the WSS dispatch outbox. Backup metadata belongs to Task 15, not this migration.
+
+Runner-local migration 0002 adds bounded cache entries and a closed semantic event outbox to `~/.collab/runner.db`. Events retain stable ID/hash/sequence across restart and connection changes, use `PENDING/IN_FLIGHT/ACKNOWLEDGED/PERMANENTLY_REJECTED`, reserve capacity for terminal/checkpoint facts, and never contain raw output, prompts, bodies, diffs, transcripts, credentials, environment, attachment handles, or absolute paths. Cache rows are read-only authority aids with freshness/provenance and the Product Spec byte/item/age limits; they never store permits or create authority.
 
 ```ts
 export function decideOffline(input: OfflineDecisionInput): OfflineDecision {
-  if (input.connected) return { action: "CONTINUE" };
+  if (input.connectedAndRenewed) return { action: "CONTINUE" };
   if (input.now >= input.attemptDeadline) return { action: "CHECKPOINT_AND_STOP", code: "ATTEMPT_DEADLINE_EXPIRED" };
   if (input.mode === "INSPECT_ONLY") return { action: "CONTINUE_INSPECTION" };
-  if (input.now >= Math.min(input.leaseExpiresAt, input.disconnectedAt + input.disconnectGraceMs)) return { action: "CHECKPOINT_AND_STOP", code: "MUTATION_LEASE_EXPIRED" };
+  if (input.mutationLeaseExpiresAt === undefined) return { action: "CHECKPOINT_AND_STOP", code: "MUTATION_LEASE_MISSING" };
+  if (input.now >= Math.min(input.authoritySessionExpiresAt, input.mutationLeaseExpiresAt, input.disconnectedAt + input.disconnectGraceSeconds)) return { action: "CHECKPOINT_AND_STOP", code: "MUTATION_LEASE_EXPIRED" };
   return { action: "CONTINUE_MUTATION_WITH_EXISTING_LEASE" };
 }
 ```
+
+Reconnect order is authenticate/negotiate, fence the old connection, fetch current authoritative disposition, reconcile exact assignment/process identity, apply stop/quarantine, drain causal semantic events, then renew authority. Reconnect cannot extend deadline/grace without a committed fresh session/lease. Cancellation exposes requested, confirmed-never-started/terminated, unreachable, and eventual lost dispositions separately; only host evidence confirms `CANCELLED`/`TIMED_OUT`. At 30 seconds the runner is offline; at 90 seconds an unreconciled active Attempt becomes immutable `LOST`, authority/session/lease ends, and the Run moves to `WAITING/RUNNER_UNAVAILABLE`. A later orphan is terminated or quarantined without resurrecting the Attempt.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -1141,7 +1146,7 @@ Expected: PASS; disconnected runners cannot renew/acquire authority or claim mut
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/db/migrations/0004_foundation_operations.sql src/server/db/migrations/0004_foundation_operations.verify.ts src/runner/cache.ts src/runner/outbox.ts src/runner/offline-policy.ts src/server/modules/runs/event-deduplication.ts src/server/modules/runs/reconciliation.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts
+git add src/shared/contracts/protocol.ts src/shared/contracts/commands.ts src/shared/contracts/runs.ts src/server/db/migrations/0004_foundation_operations.sql src/server/db/migrations/0004_foundation_operations.verify.ts src/runner/db src/runner/cache.ts src/runner/outbox.ts src/runner/offline-policy.ts src/server/modules/runs/event-deduplication.ts src/server/modules/runs/reconciliation.ts tests/drills/network-partition.test.ts tests/drills/cancellation.test.ts tests/drills/runner-loss.test.ts
 git commit -m "feat: add bounded offline continuity"
 ```
 
