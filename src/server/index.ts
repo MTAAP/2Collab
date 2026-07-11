@@ -11,7 +11,7 @@ await import(environment.runnerCompositionModule);
 
 export default await createProductionServer(
   environment,
-  createApp({
+  createApp(undefined, {
     docsRoot: "./docs",
     webRoot: environment.mode === "production" ? "./dist/web" : undefined,
   }),

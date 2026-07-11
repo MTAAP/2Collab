@@ -1,6 +1,8 @@
 import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
 import { APP_METADATA } from "../shared/app-metadata.ts";
+import { createFoundationHttpApp } from "./adapters/http/app.ts";
+import type { FoundationHttpDependencies } from "./adapters/http/app.ts";
 
 type AppOptions = {
   docsRoot?: string;
@@ -18,7 +20,10 @@ function errorBody(code: ErrorBody["error"]["code"], message: string): ErrorBody
   return { error: { code, message } };
 }
 
-export function createApp(options: AppOptions = {}): Hono {
+export function createApp(
+  dependencies?: FoundationHttpDependencies,
+  options: AppOptions = {},
+): Hono {
   const app = new Hono();
 
   app.get("/healthz", (context) =>
@@ -37,6 +42,10 @@ export function createApp(options: AppOptions = {}): Hono {
       version: APP_METADATA.version,
     }),
   );
+
+  if (dependencies) {
+    app.route("/", createFoundationHttpApp(dependencies));
+  }
 
   app.all("/api/*", (context) =>
     context.json(errorBody("NOT_FOUND", "The requested API resource does not exist."), 404),

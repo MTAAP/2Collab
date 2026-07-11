@@ -20,7 +20,7 @@
     "format:check": "biome format .",
     "lint": "biome lint .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "bun run test:unit && bun run test:integration && bun run test:protocol && bun run test:runner",
+    "test": "bun test tests/unit tests/integration tests/protocol tests/runner tests/drills",
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",
     "test:protocol": "bun test tests/protocol",
