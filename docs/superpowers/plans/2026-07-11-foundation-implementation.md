@@ -666,6 +666,8 @@ export const trustedHostEnforcement: RepositoryEnforcementAdapter = {
 };
 ```
 
+The runtime adapter returns a host-neutral invocation and never an environment. The supervisor resolves the run-owned worktree through `WorktreePort`, builds a minimal allowlisted environment from runner-local configuration/OS-credential references, activates assurance, consumes the permit immediately before start, and supplies the resulting `SupervisorLaunch` to Native or Orca. The versioned `~/.collab/runner.db` owns profile and opaque process reconciliation state but no shared lifecycle or raw output. Duplicate assignment digests reconcile; changed reuse fails. Trusted Native/Orca always report `ADVISORY`, and every `ENFORCED` request starts zero processes. Headless output uses split-safe redaction and bounded live chunks; interactive bytes have no shared code path. Diagnostics use local AEAD, owner reauthentication, 2MiB/24h caps, and only the metadata allowlist defined by the Product Spec.
+
 - [ ] **Step 4: Verify GREEN**
 
 Run: `bun test tests/runner/conformance tests/runner/local-diagnostics.test.ts`
@@ -747,11 +749,12 @@ git commit -m "feat: add coordination and run schema"
 
 ### Task 10: Deep ExecutionAuthority lifecycle, permits, sessions, evidence, and revocation
 
-**Requirements:** `FND-007`, `FND-008`, authority portion of `FND-009`, `ORP-15`.
+**Requirements:** `FND-007`, authority/lifecycle portion of `FND-008` and `FND-009`, `ORP-15`; durable reconnect/lost fault proof remains `IN_PROGRESS` until Task 14.
 
 **Files:**
 - Create: `src/server/modules/execution-authority/{execution-authority,policy,fencing,revocation}.ts`
 - Create: `src/server/modules/runs/{lifecycle,checkpoints,evidence,results}.ts`
+- Modify: `src/shared/contracts/{commands,runs,execution-authority}.ts`
 - Test: `tests/unit/{runs,execution-authority}/`
 - Test: `tests/integration/{runs,execution-authority}/`
 
@@ -765,7 +768,7 @@ git commit -m "feat: add coordination and run schema"
 test("lost attempt waits and resume creates a new immutable attempt", async () => {
   const f = createAuthorityFixture();
   const launched = await f.launch();
-  await f.acceptEvent(launched, { kind: "ATTEMPT_LOST", observedAt: f.clock.now() });
+  await f.reconcileLost(launched, { kind: "LOST", observedAt: f.clock.now() });
   expect((await f.inspectRun(launched)).value).toMatchObject({ state: "WAITING", attempts: [{ state: "LOST" }] });
   await f.authority.execute(f.resume(launched));
   expect((await f.inspectRun(launched)).value).toMatchObject({ state: "RUNNING", attempts: [{ state: "LOST" }, { state: "PENDING" }] });
@@ -777,7 +780,7 @@ test("permit replay and stale fence never authorize an operation", async () => {
   const session = await f.consume(permit);
   expect((await f.consume(permit)).error?.code).toBe("PERMIT_REPLAYED");
   await f.renew(session);
-  expect((await f.authorize(session, { fence: 1, operation: { kind: "PUBLISH_GIT_REFERENCE", expectedHead: "abc" } })).error?.code).toBe("SESSION_FENCE_STALE");
+  expect((await f.authorize(session, { fence: 1, operation: { kind: "PUBLISH_GIT_REFERENCE", expectedHead: "0123456789abcdef0123456789abcdef01234567" } })).error?.code).toBe("SESSION_FENCE_STALE");
 });
 ```
 
@@ -794,13 +797,18 @@ export function createExecutionAuthority(deps: AuthorityDependencies): Execution
   return {
     preview: (request) => previewAuthority(deps, request),
     execute: async (command) => {
-      const replay = findIdempotentResult(deps.db, command);
-      if (replay.kind === "MATCH") return replay.result;
-      if (replay.kind === "CONFLICT") return err("IDEMPOTENCY_CONFLICT", "The key was used with different input.", "NEVER");
       const externalFacts = await deps.authorityFacts.refresh(requiredFacts(command));
       if (!externalFacts.ok) return err("AUTHORITY_FACT_UNAVAILABLE", "Required authority facts are unavailable.", "REFRESH");
-      const committed = inImmediateTransaction(deps.db, () => decideAndPersist(deps, command, externalFacts.value));
-      if (committed.ok) void deps.runnerControl.dispatchCommitted(committed.value.outboxIds);
+      const committed = inImmediateTransaction(deps.db, () => {
+        const replay = findIdempotentResult(deps.db, command);
+        if (replay.kind === "MATCH") return replay;
+        if (replay.kind === "CONFLICT") return idempotencyConflict();
+        return decideAndPersist(deps, command, recheckLocalFacts(deps.db, externalFacts.value));
+      });
+      if (committed.outboxIds.length > 0) {
+        const wake = deps.deliveryScheduler.notifyCommitted(committed.outboxIds);
+        if (!wake.ok) deps.telemetry.recordDeliveryPending(committed.outboxIds, wake.error.code);
+      }
       return committed.result;
     },
     query: (query) => queryCoordination(deps.db, query),
@@ -808,7 +816,7 @@ export function createExecutionAuthority(deps: AuthorityDependencies): Execution
 }
 ```
 
-The runtime adapter returns a host-neutral invocation and never an environment. The supervisor resolves the run-owned worktree through `WorktreePort`, builds a minimal allowlisted environment from runner-local configuration/OS-credential references, activates assurance, consumes the permit immediately before start, and supplies the resulting `SupervisorLaunch` to Native or Orca. The versioned `~/.collab/runner.db` owns profile and opaque process reconciliation state but no shared lifecycle or raw output. Duplicate assignment digests reconcile; changed reuse fails. Trusted Native/Orca always report `ADVISORY`, and every `ENFORCED` request starts zero processes. Headless output uses split-safe redaction and bounded live chunks; interactive bytes have no shared code path. Diagnostics use local AEAD, owner reauthentication, 2MiB/24h caps, and only the metadata allowlist defined by the Product Spec.
+Commands use strict runtime schemas and command-specific actor rules. `AUTHORIZE_ATTEMPT` returns an explicit `AUTHORIZED`, `WAITING`, or `DENIED` decision so a pre-creation denial creates no Attempt or budget use. Manual mutation-guard override is a Member-only closed command carrying reason/collision revisions; schedulers and workflows cannot override. Cancellation derives the active-attempt disposition from current state rather than trusting caller input. Results and checkpoints contain typed reason/action and complete recovery facts; process exit includes signal/correlation data. Operation authorizations are short-lived, single-use, exact operation/resource-digest records bound to session fence and consumed immediately before the action. Member/runner/system revocations have distinct authenticated actors and monotonic source epochs. Permit signing/verifying is injected, clear tokens are never persisted, session and mutation-lease fences are separate, and every external fact is refreshed outside then locally rechecked inside the transaction.
 
 ```ts
 export function transitionAttempt(current: ExecutionAttemptState, event: AttemptEvent): Result<ExecutionAttemptState> {
@@ -826,7 +834,7 @@ Expected: PASS for immutable terminal states, attempt budget, deadlines, idempot
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/server/modules/execution-authority src/server/modules/runs tests/unit/runs tests/unit/execution-authority tests/integration/runs tests/integration/execution-authority
+git add src/shared/contracts/commands.ts src/shared/contracts/runs.ts src/shared/contracts/execution-authority.ts src/server/modules/execution-authority src/server/modules/runs tests/unit/runs tests/unit/execution-authority tests/integration/runs tests/integration/execution-authority
 git commit -m "feat: implement execution authority"
 ```
 

@@ -375,7 +375,7 @@ PENDING -> STARTING -> RUNNING
 - `EXITED` means the process ended. MTAAP records its exit code and termination signal, but a zero exit code does not by itself mean the Run Goal was achieved.
 - `FAILED_TO_START` means the runner acknowledged the attempt but never started its process because setup, adapter, or worktree preparation failed.
 - `CANCELLED` means an authorized cancellation ended or aborted the attempt.
-- `TIMED_OUT` means the attempt exceeded its policy deadline and runner termination was attempted or confirmed.
+- `TIMED_OUT` means the attempt exceeded its policy deadline and the runner locally confirmed that the process terminated through the deadline path. Deadline expiry first denies further authority and records `TERMINATION_REQUESTED`; an unreachable or otherwise unconfirmed process remains nonterminal during reconciliation and becomes `LOST` after the normal grace rather than being falsely reported stopped.
 - `LOST` means the runner became unavailable and could not reconcile the process state before the configured grace period expired.
 
 `EXITED`, `FAILED_TO_START`, `CANCELLED`, `TIMED_OUT`, and `LOST` are immutable terminal attempt states. An attempt's exit status is evidence, not an Agent Run result: the shared server decides the corresponding run transition separately, and a failed attempt may be followed by another attempt pursuing the same Run Goal.
@@ -400,7 +400,7 @@ The run stays `RUNNING` during a durable automatic managed-loop delay because no
 
 V1 has no unbounded loop mode. Every Managed Loop must define all three of: a semantic stop condition tied to its Run Goal, a positive maximum number of Execution Attempts, and an absolute wall-clock deadline. Every created attempt counts against the maximum, including failed starts, lost processes, and retries, so infrastructure trouble cannot accidentally reset the budget. The server evaluates the stop condition and remaining bounds before creating each next attempt.
 
-A Runtime-Owned Loop has opaque internal ticks, so Collab cannot honestly enforce an iteration count or interpret its internal completion rule. It must still have a positive absolute deadline carried in the execution policy and enforced by the runner even while disconnected from the server. Reaching that deadline terminates the process through the normal cancellation path and records the attempt as `TIMED_OUT`.
+A Runtime-Owned Loop has opaque internal ticks, so Collab cannot honestly enforce an iteration count or interpret its internal completion rule. It must still have a positive absolute deadline carried in the execution policy and enforced by the runner even while disconnected from the server. Reaching that deadline denies authority and requests termination through the normal path; confirmed local termination records `TIMED_OUT`, while an unconfirmed process follows reconciliation to `LOST`.
 
 Runner owners may configure profiles with generous duration ceilings and a self-hosted deployment may raise its allowed ceilings, but neither can represent infinity, omit the final deadline, or use a sentinel value that disables enforcement. A dispatch may choose only limits within the stricter profile and deployment ceilings. The effective bounds are recorded with the Agent Run so later configuration changes do not silently widen work already in progress.
 
