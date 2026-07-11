@@ -4,6 +4,7 @@ import type { ExecutionAuthority } from "../../../shared/contracts/execution-aut
 import { CommitShaSchema, IdentifierSchema, Sha256Schema } from "../../../shared/contracts/ids.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import { GitRefSchema } from "../../../shared/contracts/runners.ts";
+import type { PreparedRunConfigurationSnapshot } from "../presets/configuration-resolver.ts";
 
 export type ExecutionAuthorityPort = ExecutionAuthority;
 
@@ -58,6 +59,7 @@ export const LaunchAuthorityFactsSchema = z
 export type LaunchPersistenceInput = Readonly<{
   command: LaunchRun;
   authority: LaunchAuthorityFacts;
+  preparedConfiguration: PreparedRunConfigurationSnapshot;
 }>;
 
 export type CommittedLaunch = Readonly<{

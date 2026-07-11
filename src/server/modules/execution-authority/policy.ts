@@ -91,12 +91,15 @@ export function operationNeedsMutationLease(operation: SensitiveOperation): bool
   return (
     operation.kind === "MUTATE_REPOSITORY" ||
     operation.kind === "PUBLISH_GIT_REFERENCE" ||
+    operation.kind === "MUTATE_GITHUB" ||
+    operation.kind === "MUTATE_OUTLINE" ||
+    operation.kind === "APPLY_APPROVAL_TRANSITION" ||
     operation.kind === "DISCARD_RETAINED_WORK"
   );
 }
 
 export function inspectOnlyMayAuthorize(operation: SensitiveOperation): boolean {
-  return operation.kind === "EXECUTE_LOCAL_GATE" || operation.kind === "APPLY_APPROVAL_TRANSITION";
+  return operation.kind === "EXECUTE_LOCAL_GATE";
 }
 
 export function operationConnector(

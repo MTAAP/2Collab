@@ -1,11 +1,16 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { migrate } from "../../../src/server/db/migrate.ts";
+import { computeContextRecipeDigest } from "../../../src/server/modules/context/context-recipes.ts";
 import { canonicalSourceReferenceKey } from "../../../src/server/modules/coordination-records/canonical-key.ts";
 import {
   createLaunchPersistence,
   type LaunchPersistenceInput,
 } from "../../../src/server/modules/execution-authority/persistence.ts";
+import {
+  prepareRunConfigurationSnapshot,
+  resolveEffectiveRunConfiguration,
+} from "../../../src/server/modules/presets/configuration-resolver.ts";
 import type { ProjectId } from "../../../src/shared/contracts/ids.ts";
 import {
   AttemptViewSchema,
@@ -15,10 +20,85 @@ import {
 } from "../../../src/shared/contracts/runs.ts";
 
 const SESSION_PROOF = "owner-session-proof-with-at-least-thirty-two-bytes";
-const CONFIG_DIGEST = "b".repeat(64);
 const PROFILE_FINGERPRINT = "c".repeat(64);
 const SECURITY_DIGEST = "d".repeat(64);
 const BASE_COMMIT = "a".repeat(40);
+const RECIPE = {
+  id: "recipe_1",
+  version: 1,
+  projectId: "project_1",
+  perCategoryLimits: { SOURCE: 1 },
+  maximumReferences: 1,
+  maximumPreviewBytes: 0,
+  freshnessSeconds: 30,
+  predecessorPolicy: "NONE" as const,
+};
+const RECIPE_DIGEST = computeContextRecipeDigest(RECIPE);
+const RESOLVED_CONFIGURATION = resolveEffectiveRunConfiguration(
+  {
+    presetId: "configuration_1",
+    presetVersion: 1,
+    ownerMemberId: "owner_1",
+    projectId: "project_1",
+    runtime: "CODEX",
+    runnerId: "runner_1",
+    runnerEpoch: 1,
+    mappingRevision: 1,
+    profileId: "profile_1",
+    profileVersion: 1,
+    profileFingerprint: PROFILE_FINGERPRINT,
+    host: "NATIVE",
+    interaction: "HEADLESS",
+    repositoryMode: "INSPECT_ONLY",
+    repositoryAssurance: "ADVISORY",
+    executionPolicy: "ONCE",
+    maximumAttempts: 3,
+    deadlineSeconds: 900,
+    contextRecipeId: "recipe_1",
+    contextRecipeVersion: 1,
+    requiredGates: [],
+  },
+  {
+    runGoal: "Implement the bounded Foundation slice.",
+    authorityFacts: {
+      projectRevision: 1,
+      runnerPolicyRevision: 1,
+      securityPolicyVersion: 1,
+      securityDigest: SECURITY_DIGEST as never,
+      connectorEpochs: {},
+      grantIds: [],
+    },
+    currentBinding: {
+      projectId: "project_1",
+      runnerId: "runner_1",
+      runnerEpoch: 1,
+      mappingRevision: 1,
+      profileId: "profile_1",
+      profileVersion: 1,
+      profileFingerprint: PROFILE_FINGERPRINT,
+    },
+  },
+);
+if (!RESOLVED_CONFIGURATION.ok) throw new Error(RESOLVED_CONFIGURATION.error.code);
+const PREPARED_CONFIGURATION = prepareRunConfigurationSnapshot({
+  configuration: RESOLVED_CONFIGURATION.value,
+  envelope: {
+    schemaVersion: 1,
+    contextRecipe: { id: "recipe_1", version: 1, digest: RECIPE_DIGEST },
+    references: [
+      {
+        category: "SOURCE",
+        referenceId: "issue_1",
+        observedRevision: "revision_1",
+        status: "FRESH",
+      },
+    ],
+    omissions: [],
+  },
+});
+if (!PREPARED_CONFIGURATION.ok) throw new Error(PREPARED_CONFIGURATION.error.code);
+const PREPARED_CONFIGURATION_VALUE = PREPARED_CONFIGURATION.value;
+const CONFIG_DIGEST = RESOLVED_CONFIGURATION.value.digest;
 
 function seedAuthorityFacts(database: Database): void {
   database.exec(`
@@ -41,6 +121,36 @@ function seedAuthorityFacts(database: Database): void {
       'runner_1', 'profile_1', 1, 'Safe profile', 'CODEX', 1, 1, 1, 1,
       'Trusted local execution', '${PROFILE_FINGERPRINT}', 0
     );
+    INSERT INTO personal_run_presets(
+      id, owner_member_id, project_id, display_name, state, current_version,
+      revision, created_at, updated_at
+    ) VALUES ('configuration_1', 'owner_1', 'project_1', 'Foundation', 'ACTIVE', 1, 1, 0, 0);
+    INSERT INTO personal_run_preset_versions(
+      preset_id, version, derived_template_id, derived_template_version,
+      runner_id, runner_epoch, mapping_revision, profile_id, profile_version,
+      profile_fingerprint, host, interaction, repository_mode, repository_assurance,
+      execution_policy, maximum_attempts, deadline_seconds, managed_loop_max_iterations,
+      managed_loop_cadence_seconds, stop_policy_digest, unknown_grace_seconds,
+      unknown_backoff_initial_seconds, unknown_backoff_max_seconds, context_recipe_id,
+      context_recipe_version, reusable_goal_template, reusable_instruction_template,
+      personal_addendum, configuration_digest, created_at
+    ) VALUES (
+      'configuration_1', 1, NULL, NULL, 'runner_1', 1, 1, 'profile_1', 1,
+      '${PROFILE_FINGERPRINT}', 'NATIVE', 'HEADLESS', 'INSPECT_ONLY', 'ADVISORY',
+      'ONCE', 3, 900, NULL, NULL, NULL, NULL, NULL, NULL, 'recipe_1', 1,
+      NULL, NULL, NULL, '${"e".repeat(64)}', 0
+    );
+    INSERT INTO context_recipes(
+      id, project_id, display_name, current_version, state, revision, created_at, updated_at
+    ) VALUES ('recipe_1', 'project_1', 'Foundation', 1, 'ACTIVE', 1, 0, 0);
+    INSERT INTO context_recipe_versions(
+      recipe_id, version, include_goal, include_coordination, include_sources,
+      include_repository, include_predecessor_evidence, maximum_references,
+      maximum_preview_bytes, freshness_seconds, predecessor_policy, recipe_digest, created_at
+    ) VALUES ('recipe_1', 1, 1, 0, 0, 0, 0, 1, 0, 30, 'NONE', '${RECIPE_DIGEST}', 0);
+    INSERT INTO context_recipe_category_limits(
+      recipe_id, recipe_version, category, maximum_references
+    ) VALUES ('recipe_1', 1, 'SOURCE', 1);
   `);
 }
 
@@ -99,6 +209,7 @@ function launchInput(overrides: Partial<LaunchPersistenceInput> = {}): LaunchPer
       deadlineAt: 1_000,
       connectorEpochs: {},
     },
+    preparedConfiguration: PREPARED_CONFIGURATION_VALUE,
     ...overrides,
   } as LaunchPersistenceInput;
 }
@@ -126,7 +237,11 @@ function fixture(failAfter?: string) {
   const counts = () => ({
     records: count("coordination_records"),
     runs: count("agent_runs"),
+    configurationSnapshots: count("run_configuration_snapshots"),
+    bootstrapEnvelopes: count("context_bootstrap_envelopes"),
+    envelopeReferences: count("context_envelope_references"),
     attempts: count("execution_attempts"),
+    attemptCauses: count("execution_attempt_causes"),
     snapshots: count("authority_snapshots"),
     permits: count("dispatch_permits"),
     audits: count("audit_events"),
@@ -226,7 +341,11 @@ describe("source-free launch persistence", () => {
       expect(f.counts()).toEqual({
         records: 1,
         runs: 1,
+        configurationSnapshots: 1,
+        bootstrapEnvelopes: 1,
+        envelopeReferences: 1,
         attempts: 1,
+        attemptCauses: 1,
         snapshots: 1,
         permits: 1,
         audits: 1,
@@ -249,7 +368,9 @@ describe("source-free launch persistence", () => {
     for (const boundary of [
       "coordination_records",
       "agent_runs",
+      "run_configuration_snapshots",
       "execution_attempts",
+      "execution_attempt_causes",
       "authority_snapshots",
       "dispatch_permits",
       "audit_events",
@@ -264,7 +385,11 @@ describe("source-free launch persistence", () => {
         expect(f.counts()).toEqual({
           records: 0,
           runs: 0,
+          configurationSnapshots: 0,
+          bootstrapEnvelopes: 0,
+          envelopeReferences: 0,
           attempts: 0,
+          attemptCauses: 0,
           snapshots: 0,
           permits: 0,
           audits: 0,

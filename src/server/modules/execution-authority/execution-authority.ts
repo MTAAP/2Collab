@@ -23,6 +23,7 @@ import type {
 } from "../../../shared/contracts/runs.ts";
 import { inImmediateTransaction } from "../../db/transaction.ts";
 import { linkSourceReferences } from "../coordination-records/source-links.ts";
+import type { PreparedRunConfigurationSnapshot } from "../presets/configuration-resolver.ts";
 import { createCheckpoint } from "../runs/checkpoints.ts";
 import { createEvidence } from "../runs/evidence.ts";
 import { transitionAttempt, transitionRun } from "../runs/lifecycle.ts";
@@ -80,11 +81,19 @@ export interface RunnerControlPort {
   ): Promise<Result<void>>;
 }
 
+export interface RunConfigurationResolutionPort {
+  resolve(
+    command: Extract<CollabCommand, { kind: "LAUNCH_RUN" }>,
+    authority: RefreshedAuthorityFacts,
+  ): Promise<Result<PreparedRunConfigurationSnapshot>>;
+}
+
 export type AuthorityDependencies = Readonly<{
   database: Database;
   clock: () => number;
   id: (prefix: string) => string;
   authorityFacts: AuthorityFactPort;
+  runConfiguration: RunConfigurationResolutionPort;
   permitCodec: PermitCodec;
   runnerControl: RunnerControlPort;
 }>;
@@ -197,6 +206,26 @@ function attemptView(database: Database, attemptId: string): AttemptView | undef
         revision: row.revision,
       }
     : undefined;
+}
+
+function requireAttemptRunner(
+  database: Database,
+  actor: AuthenticatedActor,
+  attemptId: string,
+): Result<void> {
+  const principal = requireActivePrincipal(database, actor);
+  if (!principal.ok) return principal;
+  if (actor.kind !== "RUNNER") {
+    return error("RUNNER_ACTOR_MISMATCH", "Runner actor does not own this attempt.");
+  }
+  const assignment = database
+    .query<{ runner_id: string; runner_epoch: number }, [string]>(
+      "SELECT runner_id, runner_epoch FROM execution_attempts WHERE id = ?",
+    )
+    .get(attemptId);
+  return assignment?.runner_id === actor.runnerId && assignment.runner_epoch === actor.runnerEpoch
+    ? { ok: true, value: undefined }
+    : error("RUNNER_EPOCH_CHANGED", "Runner authority changed.", "REFRESH");
 }
 
 function runView(database: Database, runId: string): RunView | undefined {
@@ -593,12 +622,18 @@ async function executeLaunch(
     approvalSubjects: _approvalSubjects,
     ...launchFacts
   } = facts;
+  const preparedConfiguration = await dependencies.runConfiguration.resolve(command, facts);
+  if (!preparedConfiguration.ok) return preparedConfiguration;
   const persistence = createLaunchPersistence({
     database: dependencies.database,
     clock: dependencies.clock,
     id: dependencies.id,
   });
-  const committed = await persistence.create({ command, authority: launchFacts });
+  const committed = await persistence.create({
+    command,
+    authority: launchFacts,
+    preparedConfiguration: preparedConfiguration.value,
+  });
   if (!committed.ok) return committed;
   await dispatchCommitted(dependencies, committed.value.outboxIds);
   return { ok: true, value: committed.value.result };
@@ -672,20 +707,71 @@ function currentAttemptFactsMatch(
     return command.execution.exposureRevision === undefined;
   }
   if (command.execution.exposureRevision === undefined) return false;
+  return teamExposureIsLive(database, {
+    runnerId: command.execution.runnerId,
+    ownerMemberId: facts.runnerOwnerMemberId,
+    projectId: row.project_id,
+    mappingRevision: command.execution.projectMappingRevision,
+    profileId: command.execution.profileVersionId,
+    profileVersion: facts.profileVersion,
+    profileFingerprint: facts.profileFingerprint,
+    policyRevision: facts.runnerPolicyRevision,
+    securityPolicyVersion: facts.securityPolicyVersion,
+    securityDigest: facts.securityDigest,
+    exposureRevision: command.execution.exposureRevision,
+  });
+}
+
+function teamExposureIsLive(
+  database: Database,
+  facts: Readonly<{
+    runnerId: string;
+    ownerMemberId: string;
+    projectId: string;
+    mappingRevision: number;
+    profileId: string;
+    profileVersion: number;
+    profileFingerprint: string;
+    policyRevision: number;
+    securityPolicyVersion: number;
+    securityDigest: string;
+    exposureRevision: number;
+  }>,
+): boolean {
   return (
     database
-      .query<{ count: number }, [string, string, number, string, number, number]>(
-        `SELECT count(*) AS count FROM runner_exposures
-         WHERE runner_id = ? AND project_id = ? AND mapping_revision = ?
-           AND profile_id = ? AND profile_version = ? AND revision = ? AND revoked_at IS NULL`,
+      .query<
+        { count: number },
+        [string, string, string, number, string, number, string, number, number, string, number]
+      >(
+        `SELECT count(*) AS count FROM runner_exposures e
+         JOIN runner_exposure_acknowledgements a
+           ON a.id = e.acknowledgement_id
+          AND a.runner_id = e.runner_id AND a.owner_member_id = e.owner_member_id
+          AND a.project_id = e.project_id AND a.mapping_revision = e.mapping_revision
+          AND a.profile_id = e.profile_id AND a.profile_version = e.profile_version
+          AND a.profile_fingerprint = e.profile_fingerprint
+          AND a.policy_revision = e.policy_revision
+          AND a.security_policy_version = e.security_policy_version
+          AND a.security_digest = e.security_digest
+         WHERE e.runner_id = ? AND e.owner_member_id = ? AND e.project_id = ?
+           AND e.mapping_revision = ? AND e.profile_id = ? AND e.profile_version = ?
+           AND e.profile_fingerprint = ? AND e.policy_revision = ?
+           AND e.security_policy_version = ? AND e.security_digest = ?
+           AND e.revision = ? AND e.revoked_at IS NULL AND a.revoked_at IS NULL`,
       )
       .get(
-        command.execution.runnerId,
-        row.project_id,
-        command.execution.projectMappingRevision,
-        command.execution.profileVersionId,
+        facts.runnerId,
+        facts.ownerMemberId,
+        facts.projectId,
+        facts.mappingRevision,
+        facts.profileId,
         facts.profileVersion,
-        command.execution.exposureRevision,
+        facts.profileFingerprint,
+        facts.policyRevision,
+        facts.securityPolicyVersion,
+        facts.securityDigest,
+        facts.exposureRevision,
       )?.count === 1
   );
 }
@@ -750,6 +836,7 @@ async function executeAuthorizeAttempt(
           state: RunView["state"];
           revision: number;
           dispatcher_id: string;
+          dispatcher_context_id: string | null;
           repository_id: string;
           repository_mode: "MUTATING" | "INSPECT_ONLY";
           repository_assurance: "ADVISORY" | "ENFORCED";
@@ -784,6 +871,18 @@ async function executeAuthorizeAttempt(
       return { ok: true, value: denied };
     }
     if (runRow.dispatcher_id !== principal.value.id) {
+      const denied: CommandResult = {
+        kind: "AUTHORIZE_ATTEMPT",
+        decision: { outcome: "DENIED", code: "DISPATCHER_AUTHORITY_CHANGED" },
+      };
+      persistIdempotency(dependencies.database, command, inputHash, denied, now);
+      return { ok: true, value: denied };
+    }
+    if (
+      command.actor.kind === "SCHEDULER" &&
+      (principal.value.contextId === undefined ||
+        runRow.dispatcher_context_id !== principal.value.contextId)
+    ) {
       const denied: CommandResult = {
         kind: "AUTHORIZE_ATTEMPT",
         decision: { outcome: "DENIED", code: "DISPATCHER_AUTHORITY_CHANGED" },
@@ -859,6 +958,22 @@ async function executeAuthorizeAttempt(
         command.execution.exposureRevision ?? null,
         command.execution.host,
         command.execution.interaction,
+        now,
+      );
+    dependencies.database
+      .query(
+        `INSERT INTO execution_attempt_causes(
+           attempt_id, cause_kind, predecessor_attempt_id, checkpoint_id,
+           approval_subject_id, managed_loop_iteration, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        ids.attempt,
+        command.cause.kind,
+        command.cause.kind === "RETRY" ? command.cause.previousAttemptId : null,
+        command.cause.kind === "RESUME" ? command.cause.checkpointId : null,
+        command.cause.kind === "HUMAN_DECISION" ? command.cause.approvalSubjectId : null,
+        command.cause.kind === "MANAGED_LOOP" ? command.cause.iteration : null,
         now,
       );
     dependencies.database
@@ -1021,26 +1136,45 @@ function executeConsumePermit(
           attempt_id: string;
           snapshot_digest: string;
           run_id: string;
+          project_id: string;
+          actor_id: string;
+          runner_owner_member_id: string;
           runner_id: string;
           runner_epoch: number;
           runner_policy_revision: number;
+          mapping_revision: number;
+          profile_version_id: string;
+          profile_version: number;
+          profile_fingerprint: string;
+          exposure_revision: number | null;
+          authorization_source: "OWNER" | "TEAM_EXPOSURE";
+          security_policy_version: number;
+          security_digest: string;
           repository_mode: "MUTATING" | "INSPECT_ONLY";
           repository_assurance: "ADVISORY" | "ENFORCED";
           authority_session_seconds: number;
           mutation_disconnect_grace_seconds: number;
           current_runner_epoch: number;
           current_policy_revision: number;
+          current_security_policy_version: number;
+          current_security_digest: string;
           runner_revoked_at: number | null;
           deadline_at: number;
         },
         [string]
       >(
         `SELECT p.id AS permit_id, p.state AS permit_state, p.claims_hash, p.issued_at,
-                p.expires_at, p.attempt_id, s.snapshot_digest, s.run_id, s.runner_id,
-                s.runner_epoch, s.runner_policy_revision, s.repository_mode,
+                p.expires_at, p.attempt_id, s.snapshot_digest, s.run_id, s.project_id,
+                s.actor_id, s.runner_owner_member_id, s.runner_id,
+                s.runner_epoch, s.runner_policy_revision, s.mapping_revision,
+                s.profile_version_id, s.profile_version, s.profile_fingerprint,
+                s.exposure_revision, s.authorization_source, s.security_policy_version,
+                s.security_digest, s.repository_mode,
                 s.repository_assurance, s.authority_session_seconds,
                 s.mutation_disconnect_grace_seconds, r.runner_epoch AS current_runner_epoch,
-                r.policy_revision AS current_policy_revision, r.revoked_at AS runner_revoked_at,
+                r.policy_revision AS current_policy_revision,
+                r.security_policy_version AS current_security_policy_version,
+                r.security_digest AS current_security_digest, r.revoked_at AS runner_revoked_at,
                 rp.deadline_at
          FROM dispatch_permits p
          JOIN authority_snapshots s ON s.id = p.authority_snapshot_id
@@ -1074,8 +1208,62 @@ function executeConsumePermit(
       row.runner_epoch !== command.runnerEpoch ||
       row.current_runner_epoch !== command.runnerEpoch ||
       row.current_policy_revision !== row.runner_policy_revision ||
+      row.current_security_policy_version !== row.security_policy_version ||
+      row.current_security_digest !== row.security_digest ||
       row.runner_revoked_at !== null
     ) {
+      dependencies.database
+        .query(
+          "UPDATE dispatch_permits SET state = 'REVOKED', revision = revision + 1, revoked_at = ? WHERE id = ?",
+        )
+        .run(now, row.permit_id);
+      return error("PERMIT_REVOKED", "Dispatch Permit authority changed.", "REFRESH");
+    }
+    const dispatcherActive =
+      dependencies.database
+        .query<{ count: number }, [string]>(
+          "SELECT count(*) AS count FROM members WHERE id = ? AND status = 'ACTIVE'",
+        )
+        .get(row.actor_id)?.count === 1;
+    const ownerActive =
+      dependencies.database
+        .query<{ count: number }, [string]>(
+          "SELECT count(*) AS count FROM members WHERE id = ? AND status = 'ACTIVE'",
+        )
+        .get(row.runner_owner_member_id)?.count === 1;
+    const mappingLive =
+      dependencies.database
+        .query<{ count: number }, [string, string, number]>(
+          `SELECT count(*) AS count FROM runner_mapping_versions
+           WHERE runner_id = ? AND project_id = ? AND revision = ? AND revoked_at IS NULL`,
+        )
+        .get(row.runner_id, row.project_id, row.mapping_revision)?.count === 1;
+    const profileLive =
+      dependencies.database
+        .query<{ count: number }, [string, string, number, string]>(
+          `SELECT count(*) AS count FROM safe_profile_versions
+           WHERE runner_id = ? AND profile_id = ? AND version = ? AND fingerprint = ?`,
+        )
+        .get(row.runner_id, row.profile_version_id, row.profile_version, row.profile_fingerprint)
+        ?.count === 1;
+    const exposureLive =
+      row.authorization_source === "OWNER"
+        ? row.exposure_revision === null
+        : row.exposure_revision !== null &&
+          teamExposureIsLive(dependencies.database, {
+            runnerId: row.runner_id,
+            ownerMemberId: row.runner_owner_member_id,
+            projectId: row.project_id,
+            mappingRevision: row.mapping_revision,
+            profileId: row.profile_version_id,
+            profileVersion: row.profile_version,
+            profileFingerprint: row.profile_fingerprint,
+            policyRevision: row.runner_policy_revision,
+            securityPolicyVersion: row.security_policy_version,
+            securityDigest: row.security_digest,
+            exposureRevision: row.exposure_revision,
+          });
+    if (!dispatcherActive || !ownerActive || !mappingLive || !profileLive || !exposureLive) {
       dependencies.database
         .query(
           "UPDATE dispatch_permits SET state = 'REVOKED', revision = revision + 1, revoked_at = ? WHERE id = ?",
@@ -1091,7 +1279,7 @@ function executeConsumePermit(
             OR (source_kind = 'RUNNER' AND source_id = ?)
             OR (source_kind = 'MEMBER' AND source_id = ?)`,
         )
-        .get(row.run_id, row.runner_id, principal.value.id)?.count ?? 0;
+        .get(row.run_id, row.runner_id, row.actor_id)?.count ?? 0;
     if (activeRevocation > 0) {
       dependencies.database
         .query(
@@ -1099,6 +1287,20 @@ function executeConsumePermit(
         )
         .run(now, row.permit_id);
       return error("PERMIT_REVOKED", "Dispatch Permit authority was revoked.", "REFRESH");
+    }
+    const guard =
+      row.repository_mode === "MUTATING"
+        ? dependencies.database
+            .query<{ id: string }, [string, string]>(
+              `SELECT DISTINCT g.id FROM work_item_mutation_guards g
+               LEFT JOIN mutation_guard_overrides o ON o.mutation_guard_id = g.id
+               WHERE g.state = 'HELD' AND (g.run_id = ? OR o.colliding_run_id = ?)`,
+            )
+            .get(row.run_id, row.run_id)
+        : undefined;
+    const guardId = guard?.id;
+    if (row.repository_mode === "MUTATING" && !guardId) {
+      return error("MUTATION_GUARD_LOST", "Mutation Guard is unavailable.");
     }
     const sessionId = dependencies.id("authority_session");
     const connectorEpochs = dependencies.database
@@ -1142,14 +1344,7 @@ function executeConsumePermit(
         .run(sessionId, epoch.connector_id, epoch.connector_epoch);
     }
     if (row.repository_mode === "MUTATING") {
-      const guard = dependencies.database
-        .query<{ id: string }, [string, string]>(
-          `SELECT DISTINCT g.id FROM work_item_mutation_guards g
-           LEFT JOIN mutation_guard_overrides o ON o.mutation_guard_id = g.id
-           WHERE g.state = 'HELD' AND (g.run_id = ? OR o.colliding_run_id = ?)`,
-        )
-        .get(row.run_id, row.run_id);
-      if (!guard) return error("MUTATION_GUARD_LOST", "Mutation Guard is unavailable.");
+      if (!guardId) throw new Error("MUTATION_GUARD_LOST");
       dependencies.database
         .query(
           `INSERT INTO mutation_leases(
@@ -1162,7 +1357,7 @@ function executeConsumePermit(
           sessionId,
           row.run_id,
           row.attempt_id,
-          guard.id,
+          guardId,
           now,
           sessionExpiresAt,
           Math.min(sessionExpiresAt + row.mutation_disconnect_grace_seconds, row.deadline_at),
@@ -1229,6 +1424,13 @@ function executeRenewSession(
         return error("CONNECTOR_REVOKED", "Connector authority changed.", "REFRESH");
       }
     }
+    const mutationLease = session.lease;
+    if (
+      session.repositoryMode === "MUTATING" &&
+      (!mutationLease || now >= mutationLease.disconnectGraceExpiresAt)
+    ) {
+      return error("MUTATION_LEASE_LOST", "Mutation lease expired.", "EXPLICIT_RESUME");
+    }
     const expiresAt = Math.min(now + session.sessionSeconds, session.deadlineAt);
     dependencies.database
       .query(
@@ -1238,9 +1440,7 @@ function executeRenewSession(
       )
       .run(expiresAt, now, session.id, session.fence);
     if (session.repositoryMode === "MUTATING") {
-      if (!session.lease || now >= session.lease.disconnectGraceExpiresAt) {
-        return error("MUTATION_LEASE_LOST", "Mutation lease expired.", "EXPLICIT_RESUME");
-      }
+      if (!mutationLease) throw new Error("MUTATION_LEASE_LOST");
       dependencies.database
         .query(
           `UPDATE mutation_leases
@@ -1252,8 +1452,8 @@ function executeRenewSession(
           expiresAt,
           Math.min(expiresAt + session.disconnectGraceSeconds, session.deadlineAt),
           now,
-          session.lease.id,
-          session.lease.fence,
+          mutationLease.id,
+          mutationLease.fence,
         );
     }
     const renewed = readSession(dependencies.database, session.id);
@@ -1798,6 +1998,12 @@ function executeCheckpoint(
     if (!currentRun || !currentAttempt || currentAttempt.runId !== command.runId) {
       return error("ATTEMPT_NOT_FOUND", "Execution Attempt was not found.");
     }
+    const runnerAuthority = requireAttemptRunner(
+      dependencies.database,
+      command.actor,
+      command.attemptId,
+    );
+    if (!runnerAuthority.ok) return runnerAuthority;
     if (currentRun.revision !== command.expectedRunRevision) {
       return error("RUN_REVISION_STALE", "Agent Run revision is stale.", "REFRESH");
     }
@@ -1817,6 +2023,15 @@ function executeCheckpoint(
       return error("CHECKPOINT_ASSIGNMENT_MISMATCH", "Checkpoint assignment facts do not match.");
     }
     const checkpointId = dependencies.id("checkpoint");
+    for (const evidenceId of command.evidenceIds) {
+      const belongs =
+        dependencies.database
+          .query<{ count: number }, [string, string]>(
+            "SELECT count(*) AS count FROM run_evidence WHERE id = ? AND run_id = ?",
+          )
+          .get(evidenceId, command.runId)?.count ?? 0;
+      if (belongs !== 1) return error("EVIDENCE_NOT_FOUND", "Checkpoint evidence was not found.");
+    }
     const checkpoint = createCheckpoint({
       id: checkpointId,
       runId: command.runId,
@@ -1935,9 +2150,12 @@ function executeEvidence(
       if (!attempt || attempt.runId !== command.runId) {
         return error("ATTEMPT_NOT_FOUND", "Execution Attempt was not found.");
       }
-      if (command.actor.kind !== "RUNNER" || command.actor.runnerId !== attempt.runnerId) {
-        return error("RUNNER_ACTOR_MISMATCH", "Runner actor does not own this attempt.");
-      }
+      const runnerAuthority = requireAttemptRunner(
+        dependencies.database,
+        command.actor,
+        command.attemptId,
+      );
+      if (!runnerAuthority.ok) return runnerAuthority;
     }
     const evidenceId = dependencies.id("evidence");
     const record = createEvidence({
@@ -2114,6 +2332,12 @@ function executeRunResult(
     if (!currentRun || !attempt || attempt.runId !== command.runId) {
       return error("ATTEMPT_NOT_FOUND", "Execution Attempt was not found.");
     }
+    const runnerAuthority = requireAttemptRunner(
+      dependencies.database,
+      command.actor,
+      command.attemptId,
+    );
+    if (!runnerAuthority.ok) return runnerAuthority;
     if (currentRun.revision !== command.expectedRunRevision) {
       return error("RUN_REVISION_STALE", "Agent Run revision is stale.", "REFRESH");
     }
@@ -2666,33 +2890,38 @@ function executeSimpleCoordination(
         if (command.actor.kind === "RUNNER") {
           const assigned =
             dependencies.database
-              .query<{ count: number }, [string, string]>(
-                "SELECT count(*) AS count FROM execution_attempts WHERE run_id = ? AND runner_id = ?",
+              .query<{ count: number }, [string, string, number]>(
+                `SELECT count(*) AS count FROM execution_attempts
+                 WHERE run_id = ? AND runner_id = ? AND runner_epoch = ?`,
               )
-              .get(command.runId, command.actor.runnerId)?.count ?? 0;
+              .get(command.runId, command.actor.runnerId, command.actor.runnerEpoch)?.count ?? 0;
           if (assigned === 0) return error("NOT_FOUND", "Agent Run was not found.");
           if (command.observation.kind === "RUNNER_ATTEMPT") {
             const exactAttempt =
               dependencies.database
-                .query<{ count: number }, [string, string, string]>(
+                .query<{ count: number }, [string, string, string, number]>(
                   `SELECT count(*) AS count FROM execution_attempts
-                 WHERE id = ? AND run_id = ? AND runner_id = ?`,
+                 WHERE id = ? AND run_id = ? AND runner_id = ? AND runner_epoch = ?`,
                 )
-                .get(command.observation.attemptId, command.runId, command.actor.runnerId)?.count ??
-              0;
+                .get(
+                  command.observation.attemptId,
+                  command.runId,
+                  command.actor.runnerId,
+                  command.actor.runnerEpoch,
+                )?.count ?? 0;
             if (exactAttempt !== 1) return error("NOT_FOUND", "Execution Attempt was not found.");
           }
         } else if (command.actor.kind === "SCHEDULER") {
           const contextId = command.actor.workflowExecutionId ?? "";
+          if (contextId === "") return error("NOT_FOUND", "Agent Run was not found.");
           const scheduled =
             dependencies.database
-              .query<{ count: number }, [string, string, string, string]>(
+              .query<{ count: number }, [string, string, string]>(
                 `SELECT count(*) AS count FROM authority_snapshots
                WHERE run_id = ? AND actor_kind = 'SCHEDULER' AND actor_id = ?
-                 AND (? = '' OR actor_context_id = ?)`,
+                 AND actor_context_id = ?`,
               )
-              .get(command.runId, command.actor.originalDispatcherId, contextId, contextId)
-              ?.count ?? 0;
+              .get(command.runId, command.actor.originalDispatcherId, contextId)?.count ?? 0;
           if (scheduled === 0) return error("NOT_FOUND", "Agent Run was not found.");
         } else {
           const visible =
@@ -2704,16 +2933,163 @@ function executeSimpleCoordination(
               .get(command.runId, command.actor.memberId)?.count ?? 0;
           if (visible === 0) return error("NOT_FOUND", "Agent Run was not found.");
         }
-        if (command.observation.kind === "OUTBOX_DELIVERY") {
+        if (command.observation.kind === "RUNNER_ATTEMPT") {
+          const attempt = dependencies.database
+            .query<{ state: AttemptView["state"]; revision: number }, [string, string]>(
+              "SELECT state, revision FROM execution_attempts WHERE id = ? AND run_id = ?",
+            )
+            .get(command.observation.attemptId, command.runId);
+          if (!attempt) return error("NOT_FOUND", "Execution Attempt was not found.");
+          if (
+            ["EXITED", "FAILED_TO_START", "CANCELLED", "TIMED_OUT", "LOST"].includes(attempt.state)
+          ) {
+            return error(
+              "ATTEMPT_STATE_STALE",
+              "Execution Attempt is already terminal.",
+              "REFRESH",
+            );
+          }
+          const nextAttemptState =
+            command.observation.observedState === "RUNNING"
+              ? "RUNNING"
+              : command.observation.observedState === "EXITED"
+                ? "EXITED"
+                : command.observation.observedState === "ORPHAN_TERMINATED"
+                  ? "CANCELLED"
+                  : "LOST";
+          const eventKind =
+            command.observation.observedState === "RUNNING"
+              ? "PROCESS_STARTED"
+              : command.observation.observedState === "EXITED"
+                ? "PROCESS_EXITED"
+                : command.observation.observedState === "ORPHAN_TERMINATED"
+                  ? "CANCELLED"
+                  : "LOST";
+          dependencies.database
+            .query(
+              `UPDATE execution_attempts SET state = ?, revision = revision + 1,
+                 started_at = CASE WHEN ? = 'RUNNING' THEN coalesce(started_at, ?) ELSE started_at END,
+                 terminal_at = CASE WHEN ? != 'RUNNING' THEN ? ELSE terminal_at END,
+                 terminal_reason = CASE WHEN ? != 'RUNNING' THEN ? ELSE terminal_reason END
+               WHERE id = ? AND revision = ?`,
+            )
+            .run(
+              nextAttemptState,
+              nextAttemptState,
+              command.observation.observedAt,
+              nextAttemptState,
+              command.observation.observedAt,
+              nextAttemptState,
+              nextAttemptState === "EXITED" ? "PROCESS_EXITED" : nextAttemptState,
+              command.observation.attemptId,
+              attempt.revision,
+            );
+          dependencies.database
+            .query(
+              `INSERT INTO attempt_lifecycle_events(
+                 id, attempt_id, sequence, event_kind, from_state, to_state, occurred_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              dependencies.id("attempt_event"),
+              command.observation.attemptId,
+              nextSequence(
+                dependencies.database,
+                "attempt_lifecycle_events",
+                "attempt_id",
+                command.observation.attemptId,
+              ),
+              eventKind,
+              attempt.state,
+              nextAttemptState,
+              command.observation.observedAt,
+            );
+          const nextRunState = nextAttemptState === "RUNNING" ? "RUNNING" : "WAITING";
+          dependencies.database
+            .query(
+              `UPDATE agent_runs SET state = ?, waiting_reason = ?,
+                 started_at = coalesce(started_at, created_at), revision = revision + 1
+               WHERE id = ? AND revision = ?`,
+            )
+            .run(
+              nextRunState,
+              nextRunState === "WAITING" ? "RETRY" : null,
+              command.runId,
+              command.expectedRunRevision,
+            );
+          if (nextAttemptState !== "RUNNING") {
+            dependencies.database
+              .query(
+                `UPDATE authority_sessions SET state = 'RELEASED', released_at = ?, revision = revision + 1
+                 WHERE attempt_id = ? AND state = 'ACTIVE'`,
+              )
+              .run(command.observation.observedAt, command.observation.attemptId);
+            dependencies.database
+              .query(
+                `UPDATE mutation_leases SET state = 'RELEASED', released_at = ?, revision = revision + 1
+                 WHERE attempt_id = ? AND state = 'ACTIVE'`,
+              )
+              .run(command.observation.observedAt, command.observation.attemptId);
+          }
+          if (nextAttemptState === "RUNNING" || nextAttemptState === "LOST") {
+            dependencies.database
+              .query(
+                `INSERT INTO run_lifecycle_events(
+                   id, run_id, sequence, event_kind, from_state, to_state, reason_code,
+                   actor_kind, actor_id, occurred_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(
+                dependencies.id("run_event"),
+                command.runId,
+                nextSequence(
+                  dependencies.database,
+                  "run_lifecycle_events",
+                  "run_id",
+                  command.runId,
+                ),
+                nextAttemptState === "RUNNING" ? "ATTEMPT_STARTED" : "ATTEMPT_LOST",
+                run.state,
+                nextRunState,
+                nextAttemptState,
+                principal.value.kind,
+                principal.value.id,
+                command.observation.observedAt,
+              );
+          }
+          finalizeRunIfReady(
+            dependencies,
+            command.runId,
+            { kind: principal.value.kind, id: principal.value.id },
+            command.observation.observedAt,
+          );
+        } else if (command.observation.kind === "OUTBOX_DELIVERY") {
           const belongs =
             dependencies.database
-              .query<{ count: number }, [string, string]>(
+              .query<{ count: number }, [string, string, string, number]>(
                 `SELECT count(*) AS count FROM runner_dispatch_outbox o
                JOIN execution_attempts a ON a.id = o.attempt_id
-               WHERE o.id = ? AND a.run_id = ?`,
+               WHERE o.id = ? AND a.run_id = ? AND a.runner_id = ? AND a.runner_epoch = ?`,
               )
-              .get(command.observation.deliveryId, command.runId)?.count ?? 0;
+              .get(
+                command.observation.deliveryId,
+                command.runId,
+                command.actor.kind === "RUNNER" ? command.actor.runnerId : "",
+                command.actor.kind === "RUNNER" ? command.actor.runnerEpoch : 0,
+              )?.count ?? 0;
           if (belongs !== 1) return error("NOT_FOUND", "Delivery intent was not found.");
+          const delivery = dependencies.database
+            .query<{ status: string }, [string]>(
+              "SELECT status FROM runner_dispatch_outbox WHERE id = ?",
+            )
+            .get(command.observation.deliveryId);
+          const allowed =
+            delivery?.status === "DISPATCHED" &&
+            ["DELIVERED", "RETRYABLE_FAILURE", "PERMANENT_FAILURE"].includes(
+              command.observation.disposition,
+            );
+          if (!allowed)
+            return error("OUTBOX_STATE_STALE", "Delivery intent state is stale.", "REFRESH");
           const status =
             command.observation.disposition === "DELIVERED"
               ? "ACKNOWLEDGED"
@@ -2723,14 +3099,18 @@ function executeSimpleCoordination(
           const changed = dependencies.database
             .query(
               `UPDATE runner_dispatch_outbox SET status = ?,
+                 dispatched_at = CASE WHEN ? = 'PENDING' THEN NULL ELSE dispatched_at END,
                  acknowledged_at = CASE WHEN ? = 'ACKNOWLEDGED' THEN ? ELSE acknowledged_at END,
-                 last_error_code = CASE WHEN ? = 'FAILED' THEN 'DELIVERY_FAILED' ELSE last_error_code END
-               WHERE id = ?`,
+                 last_error_code = CASE WHEN ? = 'FAILED' THEN 'DELIVERY_FAILED' ELSE NULL END,
+                 retry_count = CASE WHEN ? = 'PENDING' THEN retry_count + 1 ELSE retry_count END
+               WHERE id = ? AND status = 'DISPATCHED'`,
             )
             .run(
               status,
               status,
+              status,
               command.observation.observedAt,
+              status,
               status,
               command.observation.deliveryId,
             );
@@ -2949,61 +3329,56 @@ function executeQuery(
       switch (query.kind) {
         case "INSPECT_ATTEMPT":
           return dependencies.database
-            .query<{ count: number }, [string, string]>(
-              "SELECT count(*) AS count FROM execution_attempts WHERE id = ? AND runner_id = ?",
+            .query<{ count: number }, [string, string, number]>(
+              `SELECT count(*) AS count FROM execution_attempts
+               WHERE id = ? AND runner_id = ? AND runner_epoch = ?`,
             )
-            .get(query.attemptId, query.actor.runnerId)?.count;
+            .get(query.attemptId, query.actor.runnerId, query.actor.runnerEpoch)?.count;
         case "INSPECT_RUN":
         case "INSPECT_EVIDENCE":
           return dependencies.database
-            .query<{ count: number }, [string, string]>(
-              "SELECT count(*) AS count FROM execution_attempts WHERE run_id = ? AND runner_id = ?",
+            .query<{ count: number }, [string, string, number]>(
+              `SELECT count(*) AS count FROM execution_attempts
+               WHERE run_id = ? AND runner_id = ? AND runner_epoch = ?`,
             )
-            .get(query.runId, query.actor.runnerId)?.count;
+            .get(query.runId, query.actor.runnerId, query.actor.runnerEpoch)?.count;
         case "INSPECT_COORDINATION_RECORD":
         case "INSPECT_PROJECTION":
-          return dependencies.database
-            .query<{ count: number }, [string, string]>(
-              `SELECT count(*) AS count FROM execution_attempts a
-               JOIN agent_runs r ON r.id = a.run_id
-               WHERE r.coordination_record_id = ? AND a.runner_id = ?`,
-            )
-            .get(query.coordinationRecordId, query.actor.runnerId)?.count;
+          return 0;
       }
     })();
     if (!allowed) return error("NOT_FOUND", "Coordination state was not found.");
   }
   if (query.actor.kind === "SCHEDULER") {
     const contextId = query.actor.workflowExecutionId ?? "";
+    if (contextId === "") return error("NOT_FOUND", "Coordination state was not found.");
     const allowed = (() => {
-      const suffix = `s.actor_kind = 'SCHEDULER' AND s.actor_id = ?
-        AND (? = '' OR s.actor_context_id = ?)`;
+      const suffix = `s.actor_kind = 'SCHEDULER' AND s.actor_id = ? AND s.actor_context_id = ?`;
       switch (query.kind) {
         case "INSPECT_ATTEMPT":
           return dependencies.database
-            .query<{ count: number }, [string, string, string, string]>(
+            .query<{ count: number }, [string, string, string]>(
               `SELECT count(*) AS count FROM authority_snapshots s
                WHERE s.attempt_id = ? AND ${suffix}`,
             )
-            .get(query.attemptId, query.actor.originalDispatcherId, contextId, contextId)?.count;
+            .get(query.attemptId, query.actor.originalDispatcherId, contextId)?.count;
         case "INSPECT_RUN":
         case "INSPECT_EVIDENCE":
           return dependencies.database
-            .query<{ count: number }, [string, string, string, string]>(
+            .query<{ count: number }, [string, string, string]>(
               `SELECT count(*) AS count FROM authority_snapshots s
                WHERE s.run_id = ? AND ${suffix}`,
             )
-            .get(query.runId, query.actor.originalDispatcherId, contextId, contextId)?.count;
+            .get(query.runId, query.actor.originalDispatcherId, contextId)?.count;
         case "INSPECT_COORDINATION_RECORD":
         case "INSPECT_PROJECTION":
           return dependencies.database
-            .query<{ count: number }, [string, string, string, string]>(
+            .query<{ count: number }, [string, string, string]>(
               `SELECT count(*) AS count FROM authority_snapshots s
                JOIN agent_runs r ON r.id = s.run_id
                WHERE r.coordination_record_id = ? AND ${suffix}`,
             )
-            .get(query.coordinationRecordId, query.actor.originalDispatcherId, contextId, contextId)
-            ?.count;
+            .get(query.coordinationRecordId, query.actor.originalDispatcherId, contextId)?.count;
       }
     })();
     if (!allowed) return error("NOT_FOUND", "Coordination state was not found.");

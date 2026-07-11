@@ -595,14 +595,11 @@ function currentConfigurationFactsMatch(
       return false;
     }
   }
-  if (row.runner_owner_member_id === configuration.ownerMemberId) {
-    return (
-      authority.exposureRevision === undefined && authority.acknowledgementVersion === undefined
-    );
+  if (authority.exposureRevision === undefined && authority.acknowledgementVersion === undefined) {
+    return row.runner_owner_member_id === configuration.ownerMemberId;
   }
-  if (authority.exposureRevision === undefined || authority.acknowledgementVersion === undefined) {
+  if (authority.exposureRevision === undefined || authority.acknowledgementVersion === undefined)
     return false;
-  }
   return Boolean(
     database
       .query<

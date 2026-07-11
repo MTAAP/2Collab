@@ -17,6 +17,10 @@ import {
   resolveCoordinationForLaunch,
 } from "../coordination-records/registry.ts";
 import {
+  persistPreparedRunConfigurationSnapshotInTransaction,
+  prepareRunConfigurationSnapshot,
+} from "../presets/configuration-resolver.ts";
+import {
   type CommittedLaunch,
   LaunchAuthorityFactsSchema,
   type LaunchPersistence,
@@ -97,6 +101,7 @@ function canonicalLaunchInput(input: LaunchPersistenceInput): string {
     repository: input.command.repository,
     execution: input.command.execution,
     effectiveConfiguration: input.command.effectiveConfiguration,
+    configurationAssemblyDigest: input.preparedConfiguration.assemblyDigest,
     ...(input.command.workflow ? { workflow: input.command.workflow } : {}),
   });
 }
@@ -131,6 +136,12 @@ function replay(
 
 function currentFactsMatch(database: Database, input: LaunchPersistenceInput): boolean {
   const { command, authority } = input;
+  const dispatcher = safeActor(command.actor);
+  const activeDispatcher = database
+    .query<{ count: number }, [string]>(
+      "SELECT count(*) AS count FROM members WHERE id = ? AND status = 'ACTIVE'",
+    )
+    .get(dispatcher.id);
   const project = database
     .query<ProjectRow, [string]>("SELECT revision, base_branch FROM projects WHERE id = ?")
     .get(command.projectId);
@@ -162,6 +173,7 @@ function currentFactsMatch(database: Database, input: LaunchPersistenceInput): b
     command.repository.base.kind !== "EXACT" ||
     command.repository.base.commitSha === authority.resolvedBaseCommit;
   if (
+    activeDispatcher?.count !== 1 ||
     !project ||
     project.revision !== authority.projectRevision ||
     project.base_branch !== authority.baseBranch ||
@@ -184,17 +196,37 @@ function currentFactsMatch(database: Database, input: LaunchPersistenceInput): b
   }
   if (command.execution.exposureRevision === undefined) return false;
   const exposure = database
-    .query<{ count: number }, [string, string, number, string, number, number]>(
-      `SELECT count(*) AS count FROM runner_exposures
-       WHERE runner_id = ? AND project_id = ? AND mapping_revision = ?
-         AND profile_id = ? AND profile_version = ? AND revision = ? AND revoked_at IS NULL`,
+    .query<
+      { count: number },
+      [string, string, string, number, string, number, string, number, number, string, number]
+    >(
+      `SELECT count(*) AS count FROM runner_exposures e
+       JOIN runner_exposure_acknowledgements a
+         ON a.id = e.acknowledgement_id
+        AND a.runner_id = e.runner_id AND a.owner_member_id = e.owner_member_id
+        AND a.project_id = e.project_id AND a.mapping_revision = e.mapping_revision
+        AND a.profile_id = e.profile_id AND a.profile_version = e.profile_version
+        AND a.profile_fingerprint = e.profile_fingerprint
+        AND a.policy_revision = e.policy_revision
+        AND a.security_policy_version = e.security_policy_version
+        AND a.security_digest = e.security_digest
+       WHERE e.runner_id = ? AND e.owner_member_id = ? AND e.project_id = ?
+         AND e.mapping_revision = ? AND e.profile_id = ? AND e.profile_version = ?
+         AND e.profile_fingerprint = ? AND e.policy_revision = ?
+         AND e.security_policy_version = ? AND e.security_digest = ?
+         AND e.revision = ? AND e.revoked_at IS NULL AND a.revoked_at IS NULL`,
     )
     .get(
       command.execution.runnerId,
+      authority.runnerOwnerMemberId,
       command.projectId,
       command.execution.projectMappingRevision,
       command.execution.profileVersionId,
       authority.profileVersion,
+      authority.profileFingerprint,
+      authority.runnerPolicyRevision,
+      authority.securityPolicyVersion,
+      authority.securityDigest,
       command.execution.exposureRevision,
     );
   return exposure?.count === 1;
@@ -235,15 +267,21 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
     async create(rawInput) {
       const command = CollabCommandSchema.safeParse(rawInput.command);
       const authority = LaunchAuthorityFactsSchema.safeParse(rawInput.authority);
+      const prepared = prepareRunConfigurationSnapshot(rawInput.preparedConfiguration);
       if (
         !command.success ||
         command.data.kind !== "LAUNCH_RUN" ||
         !authority.success ||
+        !prepared.ok ||
         (command.data.repository.mode === "MUTATING" && !command.data.repository.intendedBranch)
       ) {
         return error("RUN_LAUNCH_INPUT_INVALID", "Run launch input is invalid.");
       }
-      const input = { command: command.data, authority: authority.data } as LaunchPersistenceInput;
+      const input = {
+        command: command.data,
+        authority: authority.data,
+        preparedConfiguration: prepared.value,
+      } as LaunchPersistenceInput;
       const actor = safeActor(input.command.actor);
       const storageKey = `LAUNCH_RUN:${input.command.idempotencyKey}`;
       let inputHash: string;
@@ -256,6 +294,36 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
       }
       const prior = replay(dependencies.database, actor.id, storageKey, inputHash);
       if (prior) return prior;
+      if (
+        input.preparedConfiguration.configuration.presetId !==
+          input.command.effectiveConfiguration.configurationId ||
+        input.preparedConfiguration.configuration.presetVersion !==
+          input.command.effectiveConfiguration.version ||
+        input.preparedConfiguration.configuration.digest !==
+          input.command.effectiveConfiguration.digest ||
+        input.preparedConfiguration.configuration.projectId !== input.command.projectId ||
+        input.preparedConfiguration.configuration.layers.runGoal !== input.command.goal ||
+        input.preparedConfiguration.configuration.runnerId !== input.command.execution.runnerId ||
+        input.preparedConfiguration.configuration.runnerEpoch !==
+          input.command.execution.expectedRunnerEpoch ||
+        input.preparedConfiguration.configuration.mappingRevision !==
+          input.command.execution.projectMappingRevision ||
+        input.preparedConfiguration.configuration.profileId !==
+          input.command.execution.profileVersionId ||
+        input.preparedConfiguration.configuration.profileVersion !==
+          input.command.execution.expectedProfileVersion ||
+        input.preparedConfiguration.configuration.host !== input.command.execution.host ||
+        input.preparedConfiguration.configuration.interaction !==
+          input.command.execution.interaction ||
+        input.preparedConfiguration.configuration.repositoryMode !==
+          input.command.repository.mode ||
+        input.preparedConfiguration.configuration.repositoryAssurance !==
+          input.command.repository.assurance ||
+        input.preparedConfiguration.configuration.maximumAttempts !==
+          input.authority.maximumAttempts
+      ) {
+        return error("RUN_LAUNCH_INPUT_INVALID", "Run launch input is invalid.");
+      }
 
       const now = dependencies.clock();
       const ids = {
@@ -437,6 +505,18 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
               now,
             );
           afterWrite("agent_runs");
+          const configurationSnapshot = persistPreparedRunConfigurationSnapshotInTransaction(
+            {
+              database: dependencies.database,
+              clock: dependencies.clock,
+              id: dependencies.id,
+            },
+            { runId: ids.run, prepared: input.preparedConfiguration },
+          );
+          if (!configurationSnapshot.ok) {
+            throw new Error(`RUN_CONFIGURATION:${configurationSnapshot.error.code}`);
+          }
+          afterWrite("run_configuration_snapshots");
           dependencies.database
             .query(
               `INSERT INTO run_execution_policies(
@@ -561,6 +641,13 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
               now,
             );
           afterWrite("execution_attempts");
+          dependencies.database
+            .query(
+              `INSERT INTO execution_attempt_causes(attempt_id, cause_kind, created_at)
+               VALUES (?, 'INITIAL', ?)`,
+            )
+            .run(ids.attempt, now);
+          afterWrite("execution_attempt_causes");
           dependencies.database
             .query(
               `INSERT INTO authority_snapshots(
@@ -718,6 +805,14 @@ export function createLaunchPersistence(dependencies: Dependencies): LaunchPersi
         }
         if (code === "MUTATION_GUARD_OVERRIDE_INVALID") {
           return error(code, "Mutation Guard override is invalid.");
+        }
+        if (code.startsWith("RUN_CONFIGURATION:")) {
+          const configurationCode = code.slice("RUN_CONFIGURATION:".length);
+          return error(
+            configurationCode,
+            "Run configuration snapshot could not be committed.",
+            configurationCode.endsWith("STALE") ? "REFRESH" : "SAME_INPUT",
+          );
         }
         return error("RUN_LAUNCH_STORAGE_FAILED", "Run launch failed.", "SAME_INPUT");
       }

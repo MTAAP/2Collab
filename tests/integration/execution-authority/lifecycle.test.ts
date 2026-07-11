@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { migrate } from "../../../src/server/db/migrate.ts";
+import { computeContextRecipeDigest } from "../../../src/server/modules/context/context-recipes.ts";
 import {
   type AuthorityDependencies,
   createExecutionAuthority,
@@ -8,13 +9,96 @@ import {
   type RefreshedAuthorityFacts,
 } from "../../../src/server/modules/execution-authority/execution-authority.ts";
 import { createOperationAuthorizationConsumer } from "../../../src/server/modules/execution-authority/fencing.ts";
+import {
+  prepareRunConfigurationSnapshot,
+  resolveEffectiveRunConfiguration,
+} from "../../../src/server/modules/presets/configuration-resolver.ts";
 import type { CollabCommand } from "../../../src/shared/contracts/commands.ts";
 
 const BASE_COMMIT = "a".repeat(40);
-const CONFIG_DIGEST = "b".repeat(64);
 const PROFILE_FINGERPRINT = "c".repeat(64);
 const SECURITY_DIGEST = "d".repeat(64);
 const SESSION_PROOF = "owner-session-proof-with-at-least-thirty-two-bytes";
+const RECIPE = {
+  id: "recipe_1",
+  version: 1,
+  projectId: "project_1",
+  perCategoryLimits: {},
+  maximumReferences: 1,
+  maximumPreviewBytes: 0,
+  freshnessSeconds: 30,
+  predecessorPolicy: "NONE" as const,
+};
+const RECIPE_DIGEST = computeContextRecipeDigest(RECIPE);
+
+function preparedConfiguration(
+  mode: "INSPECT_ONLY" | "MUTATING",
+  teamExposure = false,
+  maximumAttempts = 3,
+) {
+  const resolved = resolveEffectiveRunConfiguration(
+    {
+      presetId: "configuration_1",
+      presetVersion: 1,
+      ownerMemberId: "owner_1",
+      projectId: "project_1",
+      runtime: "CODEX",
+      runnerId: "runner_1",
+      runnerEpoch: 1,
+      mappingRevision: 1,
+      profileId: "profile_1",
+      profileVersion: 1,
+      profileFingerprint: PROFILE_FINGERPRINT,
+      host: "NATIVE",
+      interaction: "HEADLESS",
+      repositoryMode: "MUTATING",
+      repositoryAssurance: "ADVISORY",
+      executionPolicy: "ONCE",
+      maximumAttempts: 3,
+      deadlineSeconds: 900,
+      contextRecipeId: "recipe_1",
+      contextRecipeVersion: 1,
+      requiredGates: [],
+    },
+    {
+      repositoryMode: mode,
+      maximumAttempts,
+      runGoal: "Implement Task 10.",
+      authorityFacts: {
+        projectRevision: 1,
+        runnerPolicyRevision: 1,
+        securityPolicyVersion: 1,
+        securityDigest: SECURITY_DIGEST as never,
+        ...(teamExposure ? { exposureRevision: 1, acknowledgementVersion: 1 } : {}),
+        connectorEpochs: {},
+        grantIds: [],
+      },
+      currentBinding: {
+        projectId: "project_1",
+        runnerId: "runner_1",
+        runnerEpoch: 1,
+        mappingRevision: 1,
+        profileId: "profile_1",
+        profileVersion: 1,
+        profileFingerprint: PROFILE_FINGERPRINT,
+      },
+    },
+  );
+  if (!resolved.ok) throw new Error(resolved.error.code);
+  const prepared = prepareRunConfigurationSnapshot({
+    configuration: resolved.value,
+    envelope: {
+      schemaVersion: 1,
+      contextRecipe: { id: "recipe_1", version: 1, digest: RECIPE_DIGEST },
+      references: [],
+      omissions: [],
+    },
+  });
+  if (!prepared.ok) throw new Error(prepared.error.code);
+  return prepared.value;
+}
+
+const CONFIG_DIGEST = preparedConfiguration("INSPECT_ONLY").configuration.digest;
 
 function seed(database: Database): void {
   database.exec(`
@@ -40,6 +124,33 @@ function seed(database: Database): void {
       'runner_1', 'profile_1', 1, 'Safe profile', 'CODEX', 1, 1, 1, 1,
       'Trusted local execution', '${PROFILE_FINGERPRINT}', 0
     );
+    INSERT INTO personal_run_presets(
+      id, owner_member_id, project_id, display_name, state, current_version,
+      revision, created_at, updated_at
+    ) VALUES ('configuration_1', 'owner_1', 'project_1', 'Task 10', 'ACTIVE', 1, 1, 0, 0);
+    INSERT INTO personal_run_preset_versions(
+      preset_id, version, derived_template_id, derived_template_version,
+      runner_id, runner_epoch, mapping_revision, profile_id, profile_version,
+      profile_fingerprint, host, interaction, repository_mode, repository_assurance,
+      execution_policy, maximum_attempts, deadline_seconds, managed_loop_max_iterations,
+      managed_loop_cadence_seconds, stop_policy_digest, unknown_grace_seconds,
+      unknown_backoff_initial_seconds, unknown_backoff_max_seconds, context_recipe_id,
+      context_recipe_version, reusable_goal_template, reusable_instruction_template,
+      personal_addendum, configuration_digest, created_at
+    ) VALUES (
+      'configuration_1', 1, NULL, NULL, 'runner_1', 1, 1, 'profile_1', 1,
+      '${PROFILE_FINGERPRINT}', 'NATIVE', 'HEADLESS', 'MUTATING', 'ADVISORY',
+      'ONCE', 3, 900, NULL, NULL, NULL, NULL, NULL, NULL, 'recipe_1', 1,
+      NULL, NULL, NULL, '${"f".repeat(64)}', 0
+    );
+    INSERT INTO context_recipes(
+      id, project_id, display_name, current_version, state, revision, created_at, updated_at
+    ) VALUES ('recipe_1', 'project_1', 'Task 10', 1, 'ACTIVE', 1, 0, 0);
+    INSERT INTO context_recipe_versions(
+      recipe_id, version, include_goal, include_coordination, include_sources,
+      include_repository, include_predecessor_evidence, maximum_references,
+      maximum_preview_bytes, freshness_seconds, predecessor_policy, recipe_digest, created_at
+    ) VALUES ('recipe_1', 1, 1, 0, 0, 0, 0, 1, 0, 30, 'NONE', '${RECIPE_DIGEST}', 0);
   `);
 }
 
@@ -76,13 +187,41 @@ function seedSecondaryRunner(database: Database): void {
   `);
 }
 
+function seedTeamExposure(database: Database): void {
+  database.exec(`
+    UPDATE runners SET dispatch_audience = 'TEAM' WHERE id = 'runner_1';
+    INSERT INTO runner_exposure_acknowledgements(
+      id, version, runner_id, owner_member_id, project_id, mapping_revision,
+      profile_id, profile_version, profile_fingerprint, policy_revision,
+      security_policy_version, security_digest, acknowledgement_text,
+      acknowledgement_digest, accepted_at
+    ) VALUES (
+      'ack_1', 1, 'runner_1', 'owner_1', 'project_1', 1,
+      'profile_1', 1, '${PROFILE_FINGERPRINT}', 1, 1, '${SECURITY_DIGEST}',
+      'I acknowledge this exact exposure.', '${"e".repeat(64)}', 0
+    );
+    INSERT INTO runner_exposures(
+      id, runner_id, owner_member_id, project_id, mapping_revision, profile_id,
+      profile_version, profile_fingerprint, policy_revision, security_policy_version,
+      security_digest, acknowledgement_id, revision, created_at
+    ) VALUES (
+      'exposure_1', 'runner_1', 'owner_1', 'project_1', 1, 'profile_1',
+      1, '${PROFILE_FINGERPRINT}', 1, 1, '${SECURITY_DIGEST}', 'ack_1', 1, 0
+    );
+  `);
+}
+
 function deliveredPermit(f: ReturnType<typeof fixture>, index = 0): string {
   const permit = f.delivered[index]?.permit;
   if (!permit) throw new Error("Expected a delivered permit.");
   return permit;
 }
 
-function launch(mode: "INSPECT_ONLY" | "MUTATING" = "INSPECT_ONLY") {
+function launch(
+  mode: "INSPECT_ONLY" | "MUTATING" = "INSPECT_ONLY",
+  teamExposure = false,
+  maximumAttempts = 3,
+) {
   return {
     kind: "LAUNCH_RUN" as const,
     idempotencyKey: `launch_${mode}` as never,
@@ -105,11 +244,12 @@ function launch(mode: "INSPECT_ONLY" | "MUTATING" = "INSPECT_ONLY") {
       expectedProfileVersion: 1,
       host: "NATIVE" as const,
       interaction: "HEADLESS" as const,
+      ...(teamExposure ? { exposureRevision: 1 } : {}),
     },
     effectiveConfiguration: {
       configurationId: "configuration_1",
       version: 1,
-      digest: CONFIG_DIGEST as never,
+      digest: preparedConfiguration(mode, teamExposure, maximumAttempts).configuration.digest,
     },
   };
 }
@@ -189,6 +329,25 @@ function fixture() {
             ...factOverrides,
           },
         };
+      },
+    },
+    runConfiguration: {
+      async resolve(command, authority) {
+        const prepared = preparedConfiguration(
+          command.repository.mode,
+          command.execution.exposureRevision !== undefined,
+          authority.maximumAttempts,
+        );
+        return prepared.configuration.digest === command.effectiveConfiguration.digest
+          ? { ok: true as const, value: prepared }
+          : {
+              ok: false as const,
+              error: {
+                code: "RUN_CONFIGURATION_STALE",
+                message: "Run configuration changed.",
+                retry: "REFRESH" as const,
+              },
+            };
       },
     },
     permitCodec: codec,
@@ -451,6 +610,17 @@ describe("deep execution authority", () => {
           .all()
           .map((row) => row.state),
       ).toEqual(["LOST", "PENDING"]);
+      expect(
+        f.database
+          .query<{ cause_kind: string; checkpoint_id: string | null }, []>(
+            `SELECT cause_kind, checkpoint_id FROM execution_attempt_causes
+             ORDER BY created_at, attempt_id`,
+          )
+          .all(),
+      ).toEqual([
+        { cause_kind: "INITIAL", checkpoint_id: null },
+        { cause_kind: "RESUME", checkpoint_id: "checkpoint_1" },
+      ]);
     } finally {
       f.close();
     }
@@ -855,7 +1025,7 @@ describe("deep execution authority", () => {
     const f = fixture();
     try {
       f.setFacts({ maximumAttempts: 1 });
-      const launched = await f.authority.execute(launch());
+      const launched = await f.authority.execute(launch("INSPECT_ONLY", false, 1));
       if (!launched.ok) throw new Error(launched.error.code);
       const lost = await f.authority.execute({
         kind: "ACCEPT_ATTEMPT_EVENT",
@@ -1155,6 +1325,361 @@ describe("deep execution authority", () => {
           .query<{ state: string }, []>("SELECT state FROM work_item_mutation_guards")
           .get(),
       ).toEqual({ state: "RELEASED" });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("permit consumption rolls back when mutation authority disappears", async () => {
+    const f = fixture();
+    try {
+      await f.authority.execute(launch("MUTATING"));
+      f.database.exec("DELETE FROM work_item_mutation_guards");
+      const consumed = await f.authority.execute({
+        kind: "CONSUME_PERMIT",
+        idempotencyKey: "consume_missing_guard" as never,
+        actor: runnerActor(),
+        permit: deliveredPermit(f),
+        runnerId: "runner_1" as never,
+        runnerEpoch: 1,
+        connectionId: "connection_missing_guard" as never,
+      });
+      expect(consumed).toMatchObject({ ok: false, error: { code: "MUTATION_GUARD_LOST" } });
+      expect(
+        f.database
+          .query<{ count: number }, []>("SELECT count(*) AS count FROM authority_sessions")
+          .get()?.count,
+      ).toBe(0);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("failed mutation lease renewal leaves the session fence unchanged", async () => {
+    const f = fixture();
+    try {
+      const started = await startSession(f, "MUTATING");
+      f.database
+        .query("UPDATE mutation_leases SET expires_at = 101, disconnect_grace_expires_at = 101")
+        .run();
+      f.setNow(102);
+      const renewed = await f.authority.execute({
+        kind: "RENEW_AUTHORITY_SESSION",
+        idempotencyKey: "renew_lost_lease" as never,
+        actor: runnerActor(),
+        sessionId: started.session.id,
+        sessionFence: 1,
+        runnerEpoch: 1,
+      });
+      expect(renewed).toMatchObject({ ok: false, error: { code: "MUTATION_LEASE_LOST" } });
+      expect(
+        f.database.query<{ fence: number }, []>("SELECT fence FROM authority_sessions").get()
+          ?.fence,
+      ).toBe(1);
+    } finally {
+      f.close();
+    }
+  });
+
+  test("inspect-only sessions cannot authorize approval transitions", async () => {
+    const f = fixture();
+    try {
+      const started = await startSession(f, "INSPECT_ONLY");
+      f.setFacts({ approvalSubjects: { approval_1: CONFIG_DIGEST } });
+      const result = await f.authority.execute({
+        kind: "AUTHORIZE_OPERATION",
+        idempotencyKey: "inspect_approval" as never,
+        actor: runnerActor(),
+        sessionId: started.session.id,
+        sessionFence: 1,
+        operation: {
+          kind: "APPLY_APPROVAL_TRANSITION",
+          approvalSubjectId: "approval_1" as never,
+          expectedSubjectDigest: CONFIG_DIGEST as never,
+        },
+      });
+      expect(result).toMatchObject({ ok: false, error: { code: "REPOSITORY_MODE_DENIED" } });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("connector writes require a live mutation lease", async () => {
+    const f = fixture();
+    try {
+      f.database.exec(`
+        INSERT INTO connector_epochs(connector_id, epoch, review_state, revision)
+          VALUES ('github_1', 1, 'READY', 1);
+        INSERT INTO connector_scopes(id, project_id, connector_id, connector_epoch, revision, created_at)
+          VALUES ('scope_1', 'project_1', 'github_1', 1, 1, 0);
+        INSERT INTO connector_scope_operations(scope_id, operation) VALUES ('scope_1', 'EDIT_ISSUE');
+      `);
+      f.setFacts({
+        connectorEpochs: { github_1: 1 },
+        connectorScopes: { github_1: ["EDIT_ISSUE"] },
+      });
+      const started = await startSession(f, "MUTATING");
+      f.database
+        .query("UPDATE mutation_leases SET expires_at = 101, disconnect_grace_expires_at = 115")
+        .run();
+      f.setNow(102);
+      const result = await f.authority.execute({
+        kind: "AUTHORIZE_OPERATION",
+        idempotencyKey: "connector_without_lease" as never,
+        actor: runnerActor(),
+        sessionId: started.session.id,
+        sessionFence: 1,
+        operation: {
+          kind: "MUTATE_GITHUB",
+          projectId: "project_1" as never,
+          connectorId: "github_1" as never,
+          connectorEpoch: 1,
+          resourceId: "issue_1",
+          precondition: { kind: "ABSENT" },
+          actionDigest: "f".repeat(64) as never,
+          mutation: "EDIT_ISSUE",
+        },
+      });
+      expect(result).toMatchObject({ ok: false, error: { code: "MUTATION_LEASE_LOST" } });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("runner reconciliation applies lost lifecycle and cannot regress an acknowledged outbox", async () => {
+    const f = fixture();
+    try {
+      const launched = await f.authority.execute(launch());
+      if (!launched.ok) throw new Error(launched.error.code);
+      const lost = await f.authority.execute({
+        kind: "RECONCILE_OBSERVATION",
+        idempotencyKey: "reconcile_lost" as never,
+        actor: runnerActor(),
+        runId: launched.value.run.id,
+        expectedRunRevision: 1,
+        observation: {
+          kind: "RUNNER_ATTEMPT",
+          attemptId: launched.value.attempt.id,
+          observedState: "NOT_FOUND",
+          observedAt: 101,
+        },
+      });
+      expect(lost.ok).toBe(true);
+      expect(
+        f.database.query<{ state: string }, []>("SELECT state FROM execution_attempts").get()
+          ?.state,
+      ).toBe("LOST");
+      expect(
+        f.database.query<{ state: string }, []>("SELECT state FROM agent_runs").get()?.state,
+      ).toBe("WAITING");
+
+      const deliveryId = f.database
+        .query<{ id: string }, []>("SELECT id FROM runner_dispatch_outbox")
+        .get()?.id;
+      if (!deliveryId) throw new Error("Expected delivery.");
+      const delivered = await f.authority.execute({
+        kind: "RECONCILE_OBSERVATION",
+        idempotencyKey: "reconcile_delivered" as never,
+        actor: runnerActor(),
+        runId: launched.value.run.id,
+        expectedRunRevision: 2,
+        observation: {
+          kind: "OUTBOX_DELIVERY",
+          deliveryId,
+          disposition: "DELIVERED",
+          observedAt: 102,
+        },
+      });
+      expect(delivered.ok).toBe(true);
+      const regressed = await f.authority.execute({
+        kind: "RECONCILE_OBSERVATION",
+        idempotencyKey: "reconcile_regression" as never,
+        actor: runnerActor(),
+        runId: launched.value.run.id,
+        expectedRunRevision: 2,
+        observation: {
+          kind: "OUTBOX_DELIVERY",
+          deliveryId,
+          disposition: "RETRYABLE_FAILURE",
+          observedAt: 103,
+        },
+      });
+      expect(regressed).toMatchObject({ ok: false, error: { code: "OUTBOX_STATE_STALE" } });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("stale runner epochs cannot append checkpoints evidence or results", async () => {
+    const f = fixture();
+    try {
+      const launched = await f.authority.execute(launch());
+      if (!launched.ok) throw new Error(launched.error.code);
+      f.database.query("UPDATE runners SET runner_epoch = 2 WHERE id = 'runner_1'").run();
+      const staleActor = runnerActor();
+      const evidence = await f.authority.execute({
+        kind: "RECORD_EVIDENCE",
+        idempotencyKey: "stale_evidence" as never,
+        actor: staleActor,
+        runId: launched.value.run.id,
+        expectedRunRevision: 1,
+        attemptId: launched.value.attempt.id,
+        evidence: {
+          kind: "VERIFICATION",
+          name: "probe",
+          outcome: "PASSED",
+          durationMs: 1,
+          summary: "probe",
+        },
+      });
+      const result = await f.authority.execute({
+        kind: "RECORD_RUN_RESULT",
+        idempotencyKey: "stale_result" as never,
+        actor: staleActor,
+        runId: launched.value.run.id,
+        expectedRunRevision: 1,
+        attemptId: launched.value.attempt.id,
+        result: "NO_CHANGES",
+        summary: "No changes.",
+        evidenceIds: [],
+      });
+      const checkpoint = await f.authority.execute({
+        kind: "RECORD_CHECKPOINT",
+        idempotencyKey: "stale_checkpoint" as never,
+        actor: staleActor,
+        runId: launched.value.run.id,
+        expectedRunRevision: 1,
+        attemptId: launched.value.attempt.id,
+        reason: "RECOVERY",
+        requestedAction: "RESUME",
+        summary: "Recover.",
+        runnerId: "runner_1" as never,
+        worktreeIdentity: "worktree_1",
+        evidenceIds: [],
+        sourceRevisions: {},
+        resumeGuidance: "Resume.",
+      });
+      for (const commandResult of [evidence, result, checkpoint]) {
+        expect(commandResult).toMatchObject({ ok: false, error: { code: "RUNNER_EPOCH_CHANGED" } });
+      }
+    } finally {
+      f.close();
+    }
+  });
+
+  test("TEAM exposure requires a live exact acknowledgement at launch and permit consumption", async () => {
+    const staleLaunch = fixture();
+    try {
+      seedTeamExposure(staleLaunch.database);
+      staleLaunch.setFacts({ authorizationSource: "TEAM_EXPOSURE" });
+      staleLaunch.database
+        .query("UPDATE runner_exposure_acknowledgements SET revoked_at = 99 WHERE id = 'ack_1'")
+        .run();
+      const rejected = await staleLaunch.authority.execute({
+        ...launch("INSPECT_ONLY", true),
+        idempotencyKey: "stale_ack_launch" as never,
+      });
+      expect(rejected).toMatchObject({ ok: false, error: { code: "RUN_LAUNCH_FACTS_STALE" } });
+    } finally {
+      staleLaunch.close();
+    }
+
+    const stalePermit = fixture();
+    try {
+      seedTeamExposure(stalePermit.database);
+      stalePermit.setFacts({ authorizationSource: "TEAM_EXPOSURE" });
+      const launched = await stalePermit.authority.execute({
+        ...launch("INSPECT_ONLY", true),
+        idempotencyKey: "team_launch" as never,
+      });
+      expect(launched.ok).toBe(true);
+      stalePermit.database
+        .query("UPDATE runner_exposure_acknowledgements SET revoked_at = 101 WHERE id = 'ack_1'")
+        .run();
+      const consumed = await stalePermit.authority.execute({
+        kind: "CONSUME_PERMIT",
+        idempotencyKey: "team_consume" as never,
+        actor: runnerActor(),
+        permit: deliveredPermit(stalePermit),
+        runnerId: "runner_1" as never,
+        runnerEpoch: 1,
+        connectionId: "team_connection" as never,
+      });
+      expect(consumed).toMatchObject({ ok: false, error: { code: "PERMIT_REVOKED" } });
+    } finally {
+      stalePermit.close();
+    }
+  });
+
+  test("queries require the exact runner epoch and scheduler context", async () => {
+    const f = fixture();
+    try {
+      const launched = await f.authority.execute({
+        ...launch(),
+        actor: schedulerActor("workflow_1"),
+      });
+      if (!launched.ok) throw new Error(launched.error.code);
+      f.database.query("UPDATE runners SET runner_epoch = 2 WHERE id = 'runner_1'").run();
+      const runnerQuery = await f.authority.query({
+        kind: "INSPECT_RUN",
+        actor: { kind: "RUNNER", runnerId: "runner_1" as never, runnerEpoch: 2 },
+        runId: launched.value.run.id,
+      });
+      expect(runnerQuery).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+      const schedulerQuery = await f.authority.query({
+        kind: "INSPECT_RUN",
+        actor: { kind: "SCHEDULER", originalDispatcherId: "owner_1" as never },
+        runId: launched.value.run.id,
+      });
+      expect(schedulerQuery).toMatchObject({ ok: false, error: { code: "NOT_FOUND" } });
+    } finally {
+      f.close();
+    }
+  });
+
+  test("checkpoint evidence must belong to the same run", async () => {
+    const f = fixture();
+    try {
+      const first = await f.authority.execute(launch());
+      const second = await f.authority.execute({
+        ...launch(),
+        idempotencyKey: "foreign_evidence_run" as never,
+        coordination: { kind: "NEW", title: "Foreign evidence", sourceRefs: [] },
+      });
+      if (!first.ok || !second.ok) throw new Error("Expected launches.");
+      const recorded = await f.authority.execute({
+        kind: "RECORD_EVIDENCE",
+        idempotencyKey: "foreign_evidence" as never,
+        actor: runnerActor(),
+        runId: second.value.run.id,
+        expectedRunRevision: 1,
+        attemptId: second.value.attempt.id,
+        evidence: {
+          kind: "VERIFICATION",
+          name: "foreign",
+          outcome: "PASSED",
+          durationMs: 1,
+          summary: "foreign",
+        },
+      });
+      if (!recorded.ok) throw new Error(recorded.error.code);
+      const checkpoint = await f.authority.execute({
+        kind: "RECORD_CHECKPOINT",
+        idempotencyKey: "cross_run_checkpoint" as never,
+        actor: runnerActor(),
+        runId: first.value.run.id,
+        expectedRunRevision: 1,
+        attemptId: first.value.attempt.id,
+        reason: "RECOVERY",
+        requestedAction: "RESUME",
+        summary: "Recover.",
+        runnerId: "runner_1" as never,
+        worktreeIdentity: "worktree_1",
+        evidenceIds: [recorded.value.evidence.id],
+        sourceRevisions: {},
+        resumeGuidance: "Resume.",
+      });
+      expect(checkpoint).toMatchObject({ ok: false, error: { code: "EVIDENCE_NOT_FOUND" } });
     } finally {
       f.close();
     }
