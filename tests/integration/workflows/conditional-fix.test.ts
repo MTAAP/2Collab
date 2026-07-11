@@ -90,10 +90,19 @@ test("one typed major finding launches exactly one Fix Agent Run", async () => {
     ...startCommand,
     idempotencyKey: "conditional_start",
     workflowExecutionId: "conditional_workflow",
+    schedulerActor: {
+      ...startCommand.schedulerActor,
+      workflowExecutionId: "conditional_workflow" as never,
+    },
     definition,
     launches: { ...startCommand.launches, fix: startCommand.launches.implement },
   } as StartWorkflow;
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   await engine.start(command);
   await engine.tick();
   const accept = async (eventId: string, occurrenceId: string, key: string) => {

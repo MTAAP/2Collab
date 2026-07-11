@@ -38,6 +38,7 @@ const HumanDecisionNodeSchema = z
     kind: z.literal("HUMAN_DECISION"),
     key: KeySchema,
     choices: z.array(ResultKeySchema).min(1).max(16),
+    requiredRole: z.enum(["OWNER", "MEMBER"]).optional(),
   })
   .strict();
 const ResultRouterNodeSchema = z
@@ -147,7 +148,12 @@ export type WorkflowNode =
       runTemplateVersionId: string;
       resultKeys: readonly string[];
     }>
-  | Readonly<{ kind: "HUMAN_DECISION"; key: string; choices: readonly string[] }>
+  | Readonly<{
+      kind: "HUMAN_DECISION";
+      key: string;
+      choices: readonly string[];
+      requiredRole?: "OWNER" | "MEMBER";
+    }>
   | ResultRouterNode
   | Readonly<{ kind: "PARALLEL_SPLIT"; key: string; branchKeys: readonly string[] }>
   | JoinNode

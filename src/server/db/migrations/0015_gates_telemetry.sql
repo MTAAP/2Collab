@@ -36,6 +36,34 @@ CREATE TABLE managed_loop_state (
   CHECK(attempts_created <= maximum_attempts)
 ) STRICT;
 
+CREATE TABLE managed_loop_events (
+  event_id TEXT PRIMARY KEY CHECK(length(event_id) BETWEEN 1 AND 128),
+  run_id TEXT NOT NULL REFERENCES managed_loop_state(run_id),
+  attempt_id TEXT CHECK(attempt_id IS NULL OR length(attempt_id) BETWEEN 1 AND 128),
+  kind TEXT NOT NULL CHECK(kind IN ('FAILED_TO_START','LOST','ATTEMPT_CREATED','REQUEST_NEXT')),
+  observed_at INTEGER NOT NULL CHECK(observed_at >= 0),
+  UNIQUE(run_id, attempt_id, kind)
+) STRICT;
+
+CREATE TABLE managed_loop_policy_evaluations (
+  evaluation_id TEXT PRIMARY KEY CHECK(length(evaluation_id) BETWEEN 1 AND 128),
+  run_id TEXT NOT NULL REFERENCES managed_loop_state(run_id),
+  facts_digest TEXT NOT NULL CHECK(length(facts_digest) = 64),
+  result TEXT NOT NULL CHECK(result IN ('TRUE','FALSE','UNKNOWN')),
+  state_json TEXT NOT NULL CHECK(json_valid(state_json)),
+  evaluated_at INTEGER NOT NULL CHECK(evaluated_at >= 0)
+) STRICT;
+
+CREATE TABLE workflow_plan_artifacts (
+  workflow_execution_id TEXT NOT NULL CHECK(length(workflow_execution_id) BETWEEN 1 AND 128),
+  step_occurrence_id TEXT NOT NULL CHECK(length(step_occurrence_id) BETWEEN 1 AND 128),
+  artifact_json TEXT NOT NULL CHECK(json_valid(artifact_json)),
+  producer_json TEXT NOT NULL CHECK(json_valid(producer_json)),
+  consumer_json TEXT NOT NULL CHECK(json_valid(consumer_json)),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  PRIMARY KEY(workflow_execution_id, step_occurrence_id)
+) STRICT;
+
 CREATE TABLE workflow_usage_snapshots (
   workflow_execution_id TEXT NOT NULL CHECK(length(workflow_execution_id) BETWEEN 1 AND 128),
   revision INTEGER NOT NULL CHECK(revision > 0),

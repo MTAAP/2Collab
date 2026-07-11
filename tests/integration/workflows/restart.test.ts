@@ -19,11 +19,21 @@ test("a committed launch intent creates one child run after restart", async () =
   database.exec(migration13);
   database.exec(migration14);
   const fake = createWorkflowAuthority();
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   await engine.start(startCommand);
   engine.failAfterIntentCommitOnce();
   await expect(engine.tick()).rejects.toThrow("INJECTED_WORKFLOW_SCHEDULER_CRASH");
-  const restarted = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const restarted = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   await restarted.tick();
   await restarted.tick();
   expect(fake.commands).toHaveLength(1);

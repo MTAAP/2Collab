@@ -19,7 +19,12 @@ test("pause and restart never extend the absolute deadline", async () => {
   database.exec(migration14);
   let now = 100;
   const fake = createWorkflowAuthority();
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => now });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => now,
+    allowInlineLaunchesForTesting: true,
+  });
   const started = await engine.start(startCommand);
   if (!started.ok) throw new Error("MISSING_TEST_WORKFLOW");
   const actor = {
@@ -35,7 +40,12 @@ test("pause and restart never extend the absolute deadline", async () => {
     expectedRevision: started.value.revision,
   });
   now = started.value.absoluteDeadlineAt;
-  const restarted = createWorkflowEngine({ database, authority: fake.authority, clock: () => now });
+  const restarted = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => now,
+    allowInlineLaunchesForTesting: true,
+  });
   await restarted.tick();
   expect(restarted.inspect("workflow_1")).toMatchObject({
     ok: true,
@@ -62,7 +72,12 @@ test("results arriving while paused do not launch the next step until resume", a
   database.exec(migration13);
   database.exec(migration14);
   const fake = createWorkflowAuthority();
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   await engine.start(startCommand);
   await engine.tick();
   const actor = {

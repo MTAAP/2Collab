@@ -45,13 +45,27 @@ test("a durable decision survives restart and schedules its choice once", async 
   const command = {
     ...startCommand,
     workflowExecutionId: "workflow_decision",
+    schedulerActor: {
+      ...startCommand.schedulerActor,
+      workflowExecutionId: "workflow_decision" as never,
+    },
     idempotencyKey: "decision_start",
     definition,
   } as StartWorkflow;
-  const engine = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const engine = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   expect(await engine.start(command)).toMatchObject({ ok: true, value: { state: "WAITING" } });
   expect(fake.commands).toHaveLength(0);
-  const restarted = createWorkflowEngine({ database, authority: fake.authority, clock: () => 100 });
+  const restarted = createWorkflowEngine({
+    database,
+    authority: fake.authority,
+    clock: () => 100,
+    allowInlineLaunchesForTesting: true,
+  });
   const decision = {
     workflowExecutionId: "workflow_decision",
     nodeKey: "approval",

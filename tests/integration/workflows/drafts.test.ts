@@ -57,16 +57,23 @@ describe("shared Workflow Drafts", () => {
       definition: validDefinition,
       layout: validLayout,
     });
-    expect(
-      drafts.duplicate({
-        idempotencyKey: "duplicate_1",
-        actorMemberId: "member_2",
-        draftId: "draft_1",
-      }),
-    ).toMatchObject({
+    const command = {
+      idempotencyKey: "duplicate_1",
+      actorMemberId: "member_2",
+      draftId: "draft_1",
+    } as const;
+    expect(drafts.duplicate(command)).toMatchObject({
       ok: true,
       value: { id: "draft_copy", revision: 1, updatedByMemberId: "member_2" },
     });
+    expect(drafts.duplicate(command)).toMatchObject({
+      ok: true,
+      value: { id: "draft_copy", revision: 1, updatedByMemberId: "member_2" },
+    });
+    expect(
+      database.query<{ count: number }, []>("SELECT count(*) AS count FROM workflow_drafts").get()
+        ?.count,
+    ).toBe(2);
   });
 
   test("YAML round-trips only the executable schema", () => {

@@ -39,19 +39,19 @@ export function evaluateStopPolicy(
       return { result: not(evaluated.result), state: evaluated.state };
     }
     case "ALL":
+    case "ANY": {
+      let nextState = state;
+      const results: PredicateResult[] = [];
+      for (const condition of policy.conditions) {
+        const evaluated = evaluateStopPolicy(condition, facts, nextState);
+        results.push(evaluated.result);
+        nextState = evaluated.state;
+      }
       return {
-        result: and(
-          policy.conditions.map((condition) => evaluateStopPolicy(condition, facts, state).result),
-        ),
-        state,
+        result: policy.kind === "ALL" ? and(results) : or(results),
+        state: nextState,
       };
-    case "ANY":
-      return {
-        result: or(
-          policy.conditions.map((condition) => evaluateStopPolicy(condition, facts, state).result),
-        ),
-        state,
-      };
+    }
     case "CONSECUTIVE_MATCHES": {
       if (!Number.isInteger(policy.count) || policy.count < 1)
         throw new Error("STOP_POLICY_BOUND_INVALID");
