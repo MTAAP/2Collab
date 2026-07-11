@@ -26,9 +26,9 @@
 ## File Map
 
 - `src/shared/contracts/github.ts`: closed GitHub references, projections, mutations, webhooks, dependencies, checks, and Zod schemas.
-- `src/server/db/migrations/0101_github.sql`: installations, selected scopes, delivery deduplication, projections, and reconciliation cursors.
-- `src/server/db/migrations/0102_coordination_source_mapping.sql`: canonical source keys, aliases, link conflicts, and mutation provenance.
-- `src/server/db/migrations/0103_github_attention.sql`: GitHub attention projections and personal Inbox state.
+- `src/server/db/migrations/0005_github.sql`: installations, selected scopes, delivery deduplication, projections, and reconciliation cursors.
+- `src/server/db/migrations/0006_coordination_source_mapping.sql`: canonical source keys, aliases, link conflicts, and mutation provenance.
+- `src/server/db/migrations/0007_github_attention.sql`: GitHub attention projections and personal Inbox state.
 - `src/server/adapters/github/contract.ts`: narrow `GitHubPort` interface.
 - `src/server/adapters/github/{app-auth,client,scope,webhooks,reconciliation}.ts`: production App authentication, scope enforcement, signed ingestion, and refresh.
 - `src/server/adapters/github/{issues,pull-requests,milestones,projects,revision-cas}.ts`: explicit provider-first reads and mutations.
@@ -49,10 +49,12 @@
 **Files:**
 - Create: `src/shared/contracts/github.ts`
 - Create: `src/server/adapters/github/contract.ts`
-- Create: `src/server/db/migrations/0101_github.sql`
-- Create: `src/server/db/migrations/0101_github.verify.ts`
+- Create: `src/server/db/migrations/0005_github.sql`
+- Create: `src/server/db/migrations/0005_github.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Test: `tests/unit/github/contracts.test.ts`
-- Test: `tests/integration/github/migration-0101.test.ts`
+- Test: `tests/integration/github/migration-0005.test.ts`
+- Test: `tests/integration/github/projection-storage-safety.test.ts`
 
 **Interfaces:**
 - Consumes: Foundation `Result<T>`, `Observed<T>`, `ExactRevisionMutation<T>`, `ConnectorScope`, `ReconciliationEvent<T>`, and `SourceConnector<TReference,TProjection,TMutation>` from `src/server/modules/connectors/contract.ts`.
@@ -72,7 +74,7 @@ export type GitHubMutation =
   | { kind: "SET_LABELS"; issue: GitHubIssueRef; expectedRevision: string; labels: readonly string[] }
   | { kind: "SET_ASSIGNEES"; issue: GitHubIssueRef; expectedRevision: string; logins: readonly string[] }
   | { kind: "SET_MILESTONE"; item: GitHubWorkItemReference; expectedRevision: string; milestoneNumber: number | null }
-  | { kind: "SET_ISSUE_STATE"; issue: GitHubIssueRef; expectedRevision: string; state: "OPEN" | "CLOSED"; reason?: "COMPLETED" | "NOT_PLANNED" }
+  | { kind: "SET_ISSUE_STATE"; issue: GitHubIssueRef; expectedRevision: string; state: "OPEN" | "CLOSED"; reason: "COMPLETED" | "NOT_PLANNED" | "DUPLICATE" | "REOPENED" }
   | { kind: "CREATE_MILESTONE"; repository: GitHubRepositoryRef; title: string; description: string; dueOn: string | null }
   | { kind: "EDIT_MILESTONE"; milestone: GitHubMilestoneRef; expectedRevision: string; title?: string; description?: string; dueOn?: string | null; state?: "OPEN" | "CLOSED" }
   | { kind: "ADD_PROJECT_ITEM"; project: GitHubProjectRef; item: GitHubWorkItemReference }
@@ -80,6 +82,19 @@ export type GitHubMutation =
   | { kind: "SET_PROJECT_FIELD"; project: GitHubProjectRef; itemId: string; fieldId: string; expectedRevision: string; value: GitHubProjectFieldValue }
   | { kind: "MOVE_PROJECT_ITEM"; project: GitHubProjectRef; itemId: string; expectedRevision: string; afterItemId: string | null };
 ```
+
+`GitHubPort` is immutably bound to an exact authorized project/connector scope and current connector
+epoch, or receives that scope explicitly on every call. It returns normalized `Observed<T>` values
+only. It never owns member authorization, connector epochs, idempotency/audit persistence,
+Coordination Record mapping, or projection persistence. Human writes enter Foundation
+`ConnectorAuthority`; attempt writes first consume an `ExecutionAuthority` operation authorization and
+then use the same connector path.
+
+GitHub does not provide a universal atomic compare-and-set for these unsafe writes. Mutation
+orchestration performs final read, exact reviewed-field/revision/digest comparison, provider write,
+then read/normalize confirmation, records the residual provider race, and reconciles. Create/additive
+operations carry expected absence/membership and a deterministic non-secret action marker/provider ID
+so a provider success followed by lost response/local rollback can recover without body-text matching.
 
 - [ ] **Step 1: Write the closed-union and schema tests**
 
@@ -103,69 +118,133 @@ Expected: FAIL with `Cannot find module '../../../src/shared/contracts/github.ts
 
 ```sql
 CREATE TABLE github_installations (
-  connector_id TEXT PRIMARY KEY,
-  installation_id INTEGER NOT NULL UNIQUE,
-  account_login TEXT NOT NULL,
-  credential_id TEXT NOT NULL,
-  connector_epoch INTEGER NOT NULL CHECK (connector_epoch > 0),
-  revision INTEGER NOT NULL CHECK (revision > 0)
-);
+  connector_id TEXT PRIMARY KEY REFERENCES connector_epochs(connector_id),
+  app_id TEXT NOT NULL CHECK(length(app_id) BETWEEN 1 AND 32),
+  installation_id TEXT NOT NULL CHECK(installation_id GLOB '[0-9]*' AND length(installation_id) BETWEEN 1 AND 32),
+  account_id TEXT NOT NULL CHECK(account_id GLOB '[0-9]*' AND length(account_id) BETWEEN 1 AND 32),
+  account_node_id TEXT NOT NULL CHECK(length(account_node_id) BETWEEN 1 AND 128),
+  account_login TEXT NOT NULL CHECK(length(account_login) BETWEEN 1 AND 128),
+  private_key_credential_id TEXT NOT NULL REFERENCES encrypted_credentials(id),
+  webhook_secret_credential_id TEXT NOT NULL REFERENCES encrypted_credentials(id),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at)
+) STRICT;
 CREATE TABLE github_selected_repositories (
+  project_id TEXT NOT NULL REFERENCES projects(id),
   connector_id TEXT NOT NULL REFERENCES github_installations(connector_id),
-  repository_id INTEGER NOT NULL,
-  owner TEXT NOT NULL,
-  name TEXT NOT NULL,
-  permission_digest TEXT NOT NULL,
-  PRIMARY KEY (connector_id, repository_id)
-);
+  repository_id TEXT NOT NULL CHECK(repository_id GLOB '[0-9]*' AND length(repository_id) BETWEEN 1 AND 32),
+  repository_node_id TEXT NOT NULL CHECK(length(repository_node_id) BETWEEN 1 AND 128),
+  owner_login TEXT NOT NULL CHECK(length(owner_login) BETWEEN 1 AND 128),
+  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+  permission_digest TEXT NOT NULL CHECK(length(permission_digest) = 64),
+  scope_state TEXT NOT NULL CHECK(scope_state IN ('SELECTED','REDACTED','REMOVED')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  PRIMARY KEY (project_id, connector_id, repository_id)
+) STRICT;
 CREATE TABLE github_selected_projects (
+  project_id TEXT NOT NULL REFERENCES projects(id),
   connector_id TEXT NOT NULL REFERENCES github_installations(connector_id),
-  project_node_id TEXT NOT NULL,
-  organization_login TEXT NOT NULL,
-  PRIMARY KEY (connector_id, project_node_id)
-);
+  github_project_node_id TEXT NOT NULL CHECK(length(github_project_node_id) BETWEEN 1 AND 128),
+  organization_id TEXT NOT NULL CHECK(length(organization_id) BETWEEN 1 AND 128),
+  organization_login TEXT NOT NULL CHECK(length(organization_login) BETWEEN 1 AND 128),
+  scope_state TEXT NOT NULL CHECK(scope_state IN ('SELECTED','REDACTED','REMOVED')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+  PRIMARY KEY (project_id, connector_id, github_project_node_id)
+) STRICT;
 CREATE TABLE github_webhook_deliveries (
-  connector_id TEXT NOT NULL,
-  delivery_id TEXT NOT NULL,
-  event_name TEXT NOT NULL,
-  payload_digest TEXT NOT NULL,
-  received_at TEXT NOT NULL,
-  PRIMARY KEY (connector_id, delivery_id)
-);
+  connector_id TEXT NOT NULL REFERENCES github_installations(connector_id),
+  hook_id TEXT NOT NULL CHECK(length(hook_id) BETWEEN 1 AND 64),
+  delivery_id TEXT NOT NULL CHECK(length(delivery_id) BETWEEN 1 AND 128),
+  event_name TEXT NOT NULL CHECK(length(event_name) BETWEEN 1 AND 64),
+  payload_digest TEXT NOT NULL CHECK(length(payload_digest) = 64),
+  outcome TEXT NOT NULL CHECK(outcome IN ('PENDING','APPLIED','REJECTED_SCOPE','CONFLICT','FAILED_RETRYABLE','FAILED_PERMANENT')),
+  received_at INTEGER NOT NULL CHECK(received_at >= 0),
+  applied_at INTEGER CHECK(applied_at >= received_at),
+  PRIMARY KEY (connector_id, hook_id, delivery_id)
+) STRICT;
 CREATE TABLE github_source_projections (
-  project_id TEXT NOT NULL,
-  connector_id TEXT NOT NULL,
-  source_kind TEXT NOT NULL CHECK (source_kind IN ('ISSUE','PULL_REQUEST','MILESTONE','PROJECT_ITEM')),
-  source_id TEXT NOT NULL,
-  projection_json TEXT NOT NULL,
-  source_revision TEXT NOT NULL,
-  observed_at TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES github_installations(connector_id),
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('REPOSITORY','ISSUE','PULL_REQUEST','MILESTONE','PROJECT','PROJECT_FIELD','PROJECT_ITEM')),
+  source_id TEXT NOT NULL CHECK(length(source_id) BETWEEN 1 AND 256),
+  projection_schema_version INTEGER NOT NULL CHECK(projection_schema_version > 0),
+  projection_json TEXT NOT NULL CHECK(length(projection_json) <= 65536 AND json_valid(projection_json)),
+  projection_hash TEXT NOT NULL CHECK(length(projection_hash) = 64),
+  source_revision TEXT NOT NULL CHECK(length(source_revision) BETWEEN 1 AND 256),
+  comparable_digest TEXT NOT NULL CHECK(length(comparable_digest) = 64),
+  source_updated_at INTEGER,
+  observed_at INTEGER NOT NULL CHECK(observed_at >= 0),
+  provenance_kind TEXT NOT NULL CHECK(provenance_kind IN ('WEBHOOK','RECONCILIATION','MUTATION_CONFIRMATION')),
   freshness TEXT NOT NULL CHECK (freshness IN ('FRESH','STALE','UNAVAILABLE','REDACTED')),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  CHECK(freshness <> 'REDACTED' OR projection_json = '{}'),
   PRIMARY KEY (project_id, connector_id, source_kind, source_id)
-);
+) STRICT;
+CREATE TABLE github_reconciliation_cursors (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES github_installations(connector_id),
+  resource_family TEXT NOT NULL CHECK(resource_family IN ('REPOSITORIES','ISSUES','PULL_REQUESTS','MILESTONES','PROJECTS','PROJECT_ITEMS')),
+  scope_digest TEXT NOT NULL CHECK(length(scope_digest) = 64),
+  connector_epoch INTEGER NOT NULL CHECK(connector_epoch > 0),
+  cursor TEXT CHECK(cursor IS NULL OR length(cursor) <= 1024),
+  watermark TEXT CHECK(watermark IS NULL OR length(watermark) <= 256),
+  status TEXT NOT NULL CHECK(status IN ('IDLE','SCANNING','RATE_LIMITED','FAILED_RETRYABLE')),
+  last_complete_at INTEGER CHECK(last_complete_at >= 0),
+  not_before INTEGER CHECK(not_before >= 0),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  PRIMARY KEY (project_id, connector_id, resource_family)
+) STRICT;
 ```
+
+This is the next contiguous server schema version after Foundation `0004` and is wired into
+`migrate.ts`. Verification covers empty-to-v5 and v4-to-v5 upgrades, rollback, history/integrity,
+foreign keys, bounds, scope isolation, and claimed-schema checks. Provider integer IDs are bounded
+decimal strings, never JavaScript numbers. Mutable logins/names are metadata; immutable IDs/node IDs
+are identity. Installation access tokens are never persisted. The App private key and webhook secret
+are separate encrypted credential rows, while connector epoch remains authoritative only in
+`connector_epochs`.
+
+Selections are per Collab Project, revisioned, and tombstoned/redacted on narrowing. Closed serializers
+produce bounded projection JSON with no issue/PR/comment body or raw provider payload. A `REDACTED` row
+retains only safe identity/count/provenance. Cursor scans commit absence only after every page succeeds
+under one epoch and scope digest. Delivery identity binds connector, hook, delivery ID, and digest:
+same ID/same digest replays; changed digest is a security conflict.
 
 - [ ] **Step 4: Implement the Zod schemas and `GitHubPort` exactly as shown above**
 
 ```ts
 export const GitHubReferenceSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("ISSUE"), repositoryId: z.number().int().positive(), number: z.number().int().positive() }).strict(),
-  z.object({ kind: z.literal("PULL_REQUEST"), repositoryId: z.number().int().positive(), number: z.number().int().positive() }).strict(),
-  z.object({ kind: z.literal("MILESTONE"), repositoryId: z.number().int().positive(), number: z.number().int().positive() }).strict(),
-  z.object({ kind: z.literal("PROJECT"), projectNodeId: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("ISSUE"), repositoryId: GitHubDecimalIdSchema, number: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("PULL_REQUEST"), repositoryId: GitHubDecimalIdSchema, number: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("MILESTONE"), repositoryId: GitHubDecimalIdSchema, number: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal("PROJECT"), projectNodeId: GitHubNodeIdSchema }).strict(),
 ]);
 ```
 
+Every reference has an opaque branded identity and explicit collision-free conversion to/from the
+Foundation `SourceRef`; repository rename does not change identity. Only Issue and Pull Request
+references become actionable Coordination Record source keys. Milestones and Projects remain planning
+references. All nested mutation schemas are strict/bounded, reject no-ops and illegal state/reason
+combinations (`OPEN` requires `REOPENED`; `CLOSED` requires `COMPLETED`, `NOT_PLANNED`, or
+`DUPLICATE`), and expose no raw REST/GraphQL escape hatch. The outer exact-revision envelope, not each
+nested variant, owns connector/project/epoch, idempotency, expected revision/prior digest, and action
+digest.
+
 - [ ] **Step 5: Run GREEN and migration verification**
 
-Run: `bun test tests/unit/github/contracts.test.ts tests/integration/github/migration-0101.test.ts && bun run typecheck`
+Run: `bun test tests/unit/github/contracts.test.ts tests/integration/github/migration-0005.test.ts && bun run typecheck`
 
 Expected: PASS and exit 0.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/github.ts src/server/adapters/github/contract.ts src/server/db/migrations/0101_github.sql src/server/db/migrations/0101_github.verify.ts tests/unit/github/contracts.test.ts tests/integration/github/migration-0101.test.ts
+git add src/shared/contracts/github.ts src/server/adapters/github/contract.ts src/server/db/migrations/0005_github.sql src/server/db/migrations/0005_github.verify.ts src/server/db/migrate.ts tests/unit/github/contracts.test.ts tests/integration/github/migration-0005.test.ts tests/integration/github/projection-storage-safety.test.ts
 git commit -m "feat(github): define scoped connector contracts"
 ```
 
@@ -213,6 +292,21 @@ export function assertGitHubScope(input: GitHubScopeInput): Result<GitHubAuthori
   return success({ connectorId: input.connectorId, repositoryId: input.repositoryId, projectNodeId: input.projectNodeId });
 }
 ```
+
+App private keys and webhook secrets are decrypted only through the Foundation credential store and
+never enter logs/errors. Generate short-lived installation tokens in memory, request minimum provider
+permissions and selected repository IDs, cache only by connector epoch plus exact scope/permission
+digest, and discard on expiry, epoch change, suspension, revocation, or permission change. Never
+persist an installation token. Enforce the intersection of provider installation repositories,
+provider permissions, owner-selected Collab repositories, selected Projects, and current connector
+epoch on every call; organization discovery never grants ingestion.
+
+Scope reduction commits the Foundation connector-epoch advance before invalidating queued writes,
+clearing token caches/cursors, and redacting affected projections. Tests cover suspension, local/provider
+scope disagreement, permission narrowing, an organization Project item from an unselected repository,
+and narrowing during an in-flight call. The strict adapter enforces identical scope and epoch rules and
+can deterministically simulate paging, rate limits, lost responses, 403/404 distinctions, and external
+state changes.
 
 - [ ] **Step 4: Implement the stateful strict adapter**
 
@@ -266,7 +360,8 @@ git commit -m "feat(github): enforce app scope ceiling"
 - Test: `tests/drills/github-missed-webhook.test.ts`
 
 **Interfaces:**
-- Consumes: `ExecutionAuthority.execute({ kind: "RECONCILE_SOURCE", ... })`, Foundation audit/idempotency, `GitHubPort.reconcile`, selected scope, and current connector epoch.
+- Consumes: Foundation `ConnectorAuthority.reconcileSource`, audit/idempotency,
+  `GitHubPort.reconcile`, selected scope, and current connector epoch.
 - Produces: `verifyGitHubWebhook(request, secret): Result<VerifiedGitHubDelivery>` and `reconcileGitHubScope(scope): Promise<Result<ReconciliationSummary>>`.
 
 - [ ] **Step 1: Write signature, replay, reorder, and missed-delivery tests**
@@ -308,9 +403,23 @@ export async function verifyGitHubWebhook(request: Request, secret: Uint8Array):
 
 ```ts
 for await (const event of github.reconcile(scope)) {
-  await authority.execute({ kind: "RECONCILE_SOURCE", idempotencyKey: `github:${event.deliveryKey}`, event });
+  await connectorAuthority.reconcileSource({ idempotencyKey: `github:${event.deliveryKey}`, scope, event });
 }
 ```
+
+Verify `X-Hub-Signature-256` over the exact bounded raw bytes with constant-time comparison before
+parsing, logging, deduplication, or scope decisions. The verified wrapper exposes only a short-lived
+body handle to the closed event parser; raw webhook bytes are never durable. Bind delivery dedup to
+connector, hook/App identity, delivery ID, and body digest. Same ID/digest replays; same ID with a
+different digest is a security conflict. Valid but unselected events emit only a categorical safe
+audit fact and no title/body/label/actor projection.
+
+Webhook, periodic reconciliation, and mutation confirmation converge through the same Foundation
+projection-application path. Older observations never regress newer projections; same source revision
+with a different normalized hash forces a point refresh. A paginated scan may tombstone absence only
+after every page succeeds under one connector epoch and scope digest. Rate limit, transient failure, or
+scope narrowing leaves prior projections intact and a resumable cursor; `MISSING`, `FORBIDDEN`,
+`UNAVAILABLE`, and `REDACTED` remain distinct.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -340,7 +449,9 @@ git commit -m "feat(github): reconcile signed source events"
 - Test: `tests/e2e/github-planning.spec.ts`
 
 **Interfaces:**
-- Consumes: `GitHubPort.mutate`, `ExecutionAuthority.execute({ kind: "AUTHORIZE_OPERATION", operation: { kind: "MUTATE_GITHUB", ... } })`, current epoch/scope, and exact source revision.
+- Consumes: `GitHubPort.mutate`, Foundation `ConnectorAuthority`, optional consumed
+  `ExecutionAuthority` operation authorization for attempt-originated writes, current epoch/scope, and
+  exact source revision.
 - Produces: `performGitHubMutation(command: AuthorizedGitHubMutation): Promise<Result<Observed<GitHubProjection>>>`.
 
 - [ ] **Step 1: Write exhaustive provider-first contract tests**
@@ -367,11 +478,11 @@ Expected: FAIL because `performGitHubMutation` is missing.
 
 ```ts
 export async function performGitHubMutation(command: AuthorizedGitHubMutation): Promise<Result<Observed<GitHubProjection>>> {
-  const authorization = await authority.execute(toAuthorizeOperation(command));
+  const authorization = await connectorAuthority.authorize(toConnectorOperation(command));
   if (!authorization.ok) return authorization;
-  const observed = await github.mutate({ mutation: command.mutation, expectedRevision: command.expectedRevision });
+  const observed = await github.mutate(authorization.value, toExactRevisionMutation(command));
   if (!observed.ok) return await recordVisibleProviderFailure(command, observed.error);
-  return await authority.execute(toRecordConfirmedProjection(command, observed.value));
+  return await connectorAuthority.confirmMutation(toConfirmedProjection(command, observed.value));
 }
 ```
 
@@ -410,8 +521,9 @@ git commit -m "feat(github): add provider-first planning mutations"
 **Requirements:** `GHB-006`, `GHB-007`, `GHB-008`.
 
 **Files:**
-- Create: `src/server/db/migrations/0102_coordination_source_mapping.sql`
-- Create: `src/server/db/migrations/0102_coordination_source_mapping.verify.ts`
+- Create: `src/server/db/migrations/0006_coordination_source_mapping.sql`
+- Create: `src/server/db/migrations/0006_coordination_source_mapping.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Modify: `src/server/modules/coordination-records/{canonical-key,source-links}.ts`
 - Create: `src/server/modules/github-coordination/{assignment-delegation,delivery}.ts`
 - Create: `src/server/adapters/http/routes/coordination-records.ts`
@@ -419,8 +531,11 @@ git commit -m "feat(github): add provider-first planning mutations"
 - Test: `tests/integration/github/{assignment-delegation,delivery}.test.ts`
 
 **Interfaces:**
-- Consumes: Foundation source-free Coordination Records, `ExecutionAuthority.execute` commands `LINK_SOURCE_REFERENCE`, `LAUNCH_RUN`, and bounded evidence recording.
-- Produces: canonical key `(project_id, connector_id, source_item_id)`, immutable aliases, independent `AssignmentDelegationResult`, and closing-reference derivation.
+- Consumes: Foundation's existing canonical `(project_id, connector_id, source_item_id)` mapping,
+  source-free Coordination Records, `ExecutionAuthority.execute` commands `LINK_SOURCE_REFERENCE` and
+  `LAUNCH_RUN`, and bounded evidence recording.
+- Produces: provider alias/provenance extensions to the canonical mapping, immutable record aliases,
+  independent `AssignmentDelegationResult`, and closing-reference derivation.
 
 - [ ] **Step 1: Write concurrent late-link and partial-success tests**
 
@@ -443,22 +558,31 @@ Expected: FAIL with missing canonical mapping migration.
 - [ ] **Step 3: Add canonical and provenance tables**
 
 ```sql
-CREATE TABLE coordination_source_keys (
-  project_id TEXT NOT NULL,
-  connector_id TEXT NOT NULL,
-  source_item_id TEXT NOT NULL,
-  coordination_record_id TEXT NOT NULL,
-  linked_at TEXT NOT NULL,
-  linked_by_member_id TEXT NOT NULL,
-  PRIMARY KEY (project_id, connector_id, source_item_id)
-);
+CREATE TABLE github_source_aliases (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  connector_id TEXT NOT NULL REFERENCES github_installations(connector_id),
+  provider_alias_kind TEXT NOT NULL CHECK(provider_alias_kind IN ('REPOSITORY_NUMBER','NODE_ID','CANONICAL_URL')),
+  provider_alias TEXT NOT NULL CHECK(length(provider_alias) BETWEEN 1 AND 512),
+  source_item_id TEXT NOT NULL CHECK(length(source_item_id) BETWEEN 1 AND 512),
+  observed_at INTEGER NOT NULL CHECK(observed_at >= 0),
+  PRIMARY KEY (project_id, connector_id, provider_alias_kind, provider_alias),
+  FOREIGN KEY (project_id, connector_id, source_item_id)
+    REFERENCES coordination_source_keys(project_id, connector_id, source_item_id)
+) STRICT;
 CREATE TABLE coordination_record_aliases (
-  alias_record_id TEXT PRIMARY KEY,
-  canonical_record_id TEXT NOT NULL,
+  alias_record_id TEXT PRIMARY KEY REFERENCES coordination_records(id),
+  canonical_record_id TEXT NOT NULL REFERENCES coordination_records(id),
   reason TEXT NOT NULL CHECK (reason IN ('AUTHORIZED_COALESCE')),
-  created_at TEXT NOT NULL
-);
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  CHECK(alias_record_id <> canonical_record_id)
+) STRICT;
 ```
+
+Migration `0006` extends rather than recreates Foundation's canonical source mapping and is wired into
+the contiguous migrator. Linking uses the immutable provider ID-based `source_item_id`; mutable
+owner/repository/number URLs are aliases only. Late-link races have one canonical winner under the
+Foundation unique key. Coalescing never rewrites completed run provenance and requires explicit
+authorized aliasing with auditable reason.
 
 - [ ] **Step 4: Implement independent assignment and delegation**
 
@@ -491,7 +615,7 @@ Expected: PASS; partial successes remain independently retryable and merged/open
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0102_coordination_source_mapping.sql src/server/db/migrations/0102_coordination_source_mapping.verify.ts src/server/modules/coordination-records src/server/modules/github-coordination/assignment-delegation.ts src/server/modules/github-coordination/delivery.ts src/server/adapters/http/routes/coordination-records.ts tests/integration/coordination-records tests/integration/github/assignment-delegation.test.ts tests/integration/github/delivery.test.ts
+git add src/server/db/migrations/0006_coordination_source_mapping.sql src/server/db/migrations/0006_coordination_source_mapping.verify.ts src/server/db/migrate.ts src/server/modules/coordination-records src/server/modules/github-coordination/assignment-delegation.ts src/server/modules/github-coordination/delivery.ts src/server/adapters/http/routes/coordination-records.ts tests/integration/coordination-records tests/integration/github/assignment-delegation.test.ts tests/integration/github/delivery.test.ts
 git commit -m "feat(github): link canonical coordination delivery"
 ```
 
@@ -575,8 +699,9 @@ git commit -m "feat(github): add bounded collision and check evidence"
 **Requirements:** `GHB-013`, `GHB-014`.
 
 **Files:**
-- Create: `src/server/db/migrations/0103_github_attention.sql`
-- Create: `src/server/db/migrations/0103_github_attention.verify.ts`
+- Create: `src/server/db/migrations/0007_github_attention.sql`
+- Create: `src/server/db/migrations/0007_github_attention.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/server/modules/inbox/{github-events,inbox,command-center}.ts`
 - Create: `src/web/features/inbox/index.tsx`
 - Create: `src/web/features/command-center/index.tsx`
@@ -614,16 +739,17 @@ Expected: FAIL with missing Inbox schema/module.
 
 ```sql
 CREATE TABLE inbox_items (
-  recipient_member_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  subject_key TEXT NOT NULL,
+  recipient_member_id TEXT NOT NULL REFERENCES members(id),
+  event_type TEXT NOT NULL CHECK(length(event_type) BETWEEN 1 AND 64),
+  subject_key TEXT NOT NULL CHECK(length(subject_key) BETWEEN 1 AND 512),
   category TEXT NOT NULL CHECK (category IN ('ACTION_REQUIRED','BLOCKED','WARNING','OUTCOME')),
-  safe_summary TEXT NOT NULL,
+  safe_summary TEXT NOT NULL CHECK(length(safe_summary) BETWEEN 1 AND 240),
   unread INTEGER NOT NULL CHECK (unread IN (0,1)),
-  resolved_at TEXT,
-  updated_at TEXT NOT NULL,
+  resolved_at INTEGER CHECK(resolved_at >= 0),
+  updated_at INTEGER NOT NULL CHECK(updated_at >= 0),
+  revision INTEGER NOT NULL CHECK(revision > 0),
   PRIMARY KEY (recipient_member_id, event_type, subject_key)
-);
+) STRICT;
 ```
 
 - [ ] **Step 4: Implement epoch-first revocation and non-authoritative UI actions**
@@ -642,7 +768,7 @@ Expected: PASS; removed authority fails immediately and cards expose no drag lif
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0103_github_attention.sql src/server/db/migrations/0103_github_attention.verify.ts src/server/modules/inbox src/web/features/inbox src/web/features/command-center src/web/app.tsx tests/drills/github-scope-narrowing.test.ts tests/drills/github-member-offboarding.test.ts tests/integration/inbox/github-attention.test.ts tests/e2e/github-attention.spec.ts
+git add src/server/db/migrations/0007_github_attention.sql src/server/db/migrations/0007_github_attention.verify.ts src/server/db/migrate.ts src/server/modules/inbox src/web/features/inbox src/web/features/command-center src/web/app.tsx tests/drills/github-scope-narrowing.test.ts tests/drills/github-member-offboarding.test.ts tests/integration/inbox/github-attention.test.ts tests/e2e/github-attention.spec.ts
 git commit -m "feat(github): project revocation and team attention"
 ```
 

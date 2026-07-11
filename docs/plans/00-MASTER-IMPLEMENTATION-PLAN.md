@@ -109,9 +109,9 @@ The full authority command types live in `src/shared/contracts/execution-authori
 | Phase | Migration files | Owned schema groups |
 |---|---|---|
 | Foundation | `src/server/db/migrations/0001_foundation.sql` through `0004_foundation_operations.sql` | deployment, members, credentials, sessions, projects, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
-| GitHub | `src/server/db/migrations/0101_github.sql` through `0103_github_attention.sql` | connector installations/scopes, source projections, canonical records, source links, mutation provenance, collision summaries, inbox |
-| Outline | `src/server/db/migrations/0201_outline.sql` through `0203_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
-| Automation | `src/server/db/migrations/0301_workflows.sql` through `0303_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
+| GitHub | `src/server/db/migrations/0005_github.sql` through `0007_github_attention.sql` | connector installations/scopes, source projections, canonical records, source links, mutation provenance, collision summaries, inbox |
+| Outline | `src/server/db/migrations/0008_outline.sql` through `0010_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
+| Automation | `src/server/db/migrations/0011_workflows.sql` through `0013_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
 
 Every migration has an adjacent `*.verify.ts` integration test that opens the previous schema fixture, migrates forward, verifies invariants, and proves backup/restore compatibility. Destructive rollback is never improvised; rollback means restore the pre-migration authenticated backup and run the recorded schema compatibility check.
 

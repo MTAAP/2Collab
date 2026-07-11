@@ -62,7 +62,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0301_workflows.sql` and verifier.
+- Create `src/server/db/migrations/0011_workflows.sql` and verifier.
 - Create `src/shared/contracts/{templates,workflow}.ts`.
 - Create `src/server/modules/templates/{contract,run-templates,versioning,bindings}.ts`.
 - Create `src/server/adapters/http/routes/templates.ts` and MCP tools `src/server/adapters/mcp/template-tools.ts`.
@@ -105,7 +105,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0302_workflow_execution.sql` and verifier.
+- Create `src/server/db/migrations/0012_workflow_execution.sql` and verifier.
 - Create `src/server/modules/templates/workflow-presets.ts`.
 - Create `src/server/modules/workflows/{workflow-engine,scheduler,idempotency,deadlines}.ts`.
 - Create `src/server/modules/workflows/step-run-factory.ts`.
@@ -164,7 +164,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0303_gates_telemetry.sql` and verifier.
+- Create `src/server/db/migrations/0013_gates_telemetry.sql` and verifier.
 - Create `src/shared/contracts/{gates,stop-policies}.ts`.
 - Create `src/server/modules/gates/{contract,manifest,fingerprints,evaluations}.ts`.
 - Create `src/runner/gates/{manifest-loader,local-evaluator}.ts`.

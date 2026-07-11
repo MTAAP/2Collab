@@ -41,7 +41,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0201_outline.sql` and verifier.
+- Create `src/server/db/migrations/0008_outline.sql` and verifier.
 - Create `src/shared/contracts/outline.ts`.
 - Create `src/server/adapters/outline/{contract,oauth,bot-auth,client,scope}.ts`.
 - Create `src/server/modules/connectors/outline-credentials.ts`.
@@ -108,7 +108,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0202_outline_grants.sql` and verifier.
+- Create `src/server/db/migrations/0009_outline_grants.sql` and verifier.
 - Create `src/shared/contracts/document-grants.ts`.
 - Create `src/server/modules/documents/{contract,write-grants,agent-operations}.ts`.
 - Create `src/server/modules/execution-authority/outline-operations.ts`.
@@ -131,7 +131,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0203_outline_proposals.sql` and verifier.
+- Create `src/server/db/migrations/0010_outline_proposals.sql` and verifier.
 - Create `src/shared/contracts/document-proposals.ts`.
 - Create `src/server/modules/documents/{proposals,conflicts,working-documents}.ts`.
 - Create `src/web/features/outline/{proposals,working-documents}/`.
