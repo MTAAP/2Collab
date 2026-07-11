@@ -51,6 +51,7 @@
 - Create: `src/server/adapters/outline/contract.ts`
 - Create: `src/server/db/migrations/0008_outline.sql`
 - Create: `src/server/db/migrations/0008_outline.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Test: `tests/unit/outline/contracts.test.ts`
 - Test: `tests/integration/outline/migration-0008.test.ts`
 
@@ -147,7 +148,7 @@ Expected: PASS and exit 0.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/outline.ts src/server/adapters/outline/contract.ts src/server/db/migrations/0008_outline.sql src/server/db/migrations/0008_outline.verify.ts tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0008.test.ts
+git add src/shared/contracts/outline.ts src/server/adapters/outline/contract.ts src/server/db/migrations/0008_outline.sql src/server/db/migrations/0008_outline.verify.ts src/server/db/migrate.ts tests/unit/outline/contracts.test.ts tests/integration/outline/migration-0008.test.ts
 git commit -m "feat(outline): define split-identity contracts"
 ```
 
@@ -388,6 +389,7 @@ git commit -m "feat(outline): add exact member coediting"
 **Files:**
 - Create: `src/server/db/migrations/0009_outline_grants.sql`
 - Create: `src/server/db/migrations/0009_outline_grants.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/document-grants.ts`
 - Create: `src/server/modules/documents/{write-grants,additional-document-requests,agent-operations}.ts`
 - Create: `src/server/adapters/mcp/document-tools.ts`
@@ -474,7 +476,7 @@ Expected: PASS; requests confer no authority until an explicit member decision.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0009_outline_grants.sql src/server/db/migrations/0009_outline_grants.verify.ts src/shared/contracts/document-grants.ts src/server/modules/documents/write-grants.ts src/server/modules/documents/additional-document-requests.ts src/server/modules/documents/agent-operations.ts src/server/adapters/mcp/document-tools.ts tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts
+git add src/server/db/migrations/0009_outline_grants.sql src/server/db/migrations/0009_outline_grants.verify.ts src/server/db/migrate.ts src/shared/contracts/document-grants.ts src/server/modules/documents/write-grants.ts src/server/modules/documents/additional-document-requests.ts src/server/modules/documents/agent-operations.ts src/server/adapters/mcp/document-tools.ts tests/unit/documents/write-grants.test.ts tests/integration/outline/agent-grants.test.ts
 git commit -m "feat(outline): authorize exact agent document grants"
 ```
 
@@ -485,6 +487,7 @@ git commit -m "feat(outline): authorize exact agent document grants"
 **Files:**
 - Create: `src/server/db/migrations/0010_outline_proposals.sql`
 - Create: `src/server/db/migrations/0010_outline_proposals.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/document-proposals.ts`
 - Create: `src/server/modules/documents/{proposals,conflicts,working-documents}.ts`
 - Create: `src/web/features/outline/{proposals,working-documents}/index.tsx`
@@ -575,7 +578,7 @@ Expected: PASS; no-action disposition is `KEEP`, and Promote/Archive require sep
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/server/db/migrations/0010_outline_proposals.sql src/server/db/migrations/0010_outline_proposals.verify.ts src/shared/contracts/document-proposals.ts src/server/modules/documents/proposals.ts src/server/modules/documents/conflicts.ts src/server/modules/documents/working-documents.ts src/web/features/outline/proposals src/web/features/outline/working-documents tests/unit/documents/proposals.test.ts tests/integration/outline/proposal-conflict.test.ts tests/integration/outline/working-document.test.ts tests/e2e/outline-proposals.spec.ts
+git add src/server/db/migrations/0010_outline_proposals.sql src/server/db/migrations/0010_outline_proposals.verify.ts src/server/db/migrate.ts src/shared/contracts/document-proposals.ts src/server/modules/documents/proposals.ts src/server/modules/documents/conflicts.ts src/server/modules/documents/working-documents.ts src/web/features/outline/proposals src/web/features/outline/working-documents tests/unit/documents/proposals.test.ts tests/integration/outline/proposal-conflict.test.ts tests/integration/outline/working-document.test.ts tests/e2e/outline-proposals.spec.ts
 git commit -m "feat(outline): preserve authored conflict proposals"
 ```
 

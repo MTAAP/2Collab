@@ -85,6 +85,7 @@ export interface GitHubPort extends SourceConnector<GitHubReference, GitHubProje
 **Files:**
 - Create: `src/server/db/migrations/0011_workflows.sql`
 - Create: `src/server/db/migrations/0011_workflows.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/templates.ts`
 - Create: `src/server/modules/templates/{contract,run-templates,versioning}.ts`
 - Test: `tests/unit/templates/portable-template.test.ts`
@@ -232,7 +233,7 @@ Expected: PASS; verifier proves existing versions remain byte-identical after pu
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/shared/contracts/templates.ts src/server/db/migrations/0011_workflows.sql src/server/db/migrations/0011_workflows.verify.ts src/server/modules/templates tests/unit/templates tests/integration/templates
+git add src/shared/contracts/templates.ts src/server/db/migrations/0011_workflows.sql src/server/db/migrations/0011_workflows.verify.ts src/server/db/migrate.ts src/server/modules/templates tests/unit/templates tests/integration/templates
 git commit -m "feat(automation): add portable run templates"
 ```
 
@@ -605,6 +606,7 @@ git commit -m "feat(automation): bind personal workflow execution"
 **Files:**
 - Create: `src/server/db/migrations/0012_workflow_execution.sql`
 - Create: `src/server/db/migrations/0012_workflow_execution.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/server/modules/workflows/{contract,workflow-engine,scheduler,idempotency,step-run-factory}.ts`
 - Test: `tests/integration/workflows/{execution,idempotency,restart}.test.ts`
 
@@ -705,7 +707,7 @@ Expected: PASS; one transition intent and at most one Agent Run exist per step o
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0012_workflow_execution.sql src/server/db/migrations/0012_workflow_execution.verify.ts src/server/modules/workflows tests/integration/workflows
+git add src/server/db/migrations/0012_workflow_execution.sql src/server/db/migrations/0012_workflow_execution.verify.ts src/server/db/migrate.ts src/server/modules/workflows tests/integration/workflows
 git commit -m "feat(automation): schedule workflows durably"
 ```
 
@@ -904,6 +906,7 @@ git commit -m "feat(automation): route typed review results"
 **Files:**
 - Create: `src/server/db/migrations/0013_gates_telemetry.sql`
 - Create: `src/server/db/migrations/0013_gates_telemetry.verify.ts`
+- Modify: `src/server/db/migrate.ts`
 - Create: `src/shared/contracts/gates.ts`
 - Create: `src/server/modules/gates/{contract,manifest,fingerprints,evaluations}.ts`
 - Create: `src/runner/gates/{manifest-loader,local-evaluator}.ts`
@@ -997,7 +1000,7 @@ Expected: PASS for trusted base and exact SHA; self-modified manifests, transmit
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/db/migrations/0013_gates_telemetry.sql src/server/db/migrations/0013_gates_telemetry.verify.ts src/shared/contracts/gates.ts src/server/modules/gates src/runner/gates tests/unit/gates tests/integration/gates tests/runner/gates
+git add src/server/db/migrations/0013_gates_telemetry.sql src/server/db/migrations/0013_gates_telemetry.verify.ts src/server/db/migrate.ts src/shared/contracts/gates.ts src/server/modules/gates src/runner/gates tests/unit/gates tests/integration/gates tests/runner/gates
 git commit -m "feat(automation): enforce trusted repository gates"
 ```
 
