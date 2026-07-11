@@ -901,6 +901,8 @@ git commit -m "feat: add immutable run configuration"
 
 **Files:**
 - Create: `src/runner/repository/{worktrees,publish,cleanup}.ts`
+- Modify: `src/shared/contracts/{runs,commands}.ts`
+- Modify: `src/runner/process-state.ts`
 - Test: `tests/runner/worktrees.test.ts`
 
 **Interfaces:**
@@ -933,17 +935,22 @@ Expected: FAIL because the worktree manager does not exist.
 ```ts
 export interface WorktreeManager {
   createOrReuse(request: WorktreeRequest): Promise<Result<WorktreeHandle>>;
-  publish(handle: WorktreeHandle, expectedHead: string): Promise<Result<PublishedGitReference>>;
-  cleanup(handle: WorktreeHandle, actor: RunnerOwnerActor): Promise<Result<CleanupDisposition>>;
-  discard(handle: WorktreeHandle, actor: RunnerOwnerActor, confirmation: "DISCARD_RETAINED_LOCAL_WORK"): Promise<Result<void>>;
+  publish(handle: WorktreeHandle, authorization: AttemptPublishAuthorization | RetainedWorkPublishAuthorization): Promise<Result<PublishedGitReference>>;
+  cleanup(handle: WorktreeHandle, authorization: CommittedCleanupAuthorization): Promise<Result<CleanupDisposition>>;
+  previewDiscard(handle: WorktreeHandle, actor: RunnerOwnerActor): Promise<Result<DiscardObservation>>;
+  discard(handle: WorktreeHandle, authorization: RetainedWorkDiscardAuthorization): Promise<Result<DiscardReceipt>>;
 }
 export function mayRemove(observation: WorktreeObservation): CleanupDisposition {
+  if (!observation.runTerminal) return { kind: "RETAINED_LOCAL_WORK", reason: "RUN_NOT_TERMINAL" };
   if (observation.activeAttempt) return { kind: "RETAINED_LOCAL_WORK", reason: "ACTIVE_ATTEMPT" };
-  if (!observation.trackedClean || !observation.untrackedClean) return { kind: "RETAINED_LOCAL_WORK", reason: "DIRTY_WORKTREE" };
+  if (!observation.trackedClean) return { kind: "RETAINED_LOCAL_WORK", reason: "TRACKED_CHANGES" };
+  if (!observation.untrackedClean) return { kind: "RETAINED_LOCAL_WORK", reason: "UNTRACKED_FILES" };
   if (!observation.headReachableFromPublishedRef) return { kind: "RETAINED_LOCAL_WORK", reason: "UNPUBLISHED_HEAD" };
   return { kind: "REMOVE" };
 }
 ```
+
+`WorktreeHandle` is runner-internal and nonserializable; shared state receives only opaque keys and normalized repository-relative evidence. Creation resolves an exact full commit from the local mapping, uses shell-free Git argv, serializes per repository, persists `CREATING/READY/RETAINED/REMOVED/DISCARDED` reconciliation state in `~/.collab/runner.db`, and pins the Run only after the worktree exists through a revision CAS. Publication resolves the configured remote/ref locally, verifies the pushed exact HEAD by observing the remote, and strips credentials/path material from evidence. Automatic cleanup is non-force and rechecks every fact immediately before removal. Retained-work Publish/Discard use the separate owner authorization defined by the Product Spec; confirmation is bound to retained ID, observation digest/revision, expected HEAD, and current dirty/unpushed summary.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -954,7 +961,7 @@ Expected: PASS for sequential reuse, cross-run separation, pinning, exact-head p
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/runner/repository/worktrees.ts src/runner/repository/publish.ts src/runner/repository/cleanup.ts tests/runner/worktrees.test.ts
+git add src/shared/contracts/runs.ts src/shared/contracts/commands.ts src/runner/process-state.ts src/runner/repository/worktrees.ts src/runner/repository/publish.ts src/runner/repository/cleanup.ts tests/runner/worktrees.test.ts
 git commit -m "feat: preserve agent run worktrees"
 ```
 

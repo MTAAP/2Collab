@@ -444,9 +444,13 @@ Before removal, the runner reports the remote URL identity, remote ref, commit S
 
 If the worktree is dirty, contains untracked files, has commits not verified on the remote, or cleanup itself fails, the runner retains it and surfaces an explicit cleanup action instead of guessing that the remaining state is expendable.
 
+Retention uses the closed safe reasons `RUN_NOT_TERMINAL`, `ACTIVE_ATTEMPT`, `TRACKED_CHANGES`, `UNTRACKED_FILES`, `UNPUBLISHED_HEAD`, `REMOTE_UNAVAILABLE`, `HEAD_CHANGED`, `CLEANUP_FAILED`, and `AUTHORITY_UNAVAILABLE`. The runner records an opaque Retained Local Work identifier, observation revision/digest, exact HEAD, bounded repository-relative changed-path summary, counts, age, disk usage, and publish state in its local registry and sends only the bounded path-free or repository-relative evidence projection to the server. Retained work has no automatic expiry.
+
 Dirty or unpublished terminal worktrees have no automatic expiry in v1. MTAAP shows their age, disk usage, branch, commit status, and changed-file summary to project members, but only the Registered Runner's owner may authorize destructive cleanup on that machine. Other members may request cleanup but cannot discard the runner owner's local state.
 
 For a clean worktree whose commits are not yet published, the owner may choose **Publish**, which asks the runner to push the existing local branch through its configured git credentials and then reruns the cleanup checks. Publish never invents a commit from dirty files. For a dirty worktree, MTAAP offers **Open locally** and **Discard**; Discard requires an explicit confirmation after showing uncommitted files and unpushed commits, removes the local worktree, and records an auditable destructive-cleanup event without uploading file contents.
+
+Attempt-driven publication consumes the current session/fence-bound operation authorization. Terminal retained-work Publish and Discard instead use separate short-lived runner-owner authorizations bound to the retained-work ID, observation revision/digest, expected HEAD, configured remote/ref, and requested operation; they never fabricate a live Attempt or Authority Session. Automatic cleanup consumes a committed server cleanup authorization proving terminal Run state and no active Attempt. Every destructive step reacquires the local lock and rechecks HEAD, status, remote reachability, and authorization; a changed observation fails toward retention. Only explicit owner Discard may use force, after current confirmation, and failure remains retained.
 
 ### Work Item Mutation Guard V1
 
