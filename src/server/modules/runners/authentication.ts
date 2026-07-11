@@ -163,6 +163,7 @@ export function createRunnerAuthenticationAuthority(
       const row = dependencies.database
         .query<
           {
+            credential_id: string;
             runner_id: string;
             runner_epoch: number;
             owner_member_id: string;
@@ -170,7 +171,8 @@ export function createRunnerAuthenticationAuthority(
           },
           [Uint8Array]
         >(
-          `SELECT runners.id AS runner_id, runners.runner_epoch, runners.owner_member_id,
+          `SELECT credentials.id AS credential_id, runners.id AS runner_id,
+                  runners.runner_epoch, runners.owner_member_id,
                   credentials.key_thumbprint
            FROM runner_credentials AS credentials
            JOIN runners ON runners.id = credentials.runner_id
@@ -189,13 +191,45 @@ export function createRunnerAuthenticationAuthority(
       if (!proof.ok) return proof;
       const accessToken = randomSecret("runner_access");
       const nonce = randomSecret("runner_nonce");
-      const expiresAt = dependencies.clock() + RUNNER_ACCESS_SECONDS;
       const tokenHash = Buffer.from(await digest(accessToken)).toString("hex");
+      const current = inImmediateTransaction(dependencies.database, () =>
+        dependencies.database
+          .query<
+            {
+              runner_id: string;
+              runner_epoch: number;
+              owner_member_id: string;
+              key_thumbprint: string;
+            },
+            [string, Uint8Array, string, number, string]
+          >(
+            `SELECT runners.id AS runner_id, runners.runner_epoch, runners.owner_member_id,
+                    credentials.key_thumbprint
+             FROM runner_credentials AS credentials
+             JOIN runners ON runners.id = credentials.runner_id
+             JOIN members ON members.id = runners.owner_member_id
+             WHERE credentials.id = ? AND credentials.credential_hash = ?
+               AND credentials.key_thumbprint = ? AND credentials.runner_epoch = ?
+               AND credentials.member_authority_epoch = members.authority_epoch
+               AND credentials.revoked_at IS NULL
+               AND runners.id = ? AND runners.runner_epoch = credentials.runner_epoch
+               AND runners.revoked_at IS NULL AND members.status = 'ACTIVE'`,
+          )
+          .get(
+            row.credential_id,
+            credentialHash,
+            row.key_thumbprint,
+            row.runner_epoch,
+            row.runner_id,
+          ),
+      );
+      if (!current) return failure("RUNNER_CREDENTIAL_INVALID", "Runner credential is invalid.");
+      const expiresAt = dependencies.clock() + RUNNER_ACCESS_SECONDS;
       access.set(tokenHash, {
-        runnerId: row.runner_id,
-        runnerEpoch: row.runner_epoch,
-        ownerMemberId: row.owner_member_id,
-        keyThumbprint: row.key_thumbprint,
+        runnerId: current.runner_id,
+        runnerEpoch: current.runner_epoch,
+        ownerMemberId: current.owner_member_id,
+        keyThumbprint: current.key_thumbprint,
         expiresAt,
         nonce,
       });
@@ -204,9 +238,9 @@ export function createRunnerAuthenticationAuthority(
         value: {
           accessToken,
           nonce,
-          runnerId: row.runner_id as RegisteredRunnerId,
-          runnerEpoch: row.runner_epoch,
-          keyThumbprint: row.key_thumbprint,
+          runnerId: current.runner_id as RegisteredRunnerId,
+          runnerEpoch: current.runner_epoch,
+          keyThumbprint: current.key_thumbprint,
           expiresAt,
         } satisfies RunnerAccessIssue,
       };

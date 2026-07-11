@@ -85,6 +85,37 @@ describe("runner pairing concurrency", () => {
     });
   }
 
+  for (const mutation of ["RUNNER_REVOKE", "MEMBER_OFFBOARD"] as const) {
+    test(`does not mint access when ${mutation.toLowerCase()} wins during key proof`, async () => {
+      const fixture = createRunnerFixture();
+      try {
+        const paired = await fixture.pair("member_a");
+        fixture.setBeforePossession(() => {
+          fixture.setBeforePossession(undefined);
+          if (mutation === "RUNNER_REVOKE") {
+            fixture.database
+              .query(
+                "UPDATE runners SET runner_epoch = runner_epoch + 1, revision = revision + 1, revoked_at = ? WHERE id = ?",
+              )
+              .run(fixture.now(), paired.runnerId);
+          } else {
+            fixture.database.exec(
+              "UPDATE members SET status = 'REVOKED', authority_epoch = authority_epoch + 1, revision = revision + 1 WHERE id = 'member_a'",
+            );
+          }
+        });
+        const issued = await fixture.authentication.exchangeCredential({
+          runnerCredential: paired.runnerCredential,
+          keyProof: `possession:${paired.keyThumbprint}`,
+        });
+        expect(issued.ok).toBeFalse();
+        if (!issued.ok) expect(issued.error.code).toBe("RUNNER_CREDENTIAL_INVALID");
+      } finally {
+        fixture.close();
+      }
+    });
+  }
+
   test("does not create an exposure when owner offboarding wins after authority inspection", async () => {
     const fixture = createRunnerFixture();
     try {
@@ -155,6 +186,57 @@ describe("runner pairing concurrency", () => {
       fixture.close();
     }
   });
+
+  for (const mutation of ["AUDIENCE", "ACKNOWLEDGEMENT"] as const) {
+    test(`does not project private eligibility when ${mutation.toLowerCase()} changes after its gate`, async () => {
+      const fixture = createRunnerFixture();
+      try {
+        const paired = await fixture.pair("member_a");
+        const exposed = await fixture.expose(paired.runnerId);
+        let mutated = false;
+        fixture.setAfterQuery((sql) => {
+          if (
+            mutated ||
+            !sql.includes("SELECT runners.runner_epoch") ||
+            !sql.includes("FROM runner_exposures AS exposures")
+          ) {
+            return;
+          }
+          mutated = true;
+          if (mutation === "AUDIENCE") {
+            fixture.database
+              .query(
+                `UPDATE runners SET dispatch_audience = 'OWNER_ONLY',
+                   policy_revision = policy_revision + 1, revision = revision + 1 WHERE id = ?`,
+              )
+              .run(paired.runnerId);
+          } else {
+            fixture.database
+              .query(
+                "UPDATE runner_exposure_acknowledgements SET revoked_at = ? WHERE id = (SELECT acknowledgement_id FROM runner_exposures WHERE id = ?)",
+              )
+              .run(fixture.now(), exposed.exposureId);
+          }
+        });
+        const result = await fixture.registry.inspectEligibility({
+          actor: fixture.actor("member_b"),
+          ...exposed,
+        });
+        fixture.setAfterQuery(undefined);
+        expect(mutated).toBeTrue();
+        expect(result).toMatchObject({
+          ok: true,
+          value: {
+            disposition: "CURRENT",
+            authorizationSource: "TEAM_EXPOSURE",
+            staleReasons: [],
+          },
+        });
+      } finally {
+        fixture.close();
+      }
+    });
+  }
 
   for (const operation of ["ACKNOWLEDGEMENT", "EXPOSURE", "RUNNER"] as const) {
     test(`does not commit ${operation.toLowerCase()} revocation after owner offboarding`, async () => {

@@ -281,6 +281,7 @@ export type RegisterRunnerMapping = Readonly<{
 }>;
 export type ReplaceRunnerMapping = RegisterRunnerMapping & Readonly<{ expectedRevision: number }>;
 export type RevokeRunnerMapping = Readonly<{
+  idempotencyKey: string;
   actor: MemberActor;
   runnerId: RegisteredRunnerId;
   projectId: ProjectId;

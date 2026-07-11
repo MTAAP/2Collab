@@ -974,45 +974,49 @@ export function createRunnerServices(dependencies: Dependencies) {
       );
       const prior = replayWrite<RunnerMapping>(ticket);
       if (prior) return prior;
-      return inImmediateTransaction(dependencies.database, () => {
-        const raced = replayWrite<RunnerMapping>(ticket);
-        if (raced) return raced;
-        if (
-          !revalidateOwner(
-            input.data.actor as MemberActor,
-            owner.member.proofHash,
-            input.data.runnerId,
-          )
-        ) {
-          return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
-        }
-        const now = dependencies.clock();
-        const changed = dependencies.database
-          .query(
-            `UPDATE runner_mapping_versions SET revoked_at = ?
-             WHERE runner_id = ? AND project_id = ? AND revision = ? AND revoked_at IS NULL`,
-          )
-          .run(now, input.data.runnerId, input.data.projectId, input.data.expectedRevision);
-        if (changed.changes !== 1)
-          return failure("RUNNER_MAPPING_STALE", "Runner mapping revision is stale.");
-        const row = dependencies.database
-          .query<MappingRow, [string, string, number]>(
-            "SELECT * FROM runner_mapping_versions WHERE runner_id = ? AND project_id = ? AND revision = ?",
-          )
-          .get(input.data.runnerId, input.data.projectId, input.data.expectedRevision);
-        if (!row) return failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
-        const result = { ok: true as const, value: mappingView(row) };
-        return storeWrite(ticket, result, {
-          auditKind: "RUNNER_MAPPING_REVOKED",
-          actorKind: "MEMBER",
-          actorId: owner.member.memberId,
-          subjectId: input.data.runnerId,
-          safeDetails: {
-            ownerMemberId: owner.member.memberId,
-            projectId: input.data.projectId,
-          },
+      try {
+        return inImmediateTransaction(dependencies.database, () => {
+          const raced = replayWrite<RunnerMapping>(ticket);
+          if (raced) return raced;
+          if (
+            !revalidateOwner(
+              input.data.actor as MemberActor,
+              owner.member.proofHash,
+              input.data.runnerId,
+            )
+          ) {
+            return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+          }
+          const now = dependencies.clock();
+          const changed = dependencies.database
+            .query(
+              `UPDATE runner_mapping_versions SET revoked_at = ?
+               WHERE runner_id = ? AND project_id = ? AND revision = ? AND revoked_at IS NULL`,
+            )
+            .run(now, input.data.runnerId, input.data.projectId, input.data.expectedRevision);
+          if (changed.changes !== 1)
+            return failure("RUNNER_MAPPING_STALE", "Runner mapping revision is stale.");
+          const row = dependencies.database
+            .query<MappingRow, [string, string, number]>(
+              "SELECT * FROM runner_mapping_versions WHERE runner_id = ? AND project_id = ? AND revision = ?",
+            )
+            .get(input.data.runnerId, input.data.projectId, input.data.expectedRevision);
+          if (!row) return failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
+          const result = { ok: true as const, value: mappingView(row) };
+          return storeWrite(ticket, result, {
+            auditKind: "RUNNER_MAPPING_REVOKED",
+            actorKind: "MEMBER",
+            actorId: owner.member.memberId,
+            subjectId: input.data.runnerId,
+            safeDetails: {
+              ownerMemberId: owner.member.memberId,
+              projectId: input.data.projectId,
+            },
+          });
         });
-      });
+      } catch {
+        return failure("RUNNER_MAPPING_FAILED", "Runner mapping failed.");
+      }
     },
 
     async advertiseProfile(command) {
@@ -1590,29 +1594,29 @@ export function createRunnerServices(dependencies: Dependencies) {
         .safeParse(command);
       if (!input.success)
         return failure("RUNNER_REVOCATION_INVALID", "Runner revocation is invalid.");
-      const owner = await activeOwner(input.data.actor as MemberActor, input.data.runnerId);
-      if (!owner) {
+      const member = await memberAuthority(input.data.actor as MemberActor);
+      const runner = runnerById(input.data.runnerId);
+      if (!member || !runner || runner.owner_member_id !== member.memberId) {
         return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
       }
       const ticket = await writeTicket(
         "RUNNER_REVOKE",
-        owner.member.memberId,
+        member.memberId,
         input.data.idempotencyKey,
         { runnerId: input.data.runnerId, expectedRunnerEpoch: input.data.expectedRunnerEpoch },
       );
       const prior = replayWrite<RunnerRevocation>(ticket);
       if (prior) return prior;
+      if (runner.revoked_at !== null) {
+        return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
+      }
       const now = dependencies.clock();
       try {
         return inImmediateTransaction(dependencies.database, () => {
           const raced = replayWrite<RunnerRevocation>(ticket);
           if (raced) return raced;
           if (
-            !revalidateOwner(
-              input.data.actor as MemberActor,
-              owner.member.proofHash,
-              input.data.runnerId,
-            )
+            !revalidateOwner(input.data.actor as MemberActor, member.proofHash, input.data.runnerId)
           ) {
             return failure("RUNNER_OWNER_REQUIRED", "Runner owner authorization is required.");
           }
@@ -1651,10 +1655,10 @@ export function createRunnerServices(dependencies: Dependencies) {
           return storeWrite(ticket, result, {
             auditKind: "RUNNER_REVOKED",
             actorKind: "MEMBER",
-            actorId: owner.member.memberId,
+            actorId: member.memberId,
             subjectId: input.data.runnerId,
             safeDetails: {
-              ownerMemberId: owner.member.memberId,
+              ownerMemberId: member.memberId,
               runnerEpoch: nextEpoch,
             },
           });
@@ -1690,8 +1694,27 @@ export function createRunnerServices(dependencies: Dependencies) {
       );
       if (!owner) {
         const exposed = dependencies.database
-          .query<{ id: string }, [string, string, number, string, number, string, string]>(
-            `SELECT exposures.id FROM runner_exposures AS exposures
+          .query<
+            {
+              runner_epoch: number;
+              policy_revision: number;
+              last_heartbeat_at: number | null;
+              mapping_revision: number;
+              profile_id: string;
+              profile_version: number;
+              profile_fingerprint: string;
+              exposure_revision: number;
+              acknowledgement_version: number;
+            },
+            [string, string, number, string, number, string, string]
+          >(
+            `SELECT runners.runner_epoch, runners.policy_revision, runners.last_heartbeat_at,
+                    mappings.revision AS mapping_revision, profiles.profile_id,
+                    profiles.version AS profile_version,
+                    profiles.fingerprint AS profile_fingerprint,
+                    exposures.revision AS exposure_revision,
+                    acknowledgements.version AS acknowledgement_version
+             FROM runner_exposures AS exposures
              JOIN runners ON runners.id = exposures.runner_id
              JOIN runner_mapping_versions AS mappings
                ON mappings.runner_id = exposures.runner_id
@@ -1743,6 +1766,38 @@ export function createRunnerServices(dependencies: Dependencies) {
         if (!exposed) {
           return failure("RUNNER_NOT_OWNED_OR_EXPOSED", "Runner is not owned or exposed.");
         }
+        const observedAt = dependencies.clock();
+        const state =
+          exposed.last_heartbeat_at === null
+            ? "NEVER_CONNECTED"
+            : observedAt - exposed.last_heartbeat_at < 30
+              ? "ONLINE"
+              : "OFFLINE";
+        return {
+          ok: true,
+          value: {
+            disposition: "CURRENT",
+            authorizationSource: "TEAM_EXPOSURE",
+            runnerEpoch: exposed.runner_epoch,
+            policyRevision: exposed.policy_revision,
+            mappingRevision: exposed.mapping_revision,
+            profileId: exposed.profile_id as SafeProfileId,
+            profileVersion: exposed.profile_version,
+            profileFingerprint: exposed.profile_fingerprint,
+            exposureRevision: exposed.exposure_revision,
+            acknowledgementVersion: exposed.acknowledgement_version,
+            lease: {
+              runnerId: input.data.runnerId as RegisteredRunnerId,
+              runnerEpoch: exposed.runner_epoch,
+              state,
+              ...(exposed.last_heartbeat_at === null
+                ? {}
+                : { lastHeartbeatAt: exposed.last_heartbeat_at }),
+              observedAt,
+            },
+            staleReasons: [],
+          } satisfies RunnerEligibilityFacts,
+        };
       }
       const runner = runnerById(input.data.runnerId);
       if (!runner) {

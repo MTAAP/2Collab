@@ -17,6 +17,13 @@ describe("runner revocation", () => {
         ok: true,
         value: { runnerEpoch: 2, disposition: "REVOKED" },
       });
+      const replay = await fixture.registry.revoke({
+        idempotencyKey: "runner_revoke",
+        actor: fixture.actor("member_a"),
+        runnerId: paired.runnerId,
+        expectedRunnerEpoch: 1,
+      });
+      expect(replay).toEqual(revoked);
       expect(fixture.registry.inspectLease(paired.runnerId).state).toBe("REVOKED");
       const auth = await fixture.authentication.exchangeCredential({
         runnerCredential: paired.runnerCredential,

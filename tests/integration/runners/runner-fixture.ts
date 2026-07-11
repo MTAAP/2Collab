@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Database } from "bun:sqlite";
 import { openDatabase } from "../../../src/server/db/connection.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
 import { createRunnerServices } from "../../../src/server/modules/runners/runner-registry.ts";
@@ -37,8 +38,37 @@ export function createRunnerFixture() {
   let sequence = 0;
   let beforeDigest: ((value: string) => void) | undefined;
   let beforeClock: (() => void) | undefined;
+  let beforePossession: (() => void) | undefined;
+  let afterQuery: ((sql: string) => void) | undefined;
+  const serviceDatabase = new Proxy(database, {
+    get(target, property) {
+      if (property === "query") {
+        return (sql: string) => {
+          const statement = target.query(sql);
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty) {
+              const value = Reflect.get(statementTarget, statementProperty);
+              if (statementProperty === "get") {
+                return (...parameters: unknown[]) => {
+                  const result = (value as (...input: unknown[]) => unknown).apply(
+                    statementTarget,
+                    parameters,
+                  );
+                  afterQuery?.(sql);
+                  return result;
+                };
+              }
+              return typeof value === "function" ? value.bind(statementTarget) : value;
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as Database;
   const services = createRunnerServices({
-    database,
+    database: serviceDatabase,
     clock: () => {
       beforeClock?.();
       return now;
@@ -64,6 +94,7 @@ export function createRunnerFixture() {
             };
       },
       async verifyPossession(input) {
+        beforePossession?.();
         return input.proof === `possession:${input.keyThumbprint}`
           ? { ok: true, value: { verified: true as const } }
           : {
@@ -229,6 +260,12 @@ export function createRunnerFixture() {
     },
     setBeforeClock(value: (() => void) | undefined) {
       beforeClock = value;
+    },
+    setBeforePossession(value: (() => void) | undefined) {
+      beforePossession = value;
+    },
+    setAfterQuery(value: ((sql: string) => void) | undefined) {
+      afterQuery = value;
     },
     close() {
       database.close();
