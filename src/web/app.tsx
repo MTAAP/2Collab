@@ -1,39 +1,74 @@
-import { ArrowRightIcon, CheckCircle2Icon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { APP_METADATA } from "@shared/app-metadata";
+import { BotIcon, PlayIcon, SettingsIcon, UsersIcon, WorkflowIcon } from "lucide-react";
+import { MembersFeature } from "./features/members/members-feature.tsx";
+import { PresetsFeature } from "./features/presets/presets-feature.tsx";
+import { RunnersFeature } from "./features/runners/runners-feature.tsx";
+import { RunsFeature } from "./features/runs/runs-feature.tsx";
+import { InvitationExchange } from "./features/setup/invitation-exchange.tsx";
+import { SetupFeature } from "./features/setup/setup-feature.tsx";
 
-export function App() {
+const navigation = [
+  { href: "/runs", label: "Runs", icon: PlayIcon },
+  { href: "/presets", label: "Presets", icon: WorkflowIcon },
+  { href: "/runners", label: "Runners", icon: BotIcon },
+  { href: "/settings/team", label: "Team & access", icon: UsersIcon },
+] as const;
+
+function AppShell() {
+  const path = window.location.pathname;
+  const content = path.startsWith("/settings/team") ? (
+    <MembersFeature />
+  ) : path.startsWith("/runners") ? (
+    <RunnersFeature />
+  ) : path.startsWith("/presets") ? (
+    <PresetsFeature />
+  ) : (
+    <RunsFeature />
+  );
   return (
-    <main className="mx-auto flex min-h-svh w-full max-w-5xl items-center px-6 py-16 lg:px-10">
-      <section className="flex w-full flex-col gap-10 rounded-3xl border bg-card p-8 text-card-foreground shadow-sm sm:p-12 lg:p-16">
-        <div className="flex max-w-3xl flex-col gap-6">
-          <p className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-            <CheckCircle2Icon aria-hidden="true" />
-            Repository foundation ready
-          </p>
-          <div className="flex flex-col gap-4">
-            <h1 className="text-5xl font-semibold tracking-tight sm:text-7xl">
-              {APP_METADATA.name}
-            </h1>
-            <p className="max-w-2xl text-lg leading-8 text-muted-foreground sm:text-xl">
-              A self-hosted coordination surface for small developer teams and the trusted agent
-              runtimes already running on their machines.
-            </p>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <a className="brand" href="/runs" aria-label="Collab home">
+          <span className="brand-mark">
+            <WorkflowIcon aria-hidden="true" />
+          </span>
+          <span>
+            <strong>Collab</strong>
+            <small>Foundation team</small>
+          </span>
+        </a>
+        <div className="project-switcher">
+          <small>PROJECT</small>
+          <strong>Collab</strong>
+        </div>
+        <nav aria-label="Primary navigation">
+          <span className="nav-label">OPERATE</span>
+          {navigation.map(({ href, label, icon: Icon }) => (
+            <a key={href} href={href} aria-current={path.startsWith(href) ? "page" : undefined}>
+              <Icon aria-hidden="true" />
+              {label}
+            </a>
+          ))}
+        </nav>
+        <a className="settings-link" href="/settings/team">
+          <SettingsIcon aria-hidden="true" />
+          Settings
+        </a>
+        <div className="member-chip">
+          <span>TK</span>
+          <div>
+            <strong>Tim Kraus</strong>
+            <small>Owner</small>
           </div>
         </div>
-
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-          <Button asChild size="lg">
-            <a href="/docs/START-HERE.md">
-              Start implementing
-              <ArrowRightIcon aria-hidden="true" data-icon="inline-end" />
-            </a>
-          </Button>
-          <p className="text-sm text-muted-foreground">
-            API {APP_METADATA.apiVersion} · seed {APP_METADATA.version}
-          </p>
-        </div>
-      </section>
-    </main>
+      </aside>
+      <main className="workspace">{content}</main>
+    </div>
   );
+}
+
+export function App() {
+  const path = window.location.pathname;
+  if (path === "/setup") return <SetupFeature />;
+  if (path === "/join") return <InvitationExchange />;
+  return <AppShell />;
 }

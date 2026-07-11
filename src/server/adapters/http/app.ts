@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { PublicAuthenticationPort } from "./middleware/authentication.ts";
 import type { PublicRateLimitPort } from "./middleware/request-limits.ts";
 import type { PublicRunOperations } from "./public-schemas.ts";
+import { createBrowserAuthRoutes } from "./routes/auth.ts";
 import { createRunRoutes } from "./routes/runs.ts";
 import { foundationSecurityHeaders } from "./security-headers.ts";
 
@@ -10,6 +11,7 @@ export type FoundationHttpDependencies = Readonly<{
   authentication: PublicAuthenticationPort;
   rateLimits: PublicRateLimitPort;
   runs: PublicRunOperations;
+  browserIdentity?: Parameters<typeof createBrowserAuthRoutes>[0]["identity"];
   mcp?: (request: Request) => Promise<Response>;
 }>;
 
@@ -20,6 +22,16 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
     context.header("cache-control", "no-store");
     await next();
   });
+  if (dependencies.browserIdentity) {
+    app.route(
+      "/api/v1",
+      createBrowserAuthRoutes({
+        configuredOrigin: dependencies.configuredOrigin,
+        identity: dependencies.browserIdentity,
+        rateLimits: dependencies.rateLimits,
+      }),
+    );
+  }
   app.route("/api/v1/runs", createRunRoutes(dependencies));
   if (dependencies.mcp) {
     const mcp = dependencies.mcp;
