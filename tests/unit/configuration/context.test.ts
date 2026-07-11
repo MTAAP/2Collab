@@ -192,4 +192,122 @@ describe("reference-first context recipes", () => {
     if (!result.ok) throw new Error(result.error.code);
     expect(result.value.references).toHaveLength(1);
   });
+
+  test("predecessor NONE excludes checkpoints and evidence before ordinary budgets", () => {
+    const result = assembleBootstrapEnvelope(
+      signedRecipe({
+        predecessorPolicy: "NONE",
+        perCategoryLimits: { CHECKPOINT: 4, EVIDENCE: 4 },
+        maximumReferences: 8,
+      }),
+      [
+        candidate({
+          category: "CHECKPOINT",
+          referenceId: "checkpoint_1",
+          canonicalKey: "checkpoint:1",
+          predecessor: { kind: "CHECKPOINT", sequence: 1 },
+        } as never),
+        candidate({
+          category: "EVIDENCE",
+          referenceId: "evidence_1",
+          canonicalKey: "evidence:1",
+          predecessor: { kind: "VERIFIED_EVIDENCE", evidenceRevision: 1 },
+        } as never),
+      ],
+      100,
+    );
+
+    expect(result).toMatchObject({ ok: true, value: { references: [] } });
+    if (!result.ok) throw new Error(result.error.code);
+    expect(result.value.omissions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ referenceId: "checkpoint_1", reason: "CATEGORY_LIMIT" }),
+        expect.objectContaining({ referenceId: "evidence_1", reason: "CATEGORY_LIMIT" }),
+      ]),
+    );
+  });
+
+  test("LATEST_CHECKPOINT deterministically selects the highest predecessor sequence", () => {
+    const result = assembleBootstrapEnvelope(
+      signedRecipe({
+        predecessorPolicy: "LATEST_CHECKPOINT",
+        perCategoryLimits: { CHECKPOINT: 4, EVIDENCE: 4 },
+        maximumReferences: 8,
+      }),
+      [
+        candidate({
+          category: "CHECKPOINT",
+          referenceId: "checkpoint_old",
+          canonicalKey: "checkpoint:old",
+          priority: 100,
+          predecessor: { kind: "CHECKPOINT", sequence: 1 },
+        } as never),
+        candidate({
+          category: "CHECKPOINT",
+          referenceId: "checkpoint_latest",
+          canonicalKey: "checkpoint:latest",
+          priority: 1,
+          predecessor: { kind: "CHECKPOINT", sequence: 2 },
+        } as never),
+        candidate({
+          category: "EVIDENCE",
+          referenceId: "evidence_1",
+          canonicalKey: "evidence:1",
+          predecessor: { kind: "VERIFIED_EVIDENCE", evidenceRevision: 1 },
+        } as never),
+      ],
+      100,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: { references: [{ referenceId: "checkpoint_latest" }] },
+    });
+  });
+
+  test("VERIFIED_EVIDENCE requires typed verified provenance and excludes checkpoints", () => {
+    const valid = assembleBootstrapEnvelope(
+      signedRecipe({
+        predecessorPolicy: "VERIFIED_EVIDENCE",
+        perCategoryLimits: { CHECKPOINT: 4, EVIDENCE: 4 },
+        maximumReferences: 8,
+      }),
+      [
+        candidate({
+          category: "CHECKPOINT",
+          referenceId: "checkpoint_1",
+          canonicalKey: "checkpoint:1",
+          predecessor: { kind: "CHECKPOINT", sequence: 1 },
+        } as never),
+        candidate({
+          category: "EVIDENCE",
+          referenceId: "evidence_1",
+          canonicalKey: "evidence:1",
+          predecessor: { kind: "VERIFIED_EVIDENCE", evidenceRevision: 3 },
+        } as never),
+      ],
+      100,
+    );
+    expect(valid).toMatchObject({
+      ok: true,
+      value: { references: [{ referenceId: "evidence_1" }] },
+    });
+
+    expect(
+      assembleBootstrapEnvelope(
+        signedRecipe({
+          predecessorPolicy: "VERIFIED_EVIDENCE",
+          perCategoryLimits: { EVIDENCE: 1 },
+        }),
+        [
+          candidate({
+            category: "EVIDENCE",
+            referenceId: "unverified",
+            canonicalKey: "evidence:unverified",
+          }),
+        ],
+        100,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "CONTEXT_CANDIDATE_INVALID" } });
+  });
 });

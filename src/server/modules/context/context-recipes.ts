@@ -30,6 +30,9 @@ export type AuthorizedContextCandidate = Readonly<{
   authority: "AUTHORIZED" | "FORBIDDEN";
   priority: number;
   authoredPreview?: string;
+  predecessor?:
+    | Readonly<{ kind: "CHECKPOINT"; sequence: number }>
+    | Readonly<{ kind: "VERIFIED_EVIDENCE"; evidenceRevision: number }>;
 }>;
 
 function invalidRecipe(): Result<never> {
@@ -131,6 +134,59 @@ function isRecipeValid(recipe: ContextRecipeVersion): boolean {
   return isRecipeShapeValid(recipe) && digest === computeContextRecipeDigest(unsigned);
 }
 
+function hasValidPredecessorProvenance(candidate: AuthorizedContextCandidate): boolean {
+  if (candidate.category === "CHECKPOINT") {
+    return (
+      candidate.predecessor?.kind === "CHECKPOINT" &&
+      Number.isSafeInteger(candidate.predecessor.sequence) &&
+      candidate.predecessor.sequence > 0
+    );
+  }
+  if (candidate.category === "EVIDENCE") {
+    return (
+      candidate.predecessor?.kind === "VERIFIED_EVIDENCE" &&
+      Number.isSafeInteger(candidate.predecessor.evidenceRevision) &&
+      candidate.predecessor.evidenceRevision > 0
+    );
+  }
+  return candidate.predecessor === undefined;
+}
+
+function applyPredecessorPolicy(
+  recipe: ContextRecipeVersion,
+  candidates: readonly AuthorizedContextCandidate[],
+  omissions: Array<ReferenceFirstBootstrapEnvelope["omissions"][number]>,
+): AuthorizedContextCandidate[] {
+  const ordinary = candidates.filter(
+    (candidate) => candidate.category !== "CHECKPOINT" && candidate.category !== "EVIDENCE",
+  );
+  const checkpoints = candidates.filter((candidate) => candidate.category === "CHECKPOINT");
+  const evidence = candidates.filter((candidate) => candidate.category === "EVIDENCE");
+  if (recipe.predecessorPolicy === "NONE") {
+    omissions.push(...checkpoints.map((candidate) => omission(candidate, "CATEGORY_LIMIT")));
+    omissions.push(...evidence.map((candidate) => omission(candidate, "CATEGORY_LIMIT")));
+    return ordinary;
+  }
+  if (recipe.predecessorPolicy === "VERIFIED_EVIDENCE") {
+    omissions.push(...checkpoints.map((candidate) => omission(candidate, "CATEGORY_LIMIT")));
+    return [...ordinary, ...evidence];
+  }
+  omissions.push(...evidence.map((candidate) => omission(candidate, "CATEGORY_LIMIT")));
+  const ordered = [...checkpoints].sort((left, right) => {
+    const leftSequence = left.predecessor?.kind === "CHECKPOINT" ? left.predecessor.sequence : 0;
+    const rightSequence = right.predecessor?.kind === "CHECKPOINT" ? right.predecessor.sequence : 0;
+    return (
+      rightSequence - leftSequence ||
+      right.observedAt - left.observedAt ||
+      left.canonicalKey.localeCompare(right.canonicalKey) ||
+      left.referenceId.localeCompare(right.referenceId)
+    );
+  });
+  const latest = ordered[0];
+  omissions.push(...ordered.slice(1).map((candidate) => omission(candidate, "CATEGORY_LIMIT")));
+  return latest ? [...ordinary, latest] : ordinary;
+}
+
 export function assembleBootstrapEnvelope(
   recipe: ContextRecipeVersion,
   candidates: readonly AuthorizedContextCandidate[],
@@ -161,6 +217,7 @@ export function assembleBootstrapEnvelope(
         !Number.isSafeInteger(candidate.observedAt) ||
         candidate.observedAt < 0 ||
         !Number.isSafeInteger(candidate.priority) ||
+        !hasValidPredecessorProvenance(candidate) ||
         !["AVAILABLE", "UNAVAILABLE"].includes(candidate.availability) ||
         !["AUTHORIZED", "FORBIDDEN"].includes(candidate.authority) ||
         (candidate.authoredPreview !== undefined &&
@@ -171,7 +228,7 @@ export function assembleBootstrapEnvelope(
   }
 
   const omissions: Array<ReferenceFirstBootstrapEnvelope["omissions"][number]> = [];
-  const eligible: AuthorizedContextCandidate[] = [];
+  const authorizedAvailable: AuthorizedContextCandidate[] = [];
   for (const candidate of candidates) {
     if (candidate.authority !== "AUTHORIZED") {
       omissions.push(omission(candidate, "FORBIDDEN"));
@@ -181,8 +238,10 @@ export function assembleBootstrapEnvelope(
       omissions.push(omission(candidate, "UNAVAILABLE"));
       continue;
     }
-    eligible.push(candidate);
+    authorizedAvailable.push(candidate);
   }
+
+  const eligible = applyPredecessorPolicy(recipe, authorizedAvailable, omissions);
 
   eligible.sort(
     (left, right) =>
