@@ -4,7 +4,9 @@ import { readServerEnvironment } from "../../src/shared/environment.ts";
 describe("readServerEnvironment", () => {
   test("uses loopback-safe development defaults", () => {
     expect(readServerEnvironment({})).toEqual({
+      backupDir: "./backups",
       dataDir: "./data",
+      deploymentMasterKeyFile: undefined,
       hostname: "127.0.0.1",
       mode: "development",
       port: 3210,

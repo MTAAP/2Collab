@@ -3,7 +3,9 @@ import { z } from "zod";
 const PLACEHOLDER_SESSION_SECRET = "replace-with-a-random-production-secret";
 
 const serverEnvironmentSchema = z.object({
+  BACKUP_DIR: z.string().min(1).default("./backups"),
   DATA_DIR: z.string().min(1).default("./data"),
+  DEPLOYMENT_MASTER_KEY_FILE: z.string().min(1).optional(),
   HOST: z.string().min(1).default("127.0.0.1"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3210),
@@ -12,7 +14,9 @@ const serverEnvironmentSchema = z.object({
 });
 
 export type ServerEnvironment = {
+  backupDir: string;
   dataDir: string;
+  deploymentMasterKeyFile: string | undefined;
   hostname: string;
   mode: "development" | "test" | "production";
   port: number;
@@ -42,7 +46,9 @@ export function readServerEnvironment(
   }
 
   return {
+    backupDir: parsed.data.BACKUP_DIR,
     dataDir: parsed.data.DATA_DIR,
+    deploymentMasterKeyFile: parsed.data.DEPLOYMENT_MASTER_KEY_FILE,
     hostname: parsed.data.HOST,
     mode: parsed.data.NODE_ENV,
     port: parsed.data.PORT,

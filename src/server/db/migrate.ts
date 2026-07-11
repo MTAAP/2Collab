@@ -16,7 +16,15 @@ import foundationConfigurationCorrectionsMigration from "./migrations/0006_found
 import { verifyFoundationConfigurationCorrectionsSchema } from "./migrations/0006_foundation_configuration_corrections.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-const LATEST_SCHEMA_VERSION = 6;
+export const LATEST_SCHEMA_VERSION = 6;
+const MIGRATION_SOURCES = [
+  foundationMigration,
+  projectsMigration,
+  runnersMigration,
+  runsAuthorityMigration,
+  foundationOperationsMigration,
+  foundationConfigurationCorrectionsMigration,
+] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
   "auth_proxy_replays",
@@ -119,6 +127,47 @@ function validateClaimedSchema(database: Database, version: number): void {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
 }
+
+function sha256(value: string): string {
+  return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+export type MigrationCatalog = Readonly<{
+  currentVersion: number;
+  digestForVersion(version: number): string | null;
+  supportsRestoreFrom(version: number): boolean;
+  migrateAndVerify(database: Database): void;
+  verifyClaimedSchema(database: Database, version: number): void;
+}>;
+
+/**
+ * The ordered migration bytes are executable schema truth. Their cumulative digest prevents a
+ * backup that merely claims a familiar integer version from entering restore staging.
+ */
+export const migrationCatalog: MigrationCatalog = {
+  currentVersion: LATEST_SCHEMA_VERSION,
+  digestForVersion(version) {
+    if (!Number.isInteger(version) || version < 1 || version > MIGRATION_SOURCES.length)
+      return null;
+    return sha256(
+      MIGRATION_SOURCES.slice(0, version)
+        .map((source, index) => `${index + 1}:${sha256(source)}`)
+        .join("\n"),
+    );
+  },
+  supportsRestoreFrom(version) {
+    return Number.isInteger(version) && version >= 1 && version <= LATEST_SCHEMA_VERSION;
+  },
+  migrateAndVerify(database) {
+    migrate(database);
+  },
+  verifyClaimedSchema(database, version) {
+    const history = readMigrationHistory(database);
+    validateMigrationHistory(history);
+    if ((history.at(-1)?.version ?? 0) !== version) throw new Error("SCHEMA_VERSION_CLAIM_INVALID");
+    validateClaimedSchema(database, version);
+  },
+};
 
 function ensureMigrationLedger(database: Database): void {
   database.exec(`
