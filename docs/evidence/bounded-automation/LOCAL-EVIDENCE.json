@@ -1,104 +1,156 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "frozenBuild": null,
   "envelope": null,
   "rows": [
     {
       "requirement": "AUT-001",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/unit/workflows/definition.test.ts",
-      "testName": "has exactly the seven closed node kinds"
+      "obligationIds": [
+        "AUT001_PORTABLE_TEMPLATE",
+        "AUT001_IMMUTABLE_TEMPLATE_VERSIONS",
+        "AUT001_PERSONAL_BINDINGS_SNAPSHOTTED"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-002",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/execution.test.ts",
-      "testName": "starts one durable child step only through ExecutionAuthority"
+      "obligationIds": [
+        "AUT002_LAYOUT_NON_SEMANTIC",
+        "AUT002_DEFINITION_SEMANTIC_HASH",
+        "AUT002_STUDIO_AUTHORING"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-003",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/parallel-review.test.ts",
-      "testName": "parallel groups prepare only bounded INSPECT_ONLY branches"
+      "obligationIds": [
+        "AUT003_NEGATIVE_GRAPH_FIXTURES",
+        "AUT003_PARALLEL_MUTATION_REJECTED",
+        "AUT003_TERMINAL_PATH_REQUIRED",
+        "AUT003_TYPED_JOIN_VALIDATION"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-004",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/unit/workflows/joins.test.ts",
-      "testName": "ALL emits one keyed artifact map after every distinct branch"
+      "obligationIds": [
+        "AUT004_STALE_BINDING_PAUSES",
+        "AUT004_DISTINCT_BINDINGS_SNAPSHOTTED",
+        "AUT004_BOUND_JOURNEY"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-005",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/conditional-fix.test.ts",
-      "testName": "one typed major finding launches exactly one Fix Agent Run"
+      "obligationIds": [
+        "AUT005_DUPLICATE_START_EXACTLY_ONCE",
+        "AUT005_RESTART_LAUNCH_INTENT",
+        "AUT005_DUPLICATE_EVENT_DRILL"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-006",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/human-decision.test.ts",
-      "testName": "a durable decision survives restart and schedules its choice once"
+      "obligationIds": [
+        "AUT006_PARALLEL_INSPECT_ONLY",
+        "AUT006_ALL_TYPED_JOIN",
+        "AUT006_ANY_TYPED_JOIN"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-007",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/managed-loop.test.ts",
-      "testName": "failed starts and lost attempts consume the same immutable maximum"
+      "obligationIds": [
+        "AUT007_DECISION_SURVIVES_RESTART",
+        "AUT007_NO_PARKED_PROCESS",
+        "AUT007_DECISION_JOURNEY"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-008",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/restart.test.ts",
-      "testName": "a committed launch intent creates one child run after restart"
+      "obligationIds": [
+        "AUT008_TYPED_RESULT_ROUTING",
+        "AUT008_SINGLE_FIX_RUN",
+        "AUT008_MISSING_RESULT_FALLBACK"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-009",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/drafts.test.ts",
-      "testName": "YAML round-trips only the executable schema"
+      "obligationIds": [
+        "AUT009_TRUSTED_FINGERPRINT",
+        "AUT009_STALE_FINGERPRINT_REJECTED",
+        "AUT009_TRANSMITTED_COMMAND_REJECTED",
+        "AUT009_WRONG_SHA_REJECTED",
+        "AUT009_TRACKED_MUTATION_REJECTED"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-010",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/workflows/planning.test.ts",
-      "testName": "a portable Plan Artifact crosses runtime and runner choices"
+      "obligationIds": [
+        "AUT010_THREE_VALUED_STOP_POLICY",
+        "AUT010_ATTEMPT_BOUND",
+        "AUT010_LOOP_DEADLINE"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-011",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/unit/gates/fingerprint.test.ts",
-      "testName": "fingerprints the closed manifest deterministically without exposing local recipes"
+      "obligationIds": [
+        "AUT011_PAUSE_RESTART_DEADLINE",
+        "AUT011_REVOKED_FUTURE_WORK",
+        "AUT011_RESULT_WHILE_PAUSED"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-012",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/runner/gates/local-evaluator.test.ts",
-      "testName": "resolves the approved recipe locally, authorizes it, and never invokes a shell"
+      "obligationIds": [
+        "AUT012_PORTABLE_PLAN_ARTIFACT",
+        "AUT012_NO_RUNTIME_PLAN_FLAG",
+        "AUT012_CROSS_RUNTIME_PLAN_JOURNEY"
+      ],
+      "reportIds": []
     },
     {
       "requirement": "AUT-013",
-      "status": "LOCAL_PROOF_AVAILABLE",
+      "status": "NOT_RUN",
       "proofClass": "LOCAL",
-      "testPath": "tests/integration/gates/evaluations.test.ts",
-      "testName": "persists bounded local evidence and fails tracked mutation"
+      "obligationIds": ["AUT013_PARTIAL_USAGE_TOTALS", "AUT013_USAGE_PROJECTION"],
+      "reportIds": []
     },
     {
       "requirement": "AUT-014",
       "status": "IN_PROGRESS_EXTERNAL",
       "proofClass": "LIVE",
-      "testPath": "tests/e2e/bounded-automation.spec.ts",
-      "testName": "live canonical real PR remains blocked without approved resources"
+      "obligationIds": ["AUT014_CANONICAL_REAL_PR_JOURNEY"],
+      "reportIds": []
     }
   ]
 }
