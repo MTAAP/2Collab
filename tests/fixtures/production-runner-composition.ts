@@ -37,6 +37,7 @@ installProductionRunnerInfrastructure({
     },
   },
   authorityFacts: { preview: async () => denied, refresh: async () => denied },
+  runConfiguration: { resolve: async () => denied },
   permitCodec: {
     sign: async () => "p".repeat(64),
     verify: async () => ({

@@ -11,6 +11,7 @@ import {
   type AuthorityFactPort,
   createExecutionAuthority,
   type PermitCodec,
+  type RunConfigurationResolutionPort,
 } from "../../modules/execution-authority/execution-authority.ts";
 import type { RunnerKeyProofPort, RunnerRequestProofPort } from "../../modules/runners/contract.ts";
 import { createRunnerServices } from "../../modules/runners/runner-registry.ts";
@@ -25,6 +26,7 @@ export type ProductionRunnerInfrastructure = Readonly<{
   runnerKeyProof: RunnerKeyProofPort;
   runnerRequestProof: RunnerRequestProofPort;
   authorityFacts: AuthorityFactPort;
+  runConfiguration: RunConfigurationResolutionPort;
   permitCodec: PermitCodec;
   defaultSecurityDigest: string;
   acceptGateEvent: (body: GateBody) => Promise<Result<unknown>>;
@@ -49,6 +51,7 @@ function requireInfrastructure(): ProductionRunnerInfrastructure {
     typeof value.runnerKeyProof?.verifyPossession !== "function" ||
     typeof value.runnerRequestProof?.verify !== "function" ||
     typeof value.authorityFacts?.refresh !== "function" ||
+    typeof value.runConfiguration?.resolve !== "function" ||
     typeof value.permitCodec?.sign !== "function" ||
     typeof value.permitCodec?.verify !== "function" ||
     typeof value.acceptGateEvent !== "function" ||
@@ -152,6 +155,7 @@ export async function createProductionServer(environment: ServerEnvironment, app
     clock: now,
     id,
     authorityFacts: infrastructure.authorityFacts,
+    runConfiguration: infrastructure.runConfiguration,
     permitCodec: infrastructure.permitCodec,
     runnerControl: dispatch.control,
   });
