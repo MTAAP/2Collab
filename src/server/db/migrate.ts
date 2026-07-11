@@ -6,9 +6,13 @@ import runnersMigration from "./migrations/0003_runners.sql" with { type: "text"
 import { verifyRunnersSchema } from "./migrations/0003_runners.verify.ts";
 import runsAuthorityMigration from "./migrations/0004_runs_authority.sql" with { type: "text" };
 import { verifyRunsAuthoritySchema } from "./migrations/0004_runs_authority.verify.ts";
+import foundationOperationsMigration from "./migrations/0005_foundation_operations.sql" with {
+  type: "text",
+};
+import { verifyFoundationOperationsSchema } from "./migrations/0005_foundation_operations.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-const LATEST_SCHEMA_VERSION = 4;
+const LATEST_SCHEMA_VERSION = 5;
 const FOUNDATION_TABLES = [
   "audit_events",
   "auth_proxy_replays",
@@ -97,6 +101,9 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 4) {
     verifyRunsAuthoritySchema(database);
   }
+  if (version >= 5) {
+    verifyFoundationOperationsSchema(database);
+  }
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -149,6 +156,10 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 3) {
       database.exec(runsAuthorityMigration);
+      currentVersion = 4;
+    }
+    if (currentVersion === 4) {
+      database.exec(foundationOperationsMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);

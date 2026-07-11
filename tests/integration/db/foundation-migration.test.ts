@@ -1,8 +1,8 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
 import { openDatabase } from "../../../src/server/db/connection.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
 import { verifyFoundationSchema } from "../../../src/server/db/migrations/0001_foundation.verify.ts";
@@ -159,7 +159,7 @@ describe("migrate", () => {
     }
   });
 
-  test("creates the complete version 4 foundation schema idempotently", () => {
+  test("keeps the complete foundation schema verified through version 5", () => {
     const db = memoryDatabase();
     try {
       migrate(db);
@@ -206,10 +206,11 @@ describe("migrate", () => {
         { version: 2, applied_at: expect.any(Number) },
         { version: 3, applied_at: expect.any(Number) },
         { version: 4, applied_at: expect.any(Number) },
+        { version: 5, applied_at: expect.any(Number) },
       ]);
       expect(
         db.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get(),
-      ).toEqual({ count: 4 });
+      ).toEqual({ count: 5 });
     } finally {
       db.close();
     }
@@ -642,7 +643,7 @@ describe("migrate", () => {
   });
 
   test("refuses a database with an unknown newer schema version", () => {
-    const db = databaseWithHistory([1, 2, 3, 4, 5]);
+    const db = databaseWithHistory([1, 2, 3, 4, 5, 6]);
     try {
       expect(() => migrate(db)).toThrow("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
     } finally {

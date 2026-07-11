@@ -175,7 +175,12 @@ export function verifyRunsAuthoritySchema(database: Database): void {
   const versions = database
     .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
     .all();
-  if (versions.map((row) => row.version).join(",") !== "1,2,3,4") {
+  const history = versions.map((row) => row.version);
+  if (
+    history.length < 4 ||
+    history.slice(0, 4).join(",") !== "1,2,3,4" ||
+    history.some((version, index) => version !== index + 1)
+  ) {
     throw new Error("SCHEMA_MIGRATION_HISTORY_INVALID");
   }
   for (const [type, expected] of [
