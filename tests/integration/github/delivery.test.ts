@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
+import type { GitHubProjection } from "../../../src/shared/contracts/github.ts";
 import {
   closingReference,
   observeDelivery,
 } from "../../../src/server/modules/github-coordination/delivery.ts";
 
-function observed(value: any) {
+function observed(value: GitHubProjection) {
   return {
     value,
     reference: "ref",
