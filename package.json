@@ -36,6 +36,7 @@
     "archive:verify": "bun run scripts/verify-archive.ts",
     "manifest:generate": "bun run scripts/manifest.ts generate",
     "manifest:verify": "bun run scripts/manifest.ts verify",
+    "github:evidence": "bun run scripts/github-evidence.ts",
     "verify": "bun ci && bun run format:check && bun run lint && bun run typecheck && bun run test && bun run build && bun run test:e2e:run && bun run audit:public && bun run manifest:verify && bun run archive:verify"
   },
   "dependencies": {

@@ -18,9 +18,17 @@ import {
 import { createStubRunOperations } from "./modules/public-surface/run-operations.ts";
 import type { ServerEnvironment } from "../shared/environment.ts";
 import type { Result } from "../shared/contracts/result.ts";
+import type { GitHubWebhookRouteDependencies } from "./adapters/http/routes/connectors-github.ts";
+import type { GitHubIssueRouteDependencies } from "./adapters/http/routes/github-issues.ts";
+import type { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
 
-type ServerResources = Readonly<{
+export type ServerResources = Readonly<{
   docsRoot?: string;
+  github?: Readonly<{
+    webhooks: GitHubWebhookRouteDependencies;
+    issues: GitHubIssueRouteDependencies;
+    planning: Parameters<typeof createGitHubPlanningRoutes>[0];
+  }>;
   webRoot?: string;
 }>;
 
@@ -144,6 +152,9 @@ export async function createServerDependencies(
   };
   const app = createApp(dependencies, {
     docsRoot: resources.docsRoot,
+    githubWebhooks: resources.github?.webhooks,
+    githubIssues: resources.github?.issues,
+    githubPlanning: resources.github?.planning,
     webRoot: resources.webRoot,
   });
 
