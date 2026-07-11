@@ -176,27 +176,39 @@ function removeMemberTransaction(
         if (tableExists(database, "document_write_grants")) {
           database
             .query(
-              "UPDATE document_write_grants SET revoked_at=?,revocation_cause='MEMBER',grant_revision=grant_revision+1 WHERE connector_id=? AND revoked_at IS NULL",
+              `UPDATE document_write_grants SET revoked_at=?,revocation_cause='MEMBER',grant_revision=grant_revision+1
+               WHERE connector_id=? AND grantor_member_id=? AND revoked_at IS NULL`,
             )
-            .run(now, connectorId);
+            .run(now, connectorId, command.memberId);
           database
             .query(
               `UPDATE additional_document_requests SET revoked_at=?,revocation_cause='MEMBER',request_revision=request_revision+1
-             WHERE grant_id IN (SELECT grant_id FROM document_write_grants WHERE connector_id=?) AND revoked_at IS NULL`,
+               WHERE grant_id IN (
+                 SELECT grant_id FROM document_write_grants
+                 WHERE connector_id=? AND grantor_member_id=?
+               ) AND revoked_at IS NULL`,
             )
-            .run(now, connectorId);
+            .run(now, connectorId, command.memberId);
         }
         if (tableExists(database, "document_proposals")) {
           database
             .query(
-              "UPDATE document_proposals SET revoked_at=?,revocation_cause='MEMBER' WHERE connector_id=? AND revoked_at IS NULL",
+              `UPDATE document_proposals SET revoked_at=?,revocation_cause='MEMBER'
+               WHERE connector_id=? AND run_id IN (
+                 SELECT run_id FROM document_write_grants
+                 WHERE connector_id=? AND grantor_member_id=?
+               ) AND revoked_at IS NULL`,
             )
-            .run(now, connectorId);
+            .run(now, connectorId, connectorId, command.memberId);
           database
             .query(
-              "UPDATE external_working_documents SET revoked_at=?,revocation_cause='MEMBER',lifecycle_revision=lifecycle_revision+1 WHERE connector_id=? AND revoked_at IS NULL",
+              `UPDATE external_working_documents SET revoked_at=?,revocation_cause='MEMBER',lifecycle_revision=lifecycle_revision+1
+               WHERE connector_id=? AND run_id IN (
+                 SELECT run_id FROM document_write_grants
+                 WHERE connector_id=? AND grantor_member_id=?
+               ) AND revoked_at IS NULL`,
             )
-            .run(now, connectorId);
+            .run(now, connectorId, connectorId, command.memberId);
         }
       }
     }

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { validateGitHubEvidence } from "../tests/evidence/github-matrix.ts";
 
 function fail(message: string): never {
   console.error(message);
@@ -6,8 +7,17 @@ function fail(message: string): never {
 }
 async function main() {
   const [command, reportPath] = process.argv.slice(2);
+  if (command === "validate") {
+    const input = JSON.parse(
+      await readFile(reportPath ?? "docs/evidence/github/LOCAL-EVIDENCE.json", "utf8"),
+    );
+    const result = validateGitHubEvidence(input);
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.valid) process.exit(1);
+    return;
+  }
   if (command !== "validate-live" || !reportPath)
-    fail("Usage: github-evidence validate-live <playwright-json>");
+    fail("Usage: github-evidence <validate|validate-live> [json]");
   if (process.env.COLLAB_LIVE_GITHUB !== "1") fail("LIVE_GITHUB_NOT_AUTHORIZED");
   for (const name of [
     "COLLAB_GITHUB_INSTALLATION_ID",

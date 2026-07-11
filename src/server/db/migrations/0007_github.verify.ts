@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import githubMigration from "./0007_github.sql" with { type: "text" };
+import { verifyDeclaredSchema } from "./verify-declared-schema.ts";
 
 export const GITHUB_TABLES = [
   "github_installations",
@@ -24,25 +26,7 @@ export function verifyGitHubSchema(database: Database): void {
   if (versions.length < 7 || versions.slice(0, 7).some((value, index) => value !== index + 1)) {
     throw new Error("SCHEMA_MIGRATION_HISTORY_INVALID");
   }
-  for (const [type, expected] of [
-    ["table", GITHUB_TABLES],
-    ["index", GITHUB_INDEXES],
-  ] as const) {
-    const actual = new Set(
-      database
-        .query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type = ?")
-        .all(type)
-        .map((row) => row.name),
-    );
-    if (expected.some((name) => !actual.has(name))) throw new Error("SCHEMA_INTEGRITY_INVALID");
-  }
-  for (const table of GITHUB_TABLES) {
-    if (
-      database.query<{ strict: number }, []>(`PRAGMA table_list('${table}')`).get()?.strict !== 1
-    ) {
-      throw new Error("SCHEMA_INTEGRITY_INVALID");
-    }
-  }
+  verifyDeclaredSchema(database, githubMigration, [...GITHUB_TABLES, ...GITHUB_INDEXES]);
   if (
     database.query<{ quick_check: string }, []>("PRAGMA quick_check").get()?.quick_check !== "ok" ||
     database.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all().length !== 0

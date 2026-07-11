@@ -18,3 +18,18 @@ test("creates strict reference-only Outline persistence after reserved connector
     database.close();
   }
 });
+
+test("rejects Outline schema drift rather than trusting table names", () => {
+  const database = new Database(":memory:", { strict: true });
+  try {
+    migrate(database);
+    database.exec(`
+      PRAGMA foreign_keys=OFF;
+      ALTER TABLE outline_connections RENAME TO outline_connections_drifted;
+      CREATE TABLE outline_connections(connector_id TEXT PRIMARY KEY) STRICT;
+    `);
+    expect(() => verifyOutlineSchema(database)).toThrow("SCHEMA_INTEGRITY_INVALID");
+  } finally {
+    database.close();
+  }
+});

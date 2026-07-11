@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { PublicAuthenticationPort } from "./middleware/authentication.ts";
 import type { PublicRateLimitPort } from "./middleware/request-limits.ts";
+import type {
+  OutlineHttpSecurity,
+  OutlineProjectAuthorization,
+} from "./middleware/outline-security.ts";
 import type { PublicRunOperations } from "./public-schemas.ts";
 import { createBrowserAuthRoutes } from "./routes/auth.ts";
 import { createRunRoutes } from "./routes/runs.ts";
@@ -18,9 +22,19 @@ export type FoundationHttpDependencies = Readonly<{
   mcp?: (request: Request) => Promise<Response>;
   readiness?: Readonly<{ ready: () => boolean }>;
   outline?: Readonly<{
-    connector: Parameters<typeof createOutlineConnectorRoutes>[0];
-    search: Parameters<typeof createOutlineSearchRoutes>[0];
-    documents: Parameters<typeof createOutlineDocumentRoutes>[0];
+    authorization: OutlineProjectAuthorization;
+    connector: Omit<
+      Parameters<typeof createOutlineConnectorRoutes>[0],
+      keyof OutlineHttpSecurity | keyof OutlineProjectAuthorization
+    >;
+    search: Omit<
+      Parameters<typeof createOutlineSearchRoutes>[0],
+      keyof OutlineHttpSecurity | keyof OutlineProjectAuthorization
+    >;
+    documents: Omit<
+      Parameters<typeof createOutlineDocumentRoutes>[0],
+      keyof OutlineHttpSecurity | keyof OutlineProjectAuthorization
+    >;
   }>;
 }>;
 
@@ -43,14 +57,34 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
   }
   app.route("/api/v1/runs", createRunRoutes(dependencies));
   if (dependencies.outline) {
+    const outlineSecurity = {
+      authentication: dependencies.authentication,
+      configuredOrigin: dependencies.configuredOrigin,
+      rateLimits: dependencies.rateLimits,
+    };
     app.route(
       "/api/v1/connectors/outline",
-      createOutlineConnectorRoutes(dependencies.outline.connector),
+      createOutlineConnectorRoutes({
+        ...dependencies.outline.connector,
+        ...dependencies.outline.authorization,
+        ...outlineSecurity,
+      }),
     );
-    app.route("/api/v1/outline/search", createOutlineSearchRoutes(dependencies.outline.search));
+    app.route(
+      "/api/v1/outline/search",
+      createOutlineSearchRoutes({
+        ...dependencies.outline.search,
+        ...dependencies.outline.authorization,
+        ...outlineSecurity,
+      }),
+    );
     app.route(
       "/api/v1/outline/documents",
-      createOutlineDocumentRoutes(dependencies.outline.documents),
+      createOutlineDocumentRoutes({
+        ...dependencies.outline.documents,
+        ...dependencies.outline.authorization,
+        ...outlineSecurity,
+      }),
     );
   }
   if (dependencies.mcp) {

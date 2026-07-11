@@ -159,7 +159,7 @@ describe("migrate", () => {
     }
   });
 
-  test("keeps the complete schema verified through Outline version 12", () => {
+  test("keeps the complete schema verified through provider-bound Outline version 12", () => {
     const db = memoryDatabase();
     try {
       migrate(db);

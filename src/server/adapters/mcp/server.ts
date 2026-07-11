@@ -8,14 +8,14 @@ export function createPublicMcpServer(dependencies: {
   actor: MemberActor;
   runs: PublicRunOperations;
   outline?: Readonly<{
-    search(input: unknown): Promise<unknown>;
-    read(input: unknown): Promise<unknown>;
+    search(actor: MemberActor, input: unknown): Promise<unknown>;
+    read(actor: MemberActor, input: unknown): Promise<unknown>;
   }>;
 }): McpServer {
   const server = new McpServer({ name: "2collab", version: "0.1.0" });
   registerPublicRunTools(server, {
     runs: bindPublicRunOperations(dependencies.actor, dependencies.runs),
   });
-  if (dependencies.outline) registerOutlineTools(server, dependencies.outline);
+  if (dependencies.outline) registerOutlineTools(server, dependencies.actor, dependencies.outline);
   return server;
 }

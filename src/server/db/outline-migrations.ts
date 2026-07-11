@@ -24,7 +24,7 @@ export function applyAndVerifyOutlineMigrations(database: Database): void {
       database.exec(outline);
       database.exec(grants);
       database.exec(proposals);
-    } else if (current !== 12) {
+    } else if (current !== 12 && current !== 13) {
       throw new Error("OUTLINE_MIGRATION_PREREQUISITE_MISSING");
     }
     verifyOutlineSchema(database);

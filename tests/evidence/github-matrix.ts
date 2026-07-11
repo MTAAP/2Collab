@@ -25,3 +25,22 @@ export function deriveGitHubEvidenceStatus(record: GitHubEvidenceRecord): GitHub
   if (!record.liveTestsPassed) return record.blocked ? "BLOCKED_ENV" : "IN_PROGRESS_LIVE";
   return record.reviewed ? "PASS" : "IN_PROGRESS_LIVE";
 }
+
+export function validateGitHubEvidence(records: readonly GitHubEvidenceRecord[]): Readonly<{
+  valid: boolean;
+  statuses: Readonly<Record<string, GitHubEvidenceStatus>>;
+}> {
+  const statuses: Record<string, GitHubEvidenceStatus> = {};
+  for (const record of records) {
+    if (statuses[record.requirement]) return { valid: false, statuses };
+    statuses[record.requirement] = deriveGitHubEvidenceStatus(record);
+  }
+  return {
+    valid:
+      records.length === GITHUB_REQUIREMENTS.length &&
+      GITHUB_REQUIREMENTS.every(
+        (requirement) => statuses[requirement] && statuses[requirement] !== "FAIL",
+      ),
+    statuses,
+  };
+}
