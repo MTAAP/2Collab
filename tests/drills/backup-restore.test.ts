@@ -229,7 +229,7 @@ describe("authenticated backup and isolated restore", () => {
     expect(result.value.manifest).toMatchObject({
       format: "2COLLAB_BACKUP_V1",
       algorithm: "AES_256_GCM_CHUNKED_V1",
-      schemaVersion: 7,
+      schemaVersion: 8,
       keyId: "master_1",
     });
     expect(result.value.manifest.chunkCount).toBeGreaterThan(0);
