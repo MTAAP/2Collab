@@ -33,8 +33,8 @@ function fixture(overrides: Readonly<{ beforeConfirmationCommit?: () => void }> 
       'session_1', 'member_1', X'${"11".repeat(32)}', 'BROWSER', 10000, 10000, X'${"12".repeat(32)}',
       10000, 1, 1, 0
     );
-    INSERT INTO projects(id, team_id, name, revision, created_at)
-      VALUES ('project_1', 'team_1', 'Project', 1, 0);
+    INSERT INTO projects(id, team_id, name, base_branch, revision, created_at)
+      VALUES ('project_1', 'team_1', 'Project', 'main', 1, 0);
     INSERT INTO connector_epochs(connector_id, epoch, review_state)
       VALUES ('connector_1', 1, 'READY');
     INSERT INTO connector_scopes(

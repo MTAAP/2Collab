@@ -7,7 +7,7 @@ export function verifyFoundationSchema(db: Database): void {
     db
       .query<{ version: number }, []>("SELECT version FROM schema_migrations ORDER BY version")
       .all(),
-  ).toEqual([{ version: 1 }]);
+  ).toEqual(expect.arrayContaining([{ version: 1 }]));
   expect(
     db
       .query<{ name: string }, []>(

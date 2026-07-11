@@ -1,8 +1,9 @@
 import type { Database } from "bun:sqlite";
 import foundationMigration from "./migrations/0001_foundation.sql" with { type: "text" };
+import projectsMigration from "./migrations/0002_projects.sql" with { type: "text" };
 import { inImmediateTransaction } from "./transaction.ts";
 
-const LATEST_SCHEMA_VERSION = 1;
+const LATEST_SCHEMA_VERSION = 2;
 const FOUNDATION_TABLES = [
   "audit_events",
   "auth_proxy_replays",
@@ -82,6 +83,37 @@ function validateClaimedSchema(database: Database, version: number): void {
   ) {
     throw new Error("SCHEMA_INTEGRITY_INVALID");
   }
+  if (version >= 2) {
+    const projectColumns = new Set(
+      database
+        .query<{ name: string }, []>("PRAGMA table_info(projects)")
+        .all()
+        .map((row) => row.name),
+    );
+    const projectTable = database
+      .query<{ strict: number }, []>("PRAGMA table_list('projects')")
+      .get();
+    const projectSql = database
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
+      )
+      .get()?.sql;
+    if (
+      !projectColumns.has("base_branch") ||
+      projectTable?.strict !== 1 ||
+      !projectSql?.includes("base_branch TEXT NOT NULL") ||
+      !projectSql.includes("name = trim(name)")
+    ) {
+      throw new Error("SCHEMA_INTEGRITY_INVALID");
+    }
+  }
+  const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
+  const foreignKeyFailures = database
+    .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+    .all();
+  if (integrity?.quick_check !== "ok" || foreignKeyFailures.length !== 0) {
+    throw new Error("SCHEMA_INTEGRITY_INVALID");
+  }
 }
 
 function ensureMigrationLedger(database: Database): void {
@@ -99,7 +131,7 @@ export function migrate(database: Database): void {
     ensureMigrationLedger(database);
     const versions = readMigrationHistory(database);
     validateMigrationHistory(versions);
-    const currentVersion = versions.at(-1)?.version ?? 0;
+    let currentVersion = versions.at(-1)?.version ?? 0;
 
     if (currentVersion > LATEST_SCHEMA_VERSION) {
       throw new Error("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
@@ -109,7 +141,17 @@ export function migrate(database: Database): void {
       return;
     }
 
-    database.exec(foundationMigration);
+    if (currentVersion === 0) {
+      database.exec(foundationMigration);
+      currentVersion = 1;
+    }
+    if (currentVersion === 1) {
+      const unexpectedProjects = database
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM projects")
+        .get()?.count;
+      if (unexpectedProjects !== 0) throw new Error("PROJECT_BASE_BRANCH_REQUIRED");
+      database.exec(projectsMigration);
+    }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);
     validateClaimedSchema(database, LATEST_SCHEMA_VERSION);

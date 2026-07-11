@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite";
 import { openDatabase } from "../../../src/server/db/connection.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
 import { verifyFoundationSchema } from "../../../src/server/db/migrations/0001_foundation.verify.ts";
+import { verifyProjectsSchema } from "../../../src/server/db/migrations/0002_projects.verify.ts";
 import { inImmediateTransaction } from "../../../src/server/db/transaction.ts";
 
 const temporaryDirectories: string[] = [];
@@ -158,12 +159,13 @@ describe("migrate", () => {
     }
   });
 
-  test("creates the complete version 1 foundation schema idempotently", () => {
+  test("creates the complete version 2 foundation schema idempotently", () => {
     const db = memoryDatabase();
     try {
       migrate(db);
       migrate(db);
       verifyFoundationSchema(db);
+      verifyProjectsSchema(db);
 
       const names = db
         .query<{ name: string }, []>(
@@ -199,10 +201,13 @@ describe("migrate", () => {
             "SELECT version, applied_at FROM schema_migrations",
           )
           .all(),
-      ).toEqual([{ version: 1, applied_at: expect.any(Number) }]);
+      ).toEqual([
+        { version: 1, applied_at: expect.any(Number) },
+        { version: 2, applied_at: expect.any(Number) },
+      ]);
       expect(
         db.query<{ count: number }, []>("SELECT count(*) AS count FROM schema_migrations").get(),
-      ).toEqual({ count: 1 });
+      ).toEqual({ count: 2 });
     } finally {
       db.close();
     }
@@ -635,7 +640,7 @@ describe("migrate", () => {
   });
 
   test("refuses a database with an unknown newer schema version", () => {
-    const db = databaseWithHistory([1, 2]);
+    const db = databaseWithHistory([1, 2, 3]);
     try {
       expect(() => migrate(db)).toThrow("SCHEMA_VERSION_NEWER_THAN_SUPPORTED");
     } finally {
@@ -658,7 +663,7 @@ describe("migrate", () => {
     });
   }
 
-  test("rejects a claimed version 1 schema with missing foundation objects", () => {
+  test("rejects a claimed schema with missing foundation objects", () => {
     const db = memoryDatabase();
     try {
       migrate(db);
@@ -669,7 +674,7 @@ describe("migrate", () => {
     }
   });
 
-  test("rejects a claimed version 1 schema missing a security index", () => {
+  test("rejects a claimed schema missing a security index", () => {
     const db = memoryDatabase();
     try {
       migrate(db);
