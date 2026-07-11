@@ -81,6 +81,16 @@ describe("execution authority command payloads", () => {
     ).toBe(true);
   });
 
+  test("does not route retained-work discard through an attempt authority session", () => {
+    expect(
+      AuthorizeOperationPayloadSchema.safeParse({
+        sessionId: "authority_session_1",
+        sessionFence: 4,
+        operation: { kind: "DISCARD_RETAINED_WORK", retainedWorkId: "retained_work_1" },
+      }).success,
+    ).toBe(false);
+  });
+
   test("keeps checkpoint and evidence payloads bounded and closed", () => {
     const checkpoint = {
       runId: "run_1",

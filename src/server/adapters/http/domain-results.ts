@@ -1,16 +1,40 @@
 import type { Context } from "hono";
 import type { Result } from "../../../shared/contracts/result.ts";
 
-function statusFor(code: string): 400 | 401 | 403 | 404 | 409 | 429 | 500 {
-  if (code.includes("NOT_FOUND")) return 404;
-  if (code.includes("CONFLICT") || code.includes("STALE") || code.includes("TERMINAL")) return 409;
-  if (code.includes("SESSION") || code.includes("AUTHENTICATION")) return 401;
-  if (code.includes("DENIED") || code.includes("FORBIDDEN")) return 403;
-  if (code.includes("RATE")) return 429;
-  if (code.includes("STORAGE") || code.includes("INTERNAL")) return 500;
-  return 400;
+type DomainHttpStatus = 400 | 401 | 403 | 404 | 409 | 429 | 500 | 503;
+
+const DomainHttpStatuses: Readonly<Record<string, DomainHttpStatus>> = {
+  ACTOR_NOT_AUTHORIZED: 403,
+  AUTH_MODE_CONFLICT: 401,
+  AUTHORITY_FACT_UNAVAILABLE: 503,
+  AUTHORITY_STALE: 409,
+  COMMAND_INVALID: 400,
+  DEVICE_ACCESS_INVALID: 401,
+  DEVICE_AUTHENTICATION_REQUIRED: 401,
+  DPOP_INVALID: 401,
+  DPOP_REPLAY: 401,
+  IDEMPOTENCY_CONFLICT: 409,
+  PROJECT_NOT_FOUND: 404,
+  QUERY_INVALID: 400,
+  RATE_LIMITED: 429,
+  RUN_LAUNCH_STORAGE_FAILED: 500,
+  RUN_NOT_FOUND: 404,
+  RUN_REVISION_CONFLICT: 409,
+  RUN_TERMINAL: 409,
+  SESSION_INVALID: 401,
+  SESSION_REQUIRED: 401,
+};
+
+export function domainHttpStatus(code: string): DomainHttpStatus {
+  return DomainHttpStatuses[code] ?? 400;
 }
 
-export function encodeDomainResult<T>(context: Context, result: Result<T>): Response {
-  return result.ok ? context.json(result, 200) : context.json(result, statusFor(result.error.code));
+export function encodeDomainResult<T>(
+  context: Context,
+  result: Result<T>,
+  successStatus: 200 | 201 = 200,
+): Response {
+  return result.ok
+    ? context.json(result, successStatus)
+    : context.json(result, domainHttpStatus(result.error.code));
 }

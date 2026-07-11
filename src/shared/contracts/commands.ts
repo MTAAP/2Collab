@@ -18,7 +18,6 @@ import type {
   MemberId,
   ProjectId,
   RegisteredRunnerId,
-  RetainedLocalWorkId,
   RunnerConnectionId,
   Sha256,
   TeamDispatchExposureId,
@@ -372,8 +371,81 @@ export type SensitiveOperation =
       gateEvaluationId: GateEvaluationId;
       repositoryRevision: CommitSha;
       manifestFingerprint: Sha256;
-    }>
-  | Readonly<{ kind: "DISCARD_RETAINED_WORK"; retainedWorkId: RetainedLocalWorkId }>;
+    }>;
+
+const WorktreeAuthorizationBaseSchema = z.object({
+  authorizationId: IdentifierSchema,
+  runnerId: IdentifierSchema,
+  runId: IdentifierSchema,
+  worktreeKey: IdentifierSchema,
+  expectedHead: CommitShaSchema,
+  expiresAt: InstantSchema,
+});
+
+export const WorktreeAuthorizationClaimsSchema = z.discriminatedUnion("kind", [
+  WorktreeAuthorizationBaseSchema.extend({
+    kind: z.literal("ATTEMPT_PUBLISH"),
+    attemptId: IdentifierSchema,
+    sessionId: IdentifierSchema,
+    sessionFence: RevisionSchema,
+    remoteIdentity: z.string().min(1).max(128),
+    remoteRef: GitRefSchema,
+  }).strict(),
+  WorktreeAuthorizationBaseSchema.extend({
+    kind: z.literal("RETAINED_WORK_PUBLISH"),
+    ownerMemberId: IdentifierSchema,
+    retainedWorkId: IdentifierSchema,
+    observationRevision: RevisionSchema,
+    observationDigest: Sha256Schema,
+    remoteIdentity: z.string().min(1).max(128),
+    remoteRef: GitRefSchema,
+  }).strict(),
+  WorktreeAuthorizationBaseSchema.extend({
+    kind: z.literal("RETAINED_WORK_DISCARD"),
+    ownerMemberId: IdentifierSchema,
+    retainedWorkId: IdentifierSchema,
+    observationRevision: RevisionSchema,
+    observationDigest: Sha256Schema,
+    remoteIdentity: z.string().min(1).max(128),
+    remoteRef: GitRefSchema,
+  }).strict(),
+  WorktreeAuthorizationBaseSchema.extend({
+    kind: z.literal("COMMITTED_CLEANUP"),
+    runState: z.enum(["QUEUED", "RUNNING", "WAITING", "COMPLETED", "FAILED", "CANCELLED"]),
+    noActiveAttempt: z.boolean(),
+  }).strict(),
+]);
+export type WorktreeAuthorizationClaims = Readonly<
+  z.infer<typeof WorktreeAuthorizationClaimsSchema>
+>;
+
+export const WorktreeAuthorizationSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ATTEMPT_PUBLISH"), token: z.string().min(1).max(8_192) }).strict(),
+  z
+    .object({ kind: z.literal("RETAINED_WORK_PUBLISH"), token: z.string().min(1).max(8_192) })
+    .strict(),
+  z
+    .object({ kind: z.literal("RETAINED_WORK_DISCARD"), token: z.string().min(1).max(8_192) })
+    .strict(),
+  z.object({ kind: z.literal("COMMITTED_CLEANUP"), token: z.string().min(1).max(8_192) }).strict(),
+]);
+export type WorktreeAuthorization = Readonly<z.infer<typeof WorktreeAuthorizationSchema>>;
+export type AttemptPublishAuthorization = Extract<
+  WorktreeAuthorization,
+  { kind: "ATTEMPT_PUBLISH" }
+>;
+export type RetainedWorkPublishAuthorization = Extract<
+  WorktreeAuthorization,
+  { kind: "RETAINED_WORK_PUBLISH" }
+>;
+export type RetainedWorkDiscardAuthorization = Extract<
+  WorktreeAuthorization,
+  { kind: "RETAINED_WORK_DISCARD" }
+>;
+export type CommittedCleanupAuthorization = Extract<
+  WorktreeAuthorization,
+  { kind: "COMMITTED_CLEANUP" }
+>;
 
 export type AuthorizeOperation = CommandBase &
   Readonly<{
@@ -676,7 +748,6 @@ export const SensitiveOperationSchema = z.discriminatedUnion("kind", [
       manifestFingerprint: Sha256Schema,
     })
     .strict(),
-  z.object({ kind: z.literal("DISCARD_RETAINED_WORK"), retainedWorkId: IdentifierSchema }).strict(),
 ]);
 
 export const AuthorizeOperationPayloadSchema = z

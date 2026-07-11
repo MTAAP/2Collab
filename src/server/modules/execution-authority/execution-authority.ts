@@ -595,14 +595,6 @@ function operationColumns(operation: SensitiveOperation): Readonly<{
         connectorEpoch: null,
         actionDigest: operation.manifestFingerprint,
       };
-    case "DISCARD_RETAINED_WORK":
-      return {
-        resourceId: operation.retainedWorkId,
-        expectedRevision: null,
-        connectorId: null,
-        connectorEpoch: null,
-        actionDigest: null,
-      };
   }
 }
 

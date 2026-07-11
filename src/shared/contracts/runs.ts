@@ -88,6 +88,87 @@ export type EvidenceRecord = Readonly<{
   createdAt: Instant;
 }>;
 
+export const CleanupRetentionReasonSchema = z.enum([
+  "RUN_NOT_TERMINAL",
+  "ACTIVE_ATTEMPT",
+  "TRACKED_CHANGES",
+  "UNTRACKED_FILES",
+  "UNPUBLISHED_HEAD",
+  "REMOTE_UNAVAILABLE",
+  "HEAD_CHANGED",
+  "CLEANUP_FAILED",
+  "AUTHORITY_UNAVAILABLE",
+]);
+export type CleanupRetentionReason = z.infer<typeof CleanupRetentionReasonSchema>;
+
+export const PublishedGitReferenceSchema = z
+  .object({
+    remoteIdentity: z.string().min(1).max(128),
+    remoteRef: GitRefSchema,
+    commitSha: CommitShaSchema,
+    verifiedAt: InstantSchema,
+  })
+  .strict();
+export type PublishedGitReference = Readonly<z.infer<typeof PublishedGitReferenceSchema>>;
+
+export const RetainedLocalWorkProjectionSchema = z
+  .object({
+    retainedWorkId: IdentifierSchema,
+    worktreeIdentity: IdentifierSchema,
+    revision: z.number().int().positive(),
+    observationDigest: Sha256Schema,
+    expectedHead: CommitShaSchema,
+    reason: CleanupRetentionReasonSchema,
+    branch: GitRefSchema,
+    observedAt: InstantSchema,
+    ageSeconds: z.number().int().nonnegative(),
+    diskUsageBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    trackedChangeCount: z.number().int().nonnegative().max(100_000),
+    untrackedFileCount: z.number().int().nonnegative().max(100_000),
+    unpublishedCommitCount: z.number().int().nonnegative().max(100_000),
+    changedPaths: z.array(RepositoryRelativePathSchema).max(128),
+    truncated: z.boolean(),
+    publishState: z.enum(["UNPUBLISHED", "PUBLISHED", "UNKNOWN"]),
+  })
+  .strict();
+export type RetainedLocalWorkProjection = Readonly<
+  z.infer<typeof RetainedLocalWorkProjectionSchema>
+>;
+
+export const CleanupDispositionSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("REMOVED"),
+      worktreeIdentity: IdentifierSchema,
+      head: CommitShaSchema,
+      publishedReference: PublishedGitReferenceSchema,
+      trackedClean: z.literal(true),
+      untrackedClean: z.literal(true),
+      removedAt: InstantSchema,
+    })
+    .strict(),
+  RetainedLocalWorkProjectionSchema.extend({ kind: z.literal("RETAINED_LOCAL_WORK") }).strict(),
+]);
+export type CleanupDisposition = Readonly<z.infer<typeof CleanupDispositionSchema>>;
+
+export const DiscardObservationSchema = RetainedLocalWorkProjectionSchema.extend({
+  kind: z.literal("DISCARD_OBSERVATION"),
+}).strict();
+export type DiscardObservation = Readonly<z.infer<typeof DiscardObservationSchema>>;
+
+export const DiscardReceiptSchema = z
+  .object({
+    kind: z.literal("DISCARDED"),
+    retainedWorkId: IdentifierSchema,
+    worktreeIdentity: IdentifierSchema,
+    observationRevision: z.number().int().positive(),
+    observationDigest: Sha256Schema,
+    discardedHead: CommitShaSchema,
+    discardedAt: InstantSchema,
+  })
+  .strict();
+export type DiscardReceipt = Readonly<z.infer<typeof DiscardReceiptSchema>>;
+
 export type QueuedDispatchMetadata = Readonly<{
   state: "QUEUED";
   runnerId: RegisteredRunnerId;

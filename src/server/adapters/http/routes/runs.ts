@@ -12,11 +12,17 @@ import {
   authenticatePublicRequest,
   type PublicAuthenticationPort,
 } from "../middleware/authentication.ts";
-import { parseBoundedJson } from "../middleware/request-limits.ts";
+import {
+  enforceRateLimit,
+  type PublicRateLimitPort,
+  parseBoundedJson,
+} from "../middleware/request-limits.ts";
 import type { PublicRunOperations } from "../public-schemas.ts";
 
 type Dependencies = Readonly<{
   authentication: PublicAuthenticationPort;
+  configuredOrigin: string;
+  rateLimits: PublicRateLimitPort;
   runs: PublicRunOperations;
 }>;
 
@@ -35,9 +41,19 @@ export function createRunRoutes(dependencies: Dependencies): Hono {
       dependencies.authentication,
     );
     if (!authenticated.ok) return denied(authenticated);
+    const rateLimited = enforceRateLimit(
+      context,
+      dependencies.rateLimits,
+      authenticated.value.actor.memberId,
+    );
+    if (rateLimited) return rateLimited;
     if (
       authenticated.value.browser &&
-      !dependencies.authentication.verifyBrowserMutation(context.req.raw, authenticated.value.actor)
+      (context.req.header("origin") !== dependencies.configuredOrigin ||
+        !dependencies.authentication.verifyBrowserMutation(
+          context.req.raw,
+          authenticated.value.actor,
+        ))
     ) {
       return context.json(
         { error: { code: "CSRF_INVALID", message: "CSRF proof is invalid." } },
@@ -49,6 +65,7 @@ export function createRunRoutes(dependencies: Dependencies): Hono {
     return encodeDomainResult(
       context,
       await dependencies.runs.create(authenticated.value.actor, request),
+      201,
     );
   });
 
@@ -58,6 +75,12 @@ export function createRunRoutes(dependencies: Dependencies): Hono {
       dependencies.authentication,
     );
     if (!authenticated.ok) return denied(authenticated);
+    const rateLimited = enforceRateLimit(
+      context,
+      dependencies.rateLimits,
+      authenticated.value.actor.memberId,
+    );
+    if (rateLimited) return rateLimited;
     const request = PublicInspectRunRequestSchema.safeParse({ runId: context.req.param("runId") });
     if (!request.success)
       return context.json(
@@ -76,6 +99,12 @@ export function createRunRoutes(dependencies: Dependencies): Hono {
       dependencies.authentication,
     );
     if (!authenticated.ok) return denied(authenticated);
+    const rateLimited = enforceRateLimit(
+      context,
+      dependencies.rateLimits,
+      authenticated.value.actor.memberId,
+    );
+    if (rateLimited) return rateLimited;
     const request = PublicInspectEvidenceRequestSchema.safeParse({
       runId: context.req.param("runId"),
       after: context.req.query("after"),
@@ -99,12 +128,19 @@ export function createRunRoutes(dependencies: Dependencies): Hono {
         dependencies.authentication,
       );
       if (!authenticated.ok) return denied(authenticated);
+      const rateLimited = enforceRateLimit(
+        context,
+        dependencies.rateLimits,
+        authenticated.value.actor.memberId,
+      );
+      if (rateLimited) return rateLimited;
       if (
         authenticated.value.browser &&
-        !dependencies.authentication.verifyBrowserMutation(
-          context.req.raw,
-          authenticated.value.actor,
-        )
+        (context.req.header("origin") !== dependencies.configuredOrigin ||
+          !dependencies.authentication.verifyBrowserMutation(
+            context.req.raw,
+            authenticated.value.actor,
+          ))
       ) {
         return context.json(
           { error: { code: "CSRF_INVALID", message: "CSRF proof is invalid." } },

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { CoordinationSelectionSchema } from "./context.ts";
 import { IdentifierSchema, InstantSchema, RevisionSchema } from "./ids.ts";
+import { DomainErrorSchema } from "./result.ts";
+import { GitRefSchema } from "./runners.ts";
 import { CoordinationRecordViewSchema, RunViewSchema } from "./runs.ts";
 
 export const PublicPresetRefSchema = z
@@ -13,7 +15,7 @@ export const PublicPresetRefSchema = z
 const PublicRepositorySelectionSchema = z
   .object({
     repositoryId: z.string().min(1).max(256),
-    intendedBranch: z.string().min(1).max(255).optional(),
+    intendedBranch: GitRefSchema.optional(),
   })
   .strict();
 
@@ -151,6 +153,11 @@ export const PublicRunResultSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+export const PublicRunOperationResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), value: PublicRunResultSchema }).strict(),
+  z.object({ ok: z.literal(false), error: DomainErrorSchema }).strict(),
+]);
+
 export type PublicCreateRunRequest = Readonly<z.infer<typeof PublicCreateRunRequestSchema>>;
 export type PublicInspectRunRequest = Readonly<z.infer<typeof PublicInspectRunRequestSchema>>;
 export type PublicCancelRunRequest = Readonly<z.infer<typeof PublicCancelRunRequestSchema>>;
@@ -159,3 +166,4 @@ export type PublicInspectEvidenceRequest = Readonly<
   z.infer<typeof PublicInspectEvidenceRequestSchema>
 >;
 export type PublicRunResult = Readonly<z.infer<typeof PublicRunResultSchema>>;
+export type PublicRunOperationResult = Readonly<z.infer<typeof PublicRunOperationResultSchema>>;

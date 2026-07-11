@@ -93,8 +93,7 @@ export function operationNeedsMutationLease(operation: SensitiveOperation): bool
     operation.kind === "PUBLISH_GIT_REFERENCE" ||
     operation.kind === "MUTATE_GITHUB" ||
     operation.kind === "MUTATE_OUTLINE" ||
-    operation.kind === "APPLY_APPROVAL_TRANSITION" ||
-    operation.kind === "DISCARD_RETAINED_WORK"
+    operation.kind === "APPLY_APPROVAL_TRANSITION"
   );
 }
 
