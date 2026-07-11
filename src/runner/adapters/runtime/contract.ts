@@ -5,6 +5,7 @@ export type {
   NormalizedRuntimeEvent,
   PreparedExecution,
   PreparedExecutionRequest,
+  ProfileEnvironmentBinding,
   PromptTransport,
   RuntimeAdapter,
   RuntimeOutputEvent,

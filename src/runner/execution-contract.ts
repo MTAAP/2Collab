@@ -4,6 +4,10 @@ export type RuntimeAdapter = "CLAUDE" | "CODEX";
 export type InteractionMode = "HEADLESS" | "INTERACTIVE";
 export type PromptTransport = "STDIN" | "ARGUMENT" | "TERMINAL_INPUT";
 
+export type ProfileEnvironmentBinding =
+  | Readonly<{ name: string; source: "LITERAL"; value: string }>
+  | Readonly<{ name: string; source: "OS_CREDENTIAL"; reference: string }>;
+
 export type CustomLaunchProfile = Readonly<{
   adapter: RuntimeAdapter;
   executable: string;
@@ -13,6 +17,7 @@ export type CustomLaunchProfile = Readonly<{
     interactive: "TERMINAL_INPUT" | "ARGUMENT";
   }>;
   supportedInteractions: readonly InteractionMode[];
+  environment?: readonly ProfileEnvironmentBinding[];
   fingerprint: string;
 }>;
 

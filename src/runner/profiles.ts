@@ -19,6 +19,27 @@ const ProfileDraftSchema = z
       .array(z.enum(["HEADLESS", "INTERACTIVE"]))
       .min(1)
       .max(2),
+    environment: z
+      .array(
+        z.discriminatedUnion("source", [
+          z
+            .object({
+              name: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+              source: z.literal("LITERAL"),
+              value: z.string().max(4_096),
+            })
+            .strict(),
+          z
+            .object({
+              name: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+              source: z.literal("OS_CREDENTIAL"),
+              reference: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/),
+            })
+            .strict(),
+        ]),
+      )
+      .max(32)
+      .optional(),
   })
   .strict();
 
@@ -39,6 +60,9 @@ function canonical(draft: ProfileDraft): string {
     fixedArguments: draft.fixedArguments,
     promptTransport: draft.promptTransport,
     supportedInteractions: [...new Set(draft.supportedInteractions)].sort(),
+    environment: draft.environment
+      ? [...draft.environment].sort((left, right) => left.name.localeCompare(right.name))
+      : undefined,
   });
 }
 
