@@ -198,6 +198,70 @@ describe("ConnectorAuthority", () => {
     }
   });
 
+  test("create operations persist the provider-confirmed source identity instead of the reservation reference", async () => {
+    const f = fixture();
+    try {
+      f.database
+        .query(
+          "INSERT INTO connector_scope_references(scope_id, reference) VALUES ('scope_1', 'repository_1')",
+        )
+        .run();
+      const connector: SourceConnector<string, Projection, Mutation> = {
+        async inspect() {
+          throw new Error("not used");
+        },
+        async mutate(_authorization, command) {
+          return {
+            ok: true,
+            value: {
+              value: { title: command.mutation.title },
+              reference: "issue_43",
+              sourceRevision: "etag-created",
+              comparableDigest: "f".repeat(64) as never,
+              projectionRevision: 0,
+              observedAt: 100,
+              freshness: "FRESH",
+              provenance: {
+                projectId: command.projectId,
+                connectorId: command.connectorId,
+                connectorEpoch: command.connectorEpoch,
+                kind: "MUTATION_CONFIRMATION",
+              },
+            },
+          };
+        },
+        async *scan() {
+          yield* [];
+        },
+      };
+      const result = await f.authority.mutateAsMember(connector, {
+        actor: {
+          kind: "MEMBER",
+          memberId: "member_1" as never,
+          sessionId: "session_1" as never,
+          sessionProof: "proof-with-at-least-thirty-two-bytes",
+        },
+        reference: "repository_1",
+        operation: "SET_TITLE",
+        command: {
+          ...f.command,
+          idempotencyKey: "create_43" as never,
+          precondition: { kind: "ABSENT" },
+        },
+      });
+      expect(result).toMatchObject({ ok: true, value: { reference: "issue_43" } });
+      expect(
+        f.database
+          .query<{ reference: string }, []>(
+            "SELECT reference FROM connector_projections WHERE reference = 'issue_43'",
+          )
+          .get(),
+      ).toEqual({ reference: "issue_43" });
+    } finally {
+      f.database.close();
+    }
+  });
+
   test("human connector mutation rejects a browser session at the shared idle deadline", async () => {
     const f = fixture();
     try {

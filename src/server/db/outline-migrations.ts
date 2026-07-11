@@ -20,10 +20,13 @@ export function applyAndVerifyOutlineMigrations(database: Database): void {
           "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1",
         )
         .get()?.version ?? 0;
-    if (current !== 9) throw new Error("OUTLINE_MIGRATION_PREREQUISITE_MISSING");
-    database.exec(outline);
-    database.exec(grants);
-    database.exec(proposals);
+    if (current === 9) {
+      database.exec(outline);
+      database.exec(grants);
+      database.exec(proposals);
+    } else if (current !== 12) {
+      throw new Error("OUTLINE_MIGRATION_PREREQUISITE_MISSING");
+    }
     verifyOutlineSchema(database);
     verifyOutlineGrantSchema(database);
     verifyOutlineProposalSchema(database);

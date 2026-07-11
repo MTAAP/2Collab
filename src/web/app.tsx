@@ -1,11 +1,17 @@
 import {
   BotIcon,
   BookOpenIcon,
+  GitBranchIcon,
+  InboxIcon,
+  LayoutDashboardIcon,
   PlayIcon,
   SettingsIcon,
   UsersIcon,
   WorkflowIcon,
 } from "lucide-react";
+import { GitHubPlanningFeature } from "./features/github/github-planning-feature.tsx";
+import { InboxFeature } from "./features/inbox/index.tsx";
+import { CommandCenterFeature } from "./features/command-center/index.tsx";
 import { MembersFeature } from "./features/members/members-feature.tsx";
 import { PresetsFeature } from "./features/presets/presets-feature.tsx";
 import { RunnersFeature } from "./features/runners/runners-feature.tsx";
@@ -16,6 +22,9 @@ import { OutlineFeature } from "./features/outline/index.tsx";
 
 const navigation = [
   { href: "/runs", label: "Runs", icon: PlayIcon },
+  { href: "/github", label: "GitHub", icon: GitBranchIcon },
+  { href: "/inbox", label: "Inbox", icon: InboxIcon },
+  { href: "/command-center", label: "Command Center", icon: LayoutDashboardIcon },
   { href: "/presets", label: "Presets", icon: WorkflowIcon },
   { href: "/runners", label: "Runners", icon: BotIcon },
   { href: "/outline", label: "Outline", icon: BookOpenIcon },
@@ -28,6 +37,12 @@ function AppShell() {
     <MembersFeature />
   ) : path.startsWith("/runners") ? (
     <RunnersFeature />
+  ) : path.startsWith("/github") ? (
+    <GitHubPlanningFeature />
+  ) : path.startsWith("/inbox") ? (
+    <InboxFeature />
+  ) : path.startsWith("/command-center") ? (
+    <CommandCenterFeature />
   ) : path.startsWith("/presets") ? (
     <PresetsFeature />
   ) : path.startsWith("/outline") ? (

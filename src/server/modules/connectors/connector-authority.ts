@@ -372,8 +372,8 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     }
   };
 
-  const mutate = async <P, M>(
-    connector: SourceConnector<string, P, M>,
+  const mutate = async <R, P, M>(
+    connector: SourceConnector<R, P, M>,
     actorKind: "MEMBER" | "ATTEMPT",
     actorId: string,
     input: MutationInput<M>,
@@ -475,7 +475,8 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     }
     if (
       !observedIsBounded(providerResult.value) ||
-      providerResult.value.reference !== input.reference ||
+      (providerResult.value.reference !== input.reference &&
+        input.command.precondition.kind !== "ABSENT") ||
       providerResult.value.provenance.projectId !== input.command.projectId ||
       providerResult.value.provenance.connectorId !== input.command.connectorId ||
       providerResult.value.provenance.connectorEpoch !== input.command.connectorEpoch
@@ -535,6 +536,18 @@ export function createConnectorAuthority(dependencies: Dependencies) {
           ...providerResult.value,
           projectionRevision: nextProjection,
         };
+        const targetProjection = database
+          .query<{ projection_revision: number }, [string, string, string]>(
+            `SELECT projection_revision FROM connector_projections
+             WHERE project_id = ? AND connector_id = ? AND reference = ?`,
+          )
+          .get(input.command.projectId, input.command.connectorId, observed.reference);
+        if (observed.reference !== input.reference && targetProjection) {
+          return error(
+            "CONNECTOR_PROVIDER_RESPONSE_INVALID",
+            "Connector provider response is invalid.",
+          );
+        }
         dependencies.beforeConfirmationCommit?.();
         const auditId = dependencies.id("audit");
         database
@@ -576,7 +589,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
           .run(
             input.command.projectId,
             input.command.connectorId,
-            input.reference,
+            observed.reference,
             input.command.connectorEpoch,
             observed.sourceRevision,
             observed.comparableDigest,
@@ -973,8 +986,8 @@ export function createConnectorAuthority(dependencies: Dependencies) {
       }
     },
 
-    async mutateAsMember<P, M>(
-      connector: SourceConnector<string, P, M>,
+    async mutateAsMember<R, P, M>(
+      connector: SourceConnector<R, P, M>,
       input: MemberMutationInput<M>,
     ): Promise<Result<Observed<P>>> {
       const active = await browserSessions.authorize(input.actor);
@@ -984,8 +997,8 @@ export function createConnectorAuthority(dependencies: Dependencies) {
       });
     },
 
-    async mutateAsAttempt<P, M>(
-      connector: SourceConnector<string, P, M>,
+    async mutateAsAttempt<R, P, M>(
+      connector: SourceConnector<R, P, M>,
       input: AttemptMutationInput<M>,
     ): Promise<Result<Observed<P>>> {
       if (!validBounded(input.authorizationProof, 512) || input.authorizationProof.length < 32)

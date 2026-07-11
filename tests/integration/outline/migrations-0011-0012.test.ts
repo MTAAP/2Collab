@@ -7,7 +7,6 @@ test("applies strict grant and proposal schemas after canonical reserved migrati
   const database = new Database(":memory:", { strict: true });
   try {
     migrate(database);
-    database.exec("INSERT INTO schema_migrations(version,applied_at)VALUES(7,0),(8,0),(9,0)");
     applyAndVerifyOutlineMigrations(database);
     expect(
       database
@@ -18,13 +17,11 @@ test("applies strict grant and proposal schemas after canonical reserved migrati
     database.close();
   }
 });
-test("refuses to register Outline ahead of the canonical GitHub migration range", () => {
+test("the canonical catalog already includes and verifies Outline", () => {
   const database = new Database(":memory:", { strict: true });
   try {
     migrate(database);
-    expect(() => applyAndVerifyOutlineMigrations(database)).toThrow(
-      "OUTLINE_MIGRATION_PREREQUISITE_MISSING",
-    );
+    expect(() => applyAndVerifyOutlineMigrations(database)).not.toThrow();
   } finally {
     database.close();
   }

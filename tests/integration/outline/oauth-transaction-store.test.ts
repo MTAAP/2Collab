@@ -2,16 +2,11 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { createSqliteOutlineOAuthTransactionStore } from "../../../src/server/adapters/outline/oauth-transaction-store.ts";
 import { migrate } from "../../../src/server/db/migrate.ts";
-import outlineMigration from "../../../src/server/db/migrations/0010_outline.sql" with {
-  type: "text",
-};
 
 test("SQLite OAuth transactions consume once and recheck member, session, connector epoch, and encrypted verifier", async () => {
   const database = new Database(":memory:", { strict: true });
   try {
     migrate(database);
-    database.exec("INSERT INTO schema_migrations(version,applied_at)VALUES(7,0),(8,0),(9,0)");
-    database.exec(outlineMigration);
     database.exec(`
       INSERT INTO deployments(id,singleton,team_id,revision,created_at) VALUES('d',1,'t',1,0);
       INSERT INTO members(id,display_name,role,status,authority_epoch,revision,created_at) VALUES('m','M','MEMBER','ACTIVE',1,1,0);

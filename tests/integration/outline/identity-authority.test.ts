@@ -1,16 +1,11 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { migrate } from "../../../src/server/db/migrate.ts";
-import outlineMigration from "../../../src/server/db/migrations/0010_outline.sql" with {
-  type: "text",
-};
 import { createOutlineIdentityResolver } from "../../../src/server/modules/connectors/outline-credentials.ts";
 
 function fixture() {
   const database = new Database(":memory:", { strict: true });
   migrate(database);
-  database.exec("INSERT INTO schema_migrations(version,applied_at)VALUES(7,0),(8,0),(9,0)");
-  database.exec(outlineMigration);
   database.exec(`
     INSERT INTO deployments(id,singleton,team_id,revision,created_at) VALUES('d',1,'t',1,0);
     INSERT INTO members(id,display_name,role,status,authority_epoch,revision,created_at)

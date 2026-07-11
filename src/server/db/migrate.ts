@@ -14,9 +14,23 @@ import foundationConfigurationCorrectionsMigration from "./migrations/0006_found
   type: "text",
 };
 import { verifyFoundationConfigurationCorrectionsSchema } from "./migrations/0006_foundation_configuration_corrections.verify.ts";
+import githubMigration from "./migrations/0007_github.sql" with { type: "text" };
+import { verifyGitHubSchema } from "./migrations/0007_github.verify.ts";
+import coordinationSourceMappingMigration from "./migrations/0008_coordination_source_mapping.sql" with {
+  type: "text",
+};
+import { verifyCoordinationSourceMappingSchema } from "./migrations/0008_coordination_source_mapping.verify.ts";
+import githubAttentionMigration from "./migrations/0009_github_attention.sql" with { type: "text" };
+import { verifyGitHubAttentionSchema } from "./migrations/0009_github_attention.verify.ts";
+import outlineMigration from "./migrations/0010_outline.sql" with { type: "text" };
+import { verifyOutlineSchema } from "./migrations/0010_outline.verify.ts";
+import outlineGrantsMigration from "./migrations/0011_outline_grants.sql" with { type: "text" };
+import { verifyOutlineGrantSchema } from "./migrations/0011_outline_grants.verify.ts";
+import outlineProposalsMigration from "./migrations/0012_outline_proposals.sql" with { type: "text" };
+import { verifyOutlineProposalSchema } from "./migrations/0012_outline_proposals.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-export const LATEST_SCHEMA_VERSION = 6;
+export const LATEST_SCHEMA_VERSION = 12;
 const MIGRATION_SOURCES = [
   foundationMigration,
   projectsMigration,
@@ -24,6 +38,12 @@ const MIGRATION_SOURCES = [
   runsAuthorityMigration,
   foundationOperationsMigration,
   foundationConfigurationCorrectionsMigration,
+  githubMigration,
+  coordinationSourceMappingMigration,
+  githubAttentionMigration,
+  outlineMigration,
+  outlineGrantsMigration,
+  outlineProposalsMigration,
 ] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
@@ -119,6 +139,16 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 6) {
     verifyFoundationConfigurationCorrectionsSchema(database);
   }
+  if (version >= 7) {
+    verifyGitHubSchema(database);
+  }
+  if (version >= 8) {
+    verifyCoordinationSourceMappingSchema(database);
+  }
+  if (version >= 9) verifyGitHubAttentionSchema(database);
+  if (version >= 10) verifyOutlineSchema(database);
+  if (version >= 11) verifyOutlineGrantSchema(database);
+  if (version >= 12) verifyOutlineProposalSchema(database);
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -220,6 +250,30 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 5) {
       database.exec(foundationConfigurationCorrectionsMigration);
+      currentVersion = 6;
+    }
+    if (currentVersion === 6) {
+      database.exec(githubMigration);
+      currentVersion = 7;
+    }
+    if (currentVersion === 7) {
+      database.exec(coordinationSourceMappingMigration);
+      currentVersion = 8;
+    }
+    if (currentVersion === 8) {
+      database.exec(githubAttentionMigration);
+      currentVersion = 9;
+    }
+    if (currentVersion === 9) {
+      database.exec(outlineMigration);
+      currentVersion = 10;
+    }
+    if (currentVersion === 10) {
+      database.exec(outlineGrantsMigration);
+      currentVersion = 11;
+    }
+    if (currentVersion === 11) {
+      database.exec(outlineProposalsMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);
