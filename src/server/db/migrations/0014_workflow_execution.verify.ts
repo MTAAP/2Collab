@@ -9,6 +9,7 @@ const TABLES = [
   "workflow_join_states",
   "workflow_decisions",
   "workflow_cancellation_outbox",
+  "workflow_control_receipts",
 ] as const;
 
 export function verifyWorkflowExecutionSchema(database: Database): void {

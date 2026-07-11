@@ -20,6 +20,8 @@ import { InvitationExchange } from "./features/setup/invitation-exchange.tsx";
 import { SetupFeature } from "./features/setup/setup-feature.tsx";
 import { OutlineFeature } from "./features/outline/index.tsx";
 import { WorkflowStudioFeature } from "./features/workflow-studio/editor.tsx";
+import { BoundedAutomationJourney } from "./features/workflows/execution.tsx";
+import { PlanningWorkflowJourney } from "./features/workflows/plan-artifact.tsx";
 
 const navigation = [
   { href: "/runs", label: "Runs", icon: PlayIcon },
@@ -47,6 +49,10 @@ function AppShell() {
     <CommandCenterFeature />
   ) : path.startsWith("/presets") ? (
     <PresetsFeature />
+  ) : path === "/workflows/planning" ? (
+    <PlanningWorkflowJourney />
+  ) : path === "/workflows/journey" ? (
+    <BoundedAutomationJourney />
   ) : path.startsWith("/workflows") ? (
     <WorkflowStudioFeature />
   ) : path.startsWith("/outline") ? (

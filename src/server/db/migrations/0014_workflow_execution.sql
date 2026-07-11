@@ -6,6 +6,7 @@ CREATE TABLE workflow_executions (
   preset_version_id TEXT NOT NULL CHECK(length(preset_version_id) BETWEEN 1 AND 128),
   state TEXT NOT NULL CHECK(state IN ('ACTIVE','WAITING','PAUSED','COMPLETED','FAILED','CANCELLED')),
   current_node_key TEXT,
+  pending_target_key TEXT,
   snapshot_json TEXT NOT NULL,
   revision INTEGER NOT NULL CHECK(revision > 0),
   absolute_deadline_at INTEGER NOT NULL CHECK(absolute_deadline_at > 0),
@@ -75,6 +76,14 @@ CREATE TABLE workflow_cancellation_outbox (
   step_occurrence_id TEXT NOT NULL UNIQUE REFERENCES workflow_step_occurrences(id),
   agent_run_id TEXT NOT NULL CHECK(length(agent_run_id) BETWEEN 1 AND 128),
   requested_at INTEGER CHECK(requested_at >= 0)
+) STRICT;
+
+CREATE TABLE workflow_control_receipts (
+  idempotency_key TEXT PRIMARY KEY CHECK(length(idempotency_key) BETWEEN 1 AND 128),
+  request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+  workflow_execution_id TEXT NOT NULL REFERENCES workflow_executions(id),
+  result_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
 ) STRICT;
 
 INSERT INTO schema_migrations(version, applied_at)

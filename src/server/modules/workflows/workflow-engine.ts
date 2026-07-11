@@ -13,6 +13,7 @@ import type {
   WorkflowEngine,
   WorkflowEventCommand,
   WorkflowExecution,
+  WorkflowControlCommand,
   WorkflowExecutionSnapshot,
   WorkflowExecutionState,
 } from "./contract.ts";
@@ -34,6 +35,7 @@ type ExecutionRow = Readonly<{
   preset_version_id: string;
   state: WorkflowExecutionState;
   current_node_key: string | null;
+  pending_target_key: string | null;
   snapshot_json: string;
   revision: number;
   absolute_deadline_at: number;
@@ -104,19 +106,21 @@ function updateExecution(
     state: WorkflowExecutionState;
     currentNodeKey?: string;
     terminalReason?: string;
+    pendingTargetKey?: string | null;
     now: number;
     bumpRevision: boolean;
   }>,
 ): ExecutionRow {
   database
-    .query<void, [string, string | null, string | null, number, number, string]>(
+    .query<void, [string, string | null, string | null, string | null, number, number, string]>(
       `UPDATE workflow_executions
-       SET state = ?, current_node_key = ?, terminal_reason = ?, revision = ?, updated_at = ?
+       SET state = ?, current_node_key = ?, pending_target_key = ?, terminal_reason = ?, revision = ?, updated_at = ?
        WHERE id = ?`,
     )
     .run(
       input.state,
       input.currentNodeKey ?? null,
+      input.pendingTargetKey === undefined ? row.pending_target_key : input.pendingTargetKey,
       input.terminalReason ?? null,
       row.revision + (input.bumpRevision ? 1 : 0),
       input.now,
@@ -235,9 +239,101 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
       ? { ok: true, value: executionView(row) }
       : failure("WORKFLOW_NOT_FOUND", "The Workflow Execution was not found.");
   };
+  const control = (
+    command: WorkflowControlCommand,
+    action: "PAUSE" | "RESUME",
+  ): Result<WorkflowExecution> => {
+    const requestDigest = workflowDigest({ ...command, action });
+    const prior = dependencies.database
+      .query<{ request_digest: string; result_json: string }, [string]>(
+        "SELECT request_digest, result_json FROM workflow_control_receipts WHERE idempotency_key = ?",
+      )
+      .get(command.idempotencyKey);
+    if (prior)
+      return prior.request_digest === requestDigest
+        ? (JSON.parse(prior.result_json) as Result<WorkflowExecution>)
+        : failure("IDEMPOTENCY_KEY_REUSED", "The idempotency key was already used.");
+    return inImmediateTransaction(dependencies.database, () => {
+      let row = executionRow(dependencies.database, command.workflowExecutionId);
+      if (!row) return failure("WORKFLOW_NOT_FOUND", "The Workflow Execution was not found.");
+      if (["COMPLETED", "FAILED", "CANCELLED"].includes(row.state))
+        return failure("WORKFLOW_TERMINAL", "The Workflow Execution is terminal.");
+      if (row.revision !== command.expectedRevision)
+        return failure("WORKFLOW_REVISION_CONFLICT", "The Workflow Execution changed.", "REFRESH");
+      const snapshotValue = snapshot(row);
+      if (snapshotValue.schedulerActor.originalDispatcherId !== command.actor.memberId)
+        return failure("WORKFLOW_ACTOR_INVALID", "The workflow control actor is invalid.");
+      const now = dependencies.clock();
+      if (action === "RESUME" && now >= row.absolute_deadline_at) {
+        dependencies.database
+          .query(
+            "UPDATE workflow_launch_intents SET invalidated_reason = 'WORKFLOW_DEADLINE_EXCEEDED' WHERE workflow_execution_id = ? AND dispatched_at IS NULL",
+          )
+          .run(row.id);
+        row = updateExecution(dependencies.database, row, {
+          state: "FAILED",
+          currentNodeKey: row.current_node_key ?? undefined,
+          terminalReason: "WORKFLOW_DEADLINE_EXCEEDED",
+          now,
+          bumpRevision: true,
+        });
+      } else {
+        const currentNode = row.current_node_key
+          ? nodeByKey(snapshotValue, row.current_node_key)
+          : undefined;
+        const pendingTargetKey = row.pending_target_key;
+        row = updateExecution(dependencies.database, row, {
+          state:
+            action === "PAUSE"
+              ? "PAUSED"
+              : currentNode?.kind === "HUMAN_DECISION"
+                ? "WAITING"
+                : "ACTIVE",
+          currentNodeKey: row.current_node_key ?? undefined,
+          now,
+          bumpRevision: true,
+        });
+        if (action === "RESUME" && pendingTargetKey) {
+          row = applyTarget(
+            dependencies.database,
+            row,
+            snapshotValue,
+            pendingTargetKey,
+            now,
+            false,
+          );
+          dependencies.database
+            .query("UPDATE workflow_executions SET pending_target_key = NULL WHERE id = ?")
+            .run(row.id);
+          row = executionRow(dependencies.database, row.id) as ExecutionRow;
+        }
+      }
+      const result = { ok: true as const, value: executionView(row) };
+      dependencies.database
+        .query<void, [string, string, string, string, number]>(
+          `INSERT INTO workflow_control_receipts(
+             idempotency_key, request_digest, workflow_execution_id, result_json, created_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          command.idempotencyKey,
+          requestDigest,
+          command.workflowExecutionId,
+          JSON.stringify(result),
+          now,
+        );
+      return result;
+    });
+  };
 
   return {
     inspect,
+    async pause(command) {
+      return control(command, "PAUSE");
+    },
+    async resume(command) {
+      return control(command, "RESUME");
+    },
     failAfterIntentCommitOnce() {
       crashBeforeDispatch = true;
     },
@@ -607,14 +703,22 @@ export function createWorkflowEngine(dependencies: Dependencies): WorkflowEngine
             }
           }
           current = targetKey
-            ? applyTarget(
-                dependencies.database,
-                current,
-                snapshotValue,
-                targetKey,
-                dependencies.clock(),
-                true,
-              )
+            ? current.state === "PAUSED"
+              ? updateExecution(dependencies.database, current, {
+                  state: "PAUSED",
+                  currentNodeKey: occurrence.node_key,
+                  pendingTargetKey: targetKey,
+                  now: dependencies.clock(),
+                  bumpRevision: true,
+                })
+              : applyTarget(
+                  dependencies.database,
+                  current,
+                  snapshotValue,
+                  targetKey,
+                  dependencies.clock(),
+                  true,
+                )
             : updateExecution(dependencies.database, current, {
                 state: "WAITING",
                 currentNodeKey: occurrence.node_key,

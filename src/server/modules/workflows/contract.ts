@@ -69,10 +69,19 @@ export type RecordHumanDecision = Readonly<{
   expectedRevision: number;
 }>;
 
+export type WorkflowControlCommand = Readonly<{
+  idempotencyKey: string;
+  actor: MemberActor;
+  workflowExecutionId: string;
+  expectedRevision: number;
+}>;
+
 export interface WorkflowEngine {
   start(command: StartWorkflow): Promise<Result<WorkflowExecution>>;
   accept(command: WorkflowEventCommand): Promise<Result<WorkflowExecution>>;
   decide(command: RecordHumanDecision): Promise<Result<WorkflowExecution>>;
+  pause(command: WorkflowControlCommand): Promise<Result<WorkflowExecution>>;
+  resume(command: WorkflowControlCommand): Promise<Result<WorkflowExecution>>;
   inspect(workflowExecutionId: string): Result<WorkflowExecution>;
   tick(): Promise<void>;
   failAfterIntentCommitOnce(): void;
