@@ -108,9 +108,7 @@ function compiledFixture() {
         throw new Error("compiled CLI must not use browser authentication");
       },
       async authenticateDevice(request) {
-        return request.headers.get("authorization") === "DPoP access_token_12345678901234567890" &&
-          request.headers.get("dpop") === "signed-proof" &&
-          request.headers.get("dpop-nonce") === "nonce_1"
+        return request.headers.get("authorization") === "Bearer access_token_12345678901234567890"
           ? {
               ok: true as const,
               value: {
@@ -158,8 +156,6 @@ function compiledFixture() {
       NODE_ENV: "test",
       COLLAB_BASE_URL: `http://localhost:${server.port}`,
       COLLAB_DEVICE_ACCESS_TOKEN: "access_token_12345678901234567890",
-      COLLAB_DPOP_PROOF: "signed-proof",
-      COLLAB_DPOP_NONCE: "nonce_1",
     },
     server,
   };

@@ -42,9 +42,15 @@ import repositoryObservationsMigration from "./migrations/0016_repository_observ
   type: "text",
 };
 import { verifyRepositoryObservationSchema } from "./migrations/0016_repository_observations.verify.ts";
+import betterAuthMigration from "./migrations/0017_better_auth.sql" with { type: "text" };
+import { verifyBetterAuthSchema } from "./migrations/0017_better_auth.verify.ts";
+import emailRegistrationPolicyMigration from "./migrations/0018_email_registration_policy.sql" with {
+  type: "text",
+};
+import { verifyEmailRegistrationPolicySchema } from "./migrations/0018_email_registration_policy.verify.ts";
 import { inImmediateTransaction } from "./transaction.ts";
 
-export const LATEST_SCHEMA_VERSION = 16;
+export const LATEST_SCHEMA_VERSION = 18;
 const MIGRATION_SOURCES = [
   foundationMigration,
   projectsMigration,
@@ -62,6 +68,8 @@ const MIGRATION_SOURCES = [
   workflowExecutionMigration,
   gatesTelemetryMigration,
   repositoryObservationsMigration,
+  betterAuthMigration,
+  emailRegistrationPolicyMigration,
 ] as const;
 const FOUNDATION_TABLES = [
   "audit_events",
@@ -171,6 +179,8 @@ function validateClaimedSchema(database: Database, version: number): void {
   if (version >= 14) verifyWorkflowExecutionSchema(database);
   if (version >= 15) verifyGatesTelemetrySchema(database);
   if (version >= 16) verifyRepositoryObservationSchema(database);
+  if (version >= 17) verifyBetterAuthSchema(database);
+  if (version >= 18) verifyEmailRegistrationPolicySchema(database);
   const integrity = database.query<{ quick_check: string }, []>("PRAGMA quick_check").get();
   const foreignKeyFailures = database
     .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
@@ -314,6 +324,14 @@ export function migrate(database: Database): void {
     }
     if (currentVersion === 15) {
       database.exec(repositoryObservationsMigration);
+      currentVersion = 16;
+    }
+    if (currentVersion === 16) {
+      database.exec(betterAuthMigration);
+      currentVersion = 17;
+    }
+    if (currentVersion === 17) {
+      database.exec(emailRegistrationPolicyMigration);
     }
     const appliedVersions = readMigrationHistory(database);
     validateMigrationHistory(appliedVersions);

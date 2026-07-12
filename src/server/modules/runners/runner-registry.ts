@@ -358,6 +358,33 @@ export function createRunnerServices(dependencies: Dependencies) {
 
   const memberAuthority = async (actor: MemberActor) => {
     if (actor.sessionProof.length < 32 || actor.sessionProof.length > 512) return null;
+    const betterAuthSession = dependencies.database
+      .query<{ member_id: string; token: string }, [string, string, number, number, number]>(
+        `SELECT members.id AS member_id, auth_sessions.token
+         FROM auth_sessions
+         JOIN auth_member_links AS links ON links.auth_user_id = auth_sessions.userId
+         JOIN members ON members.id = links.member_id
+         WHERE members.id = ? AND auth_sessions.id = ?
+           AND members.status = 'ACTIVE' AND links.revoked_at IS NULL
+           AND links.authority_epoch_snapshot = members.authority_epoch
+           AND auth_sessions.purpose IN ('BROWSER', 'CLI_DEVICE')
+           AND auth_sessions.memberAuthorityEpoch = members.authority_epoch
+           AND auth_sessions.expiresAt > ? AND auth_sessions.absoluteExpiresAt > ?
+           AND (auth_sessions.purpose = 'CLI_DEVICE' OR auth_sessions.updatedAt + 43200000 > ?)`,
+      )
+      .get(
+        actor.memberId,
+        actor.sessionId,
+        dependencies.clock() * 1_000,
+        dependencies.clock() * 1_000,
+        dependencies.clock() * 1_000,
+      );
+    if (betterAuthSession) {
+      const proofHash = await digest(betterAuthSession.token);
+      if (Buffer.from(proofHash).toString("base64url") === actor.sessionProof) {
+        return { memberId: betterAuthSession.member_id, proofHash };
+      }
+    }
     const proofHash = await digest(actor.sessionProof);
     const member = dependencies.database
       .query<{ member_id: string }, [string, string, Uint8Array, number, number]>(
@@ -373,24 +400,47 @@ export function createRunnerServices(dependencies: Dependencies) {
     return member ? { memberId: member.member_id, proofHash } : null;
   };
 
-  const revalidateMemberAuthority = (actor: MemberActor, proofHash: Uint8Array): boolean =>
-    dependencies.database
-      .query<{ member_id: string }, [string, string, Uint8Array, number, number]>(
-        `SELECT members.id AS member_id FROM members
+  const revalidateMemberAuthority = (actor: MemberActor, proofHash: Uint8Array): boolean => {
+    const legacy =
+      dependencies.database
+        .query<{ member_id: string }, [string, string, Uint8Array, number, number]>(
+          `SELECT members.id AS member_id FROM members
          JOIN sessions ON sessions.member_id = members.id
          WHERE members.id = ? AND sessions.id = ? AND sessions.proof_hash = ?
            AND members.status = 'ACTIVE' AND sessions.kind = 'BROWSER'
            AND sessions.revoked_at IS NULL
            AND sessions.idle_expires_at > ? AND sessions.absolute_expires_at > ?
            AND sessions.member_authority_epoch = members.authority_epoch`,
-      )
-      .get(
-        actor.memberId,
-        actor.sessionId,
-        proofHash,
-        dependencies.clock(),
-        dependencies.clock(),
-      ) !== null;
+        )
+        .get(
+          actor.memberId,
+          actor.sessionId,
+          proofHash,
+          dependencies.clock(),
+          dependencies.clock(),
+        ) !== null;
+    if (legacy) return true;
+    if (Buffer.from(proofHash).toString("base64url") !== actor.sessionProof) return false;
+    const nowMilliseconds = dependencies.clock() * 1_000;
+    return (
+      dependencies.database
+        .query<{ member_id: string }, [string, string, number, number, number]>(
+          `SELECT members.id AS member_id
+           FROM auth_sessions
+           JOIN auth_member_links AS links ON links.auth_user_id = auth_sessions.userId
+           JOIN members ON members.id = links.member_id
+           WHERE members.id = ? AND auth_sessions.id = ?
+             AND members.status = 'ACTIVE' AND links.revoked_at IS NULL
+             AND links.authority_epoch_snapshot = members.authority_epoch
+             AND auth_sessions.purpose IN ('BROWSER', 'CLI_DEVICE')
+             AND auth_sessions.memberAuthorityEpoch = members.authority_epoch
+             AND auth_sessions.expiresAt > ? AND auth_sessions.absoluteExpiresAt > ?
+             AND (auth_sessions.purpose = 'CLI_DEVICE' OR auth_sessions.updatedAt + 43200000 > ?)`,
+        )
+        .get(actor.memberId, actor.sessionId, nowMilliseconds, nowMilliseconds, nowMilliseconds) !==
+      null
+    );
+  };
 
   const revalidateOwner = (
     actor: MemberActor,
@@ -516,22 +566,42 @@ export function createRunnerServices(dependencies: Dependencies) {
       if (dependencies.clock() >= input.data.principal.expiresAt) {
         return failure("RUNNER_PAIRING_INVALID", "Runner pairing is invalid.");
       }
-      const currentDevice = dependencies.database
-        .query<{ id: string }, [string, number, string, string, string]>(
-          `SELECT families.id FROM device_credential_families AS families
-           JOIN members ON members.id = families.member_id
-           WHERE families.member_id = ? AND families.member_authority_epoch = ?
-             AND families.id = ? AND families.device_id = ? AND families.sender_key_thumbprint = ?
-             AND families.revoked_at IS NULL AND members.status = 'ACTIVE'
-             AND members.authority_epoch = families.member_authority_epoch`,
-        )
-        .get(
-          input.data.principal.memberId,
-          input.data.principal.memberAuthorityEpoch,
-          input.data.principal.deviceFamilyId,
-          input.data.principal.deviceId,
-          input.data.principal.senderKeyThumbprint,
-        );
+      const currentDevice =
+        input.data.principal.senderKeyThumbprint === "better_auth_bearer"
+          ? dependencies.database
+              .query<{ id: string }, [string, string, number, string, number]>(
+                `SELECT sessions.id FROM auth_sessions AS sessions
+                 JOIN auth_member_links AS links ON links.auth_user_id = sessions.userId
+                 JOIN members ON members.id = links.member_id
+                 WHERE sessions.id = ? AND links.member_id = ? AND members.authority_epoch = ?
+                   AND sessions.userId = ? AND sessions.purpose = 'CLI_DEVICE'
+                   AND sessions.memberAuthorityEpoch = members.authority_epoch
+                   AND sessions.expiresAt > ? AND links.revoked_at IS NULL
+                   AND members.status = 'ACTIVE'`,
+              )
+              .get(
+                input.data.principal.deviceFamilyId,
+                input.data.principal.memberId,
+                input.data.principal.memberAuthorityEpoch,
+                input.data.principal.deviceId,
+                dependencies.clock() * 1_000,
+              )
+          : dependencies.database
+              .query<{ id: string }, [string, number, string, string, string]>(
+                `SELECT families.id FROM device_credential_families AS families
+                 JOIN members ON members.id = families.member_id
+                 WHERE families.member_id = ? AND families.member_authority_epoch = ?
+                   AND families.id = ? AND families.device_id = ? AND families.sender_key_thumbprint = ?
+                   AND families.revoked_at IS NULL AND members.status = 'ACTIVE'
+                   AND members.authority_epoch = families.member_authority_epoch`,
+              )
+              .get(
+                input.data.principal.memberId,
+                input.data.principal.memberAuthorityEpoch,
+                input.data.principal.deviceFamilyId,
+                input.data.principal.deviceId,
+                input.data.principal.senderKeyThumbprint,
+              );
       if (!currentDevice)
         return failure("RUNNER_PAIRING_DEVICE_INVALID", "Runner pairing device is invalid.");
       const ticket = await writeTicket(

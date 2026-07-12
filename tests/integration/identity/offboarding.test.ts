@@ -46,6 +46,23 @@ function fixture(dispatchSucceeds = true, providerRevocations?: string[]) {
       'runner_pairing_1', X'${"55".repeat(32)}', 'member_1', 1,
       'family_1', 'device_1', 'thumbprint_1', 'PENDING', 1, 500, 1100
     );
+    INSERT INTO auth_users(id, name, email, emailVerified, createdAt, updatedAt)
+      VALUES ('auth_member_1', 'Grace', 'grace@example.net', 1, 0, 0);
+    INSERT INTO auth_member_links(auth_user_id, member_id, authority_epoch_snapshot, created_at)
+      VALUES ('auth_member_1', 'member_1', 1, 0);
+    INSERT INTO auth_sessions(
+      id, expiresAt, token, createdAt, updatedAt, userId, purpose,
+      memberAuthorityEpoch, absoluteExpiresAt
+    ) VALUES ('auth_session_1', 1000000, 'session-token', 0, 0, 'auth_member_1', 'BROWSER', 1, 1000000);
+    INSERT INTO auth_verifications(id, identifier, value, expiresAt, createdAt, updatedAt)
+      VALUES ('verification_1', 'sign-in-otp-grace@example.net', 'hash', 1000000, 0, 0);
+    INSERT INTO auth_email_registration_tickets(
+      id, secret_hash, normalized_email, auth_user_id, intended_member_id,
+      display_name, authorization_kind, policy_revision, state, created_at, expires_at
+    ) VALUES (
+      'email_ticket_1', X'${"66".repeat(32)}', 'grace@example.net', 'auth_member_1',
+      'member_pending_1', 'Grace', 'ALLOWLIST', 1, 'AUTHORIZED', 0, 1000000
+    );
   `);
   const dispatched: string[] = [];
   const authority = createMemberRevocationAuthority({
@@ -142,6 +159,27 @@ describe("member offboarding", () => {
           )
           .get()?.state,
       ).toBe("REVOKED");
+      expect(
+        f.database
+          .query<{ count: number }, []>(
+            "SELECT count(*) AS count FROM auth_sessions WHERE userId = 'auth_member_1'",
+          )
+          .get()?.count,
+      ).toBe(0);
+      expect(
+        f.database
+          .query<{ count: number }, []>(
+            "SELECT count(*) AS count FROM auth_verifications WHERE identifier = 'sign-in-otp-grace@example.net'",
+          )
+          .get()?.count,
+      ).toBe(0);
+      expect(
+        f.database
+          .query<{ count: number }, []>(
+            "SELECT count(*) AS count FROM auth_email_registration_tickets WHERE auth_user_id = 'auth_member_1'",
+          )
+          .get()?.count,
+      ).toBe(0);
       expect(
         f.database
           .query<{ cause: string; runner_epoch: number; status: string }, []>(

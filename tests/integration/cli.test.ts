@@ -55,16 +55,17 @@ describe("collab CLI", () => {
     ]);
   });
 
-  test("routes two-step device enrollment through the OS credential seam", async () => {
+  test("routes two-step RFC 8628 enrollment through the OS credential seam", async () => {
     const output: string[] = [];
     const base = {
       environment: {},
       runtimeVersion: "1.3.10",
       deviceEnrollment: {
         begin: async () => ({
-          deviceCodeId: "device_code_1",
-          deviceCode: "device-code-secret-with-at-least-thirty-two-bytes",
-          approvalUrl: "https://collab.example/device/authorize/device_code_1",
+          userCode: "ABCD-EFGH",
+          approvalUrl: "https://collab.example/device?user_code=ABCDEFGH",
+          expiresAt: 1_800,
+          interval: 5,
         }),
         complete: async () => ({ enrolled: true as const }),
       },
@@ -72,15 +73,26 @@ describe("collab CLI", () => {
     expect(
       await runCli(
         ["auth", "begin"],
-        { log: (line) => output.push(line), error: (line) => output.push(line) },
+        {
+          log: (line) => output.push(line),
+          error: (line) => output.push(line),
+        },
         base,
       ),
     ).toBe(0);
-    expect(JSON.parse(output.pop() ?? "{}").deviceCodeId).toBe("device_code_1");
+    expect(JSON.parse(output.pop() ?? "{}")).toEqual({
+      userCode: "ABCD-EFGH",
+      approvalUrl: "https://collab.example/device?user_code=ABCDEFGH",
+      expiresAt: 1_800,
+      interval: 5,
+    });
     expect(
       await runCli(
         ["auth", "complete"],
-        { log: (line) => output.push(line), error: (line) => output.push(line) },
+        {
+          log: (line) => output.push(line),
+          error: (line) => output.push(line),
+        },
         base,
       ),
     ).toBe(0);

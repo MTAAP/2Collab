@@ -8,7 +8,6 @@ export function RunsFeature() {
   const [result, setResult] = useState<string>();
   const [live, setLive] = useState("Waiting for committed updates");
   useEffect(() => {
-    if (!sessionStorage.getItem("collab_csrf")) return;
     return subscribeToProjections((message) => {
       if (message.kind === "RESET") setLive("Projection refreshed");
       else setLive(`Committed update ${message.cursor}`);
@@ -20,7 +19,11 @@ export function RunsFeature() {
       body: JSON.stringify({
         idempotencyKey: crypto.randomUUID(),
         projectId: "project_1",
-        coordination: { kind: "NEW", title: String(form.get("title")), sourceRefs: [] },
+        coordination: {
+          kind: "NEW",
+          title: String(form.get("title")),
+          sourceRefs: [],
+        },
         goal: String(form.get("goal")),
         repository: { repositoryId: String(form.get("repository")) },
         preset: { presetId: String(form.get("preset")), presetVersion: 1 },

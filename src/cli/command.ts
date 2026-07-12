@@ -1,3 +1,4 @@
+import type { ProductionRunnerManagement } from "../runner/production.ts";
 import type { LocalProjectRegistry } from "../runner/repository/global-registry.ts";
 import type { TemplateBindingOperations } from "../server/modules/templates/bindings.ts";
 import type { WorkflowAuthoringOperations } from "../server/modules/workflows/authoring.ts";
@@ -13,7 +14,6 @@ import { templateCommand } from "./commands/templates.ts";
 import { workflowCommand } from "./commands/workflows.ts";
 import type { DeviceEnrollment } from "./credentials.ts";
 import type { ProjectsApi } from "./ports/projects-api.ts";
-import type { ProductionRunnerManagement } from "../runner/production.ts";
 
 export type CliIo = {
   error: (line: string) => void;
@@ -79,7 +79,7 @@ const HELP = [
   "",
   "Commands:",
   "  doctor     Validate the local bootstrap runtime and server configuration",
-  "  auth       Begin or complete OS-keychain-backed device enrollment",
+  "  auth       Authenticate this CLI through the browser device flow",
   "  runner     Pair, configure, install, start, or inspect the local runner service",
   "  init       Link the current checkout to an existing Project",
   "  list       Show the current Project coordination view",

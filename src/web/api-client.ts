@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
+const ErrorSchema = z.object({
+  error: z.object({ code: z.string(), message: z.string() }),
+});
 
 export async function browserJson<T>(
   path: string,
@@ -9,8 +11,6 @@ export async function browserJson<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined) headers.set("content-type", "application/json");
-  const csrf = sessionStorage.getItem("collab_csrf");
-  if (csrf) headers.set("x-collab-csrf", csrf);
   const response = await fetch(path, {
     ...init,
     headers,

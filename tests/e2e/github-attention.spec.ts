@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 test("Inbox and Command Center are deduplicated read-only projections", async ({ page }) => {
   await page.route("**/api/v1/inbox", (route) =>

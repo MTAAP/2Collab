@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 test("triage remains open after merge and closes only after GitHub reconciliation", async ({
   page,

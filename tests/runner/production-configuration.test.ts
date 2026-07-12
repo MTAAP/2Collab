@@ -1,6 +1,50 @@
 import { expect, test } from "bun:test";
 import { createProductionRunnerManagement } from "../../src/runner/production.ts";
 
+test("production runner begins pairing with only the CLI bearer credential", async () => {
+  let saved = false;
+  let requestHeaders = new Headers();
+  const management = createProductionRunnerManagement({
+    baseUrl: "https://collab.test",
+    home: "/tmp/collab-test-home",
+    executable: "/tmp/collab",
+    deviceCredentials: {
+      headers: async ({ method, url }) => {
+        expect(method).toBe("POST");
+        expect(url).toBe("https://collab.test/api/v1/runners/pairing/begin");
+        return { authorization: "Bearer member-access" };
+      },
+    },
+    store: {
+      load: async () => undefined,
+      save: async () => {
+        saved = true;
+      },
+    },
+    fetch: (async (_input, init) => {
+      requestHeaders = new Headers(init?.headers);
+      return Response.json({
+        ok: true,
+        value: {
+          pairingId: "runner_pairing_1",
+          pairingSecret: "pairing-secret-with-at-least-thirty-two-bytes",
+          expiresAt: 1_800,
+        },
+      });
+    }) as typeof fetch,
+  });
+
+  expect(await management.pairBegin()).toEqual({
+    pairingId: "runner_pairing_1",
+    expiresAt: 1_800,
+    approvalUrl: "https://collab.test/runners/pairing/runner_pairing_1",
+  });
+  expect(requestHeaders.get("authorization")).toBe("Bearer member-access");
+  expect(requestHeaders.has("dpop")).toBeFalse();
+  expect(requestHeaders.has("dpop-nonce")).toBeFalse();
+  expect(saved).toBeTrue();
+});
+
 test("production runner publishes only opaque mapping and safe profile facts", async () => {
   const requests: Array<{ url: string; headers: Headers; body: unknown }> = [];
   const management = createProductionRunnerManagement({
@@ -8,7 +52,7 @@ test("production runner publishes only opaque mapping and safe profile facts", a
     home: "/tmp/collab-test-home",
     executable: "/tmp/collab",
     deviceCredentials: {
-      headers: async () => ({ authorization: "DPoP member-access", dpop: "member-proof" }),
+      headers: async () => ({ authorization: "Bearer member-access" }),
     },
     store: {
       load: async () => ({
@@ -26,7 +70,11 @@ test("production runner publishes only opaque mapping and safe profile facts", a
     },
     fetch: (async (input, init) => {
       const body = JSON.parse(String(init?.body));
-      requests.push({ url: String(input), headers: new Headers(init?.headers), body });
+      requests.push({
+        url: String(input),
+        headers: new Headers(init?.headers),
+        body,
+      });
       return Response.json({
         ok: true,
         value: String(input).endsWith("/profiles")
@@ -47,7 +95,10 @@ test("production runner publishes only opaque mapping and safe profile facts", a
     }) as typeof fetch,
   });
 
-  await management.registerMapping({ projectId: "project_1", localMappingId: "opaque_mapping_1" });
+  await management.registerMapping({
+    projectId: "project_1",
+    localMappingId: "opaque_mapping_1",
+  });
   await management.replaceMapping({
     projectId: "project_1",
     localMappingId: "opaque_mapping_2",
@@ -61,7 +112,10 @@ test("production runner publishes only opaque mapping and safe profile facts", a
     riskSummary: "Local command execution",
     fingerprint: "a".repeat(64),
   });
-  await management.registerMapping({ projectId: "project_1", localMappingId: "opaque_mapping_1" });
+  await management.registerMapping({
+    projectId: "project_1",
+    localMappingId: "opaque_mapping_1",
+  });
 
   expect(requests.map(({ url }) => url)).toEqual([
     "https://collab.test/api/v1/runners/runner_1/mappings",
@@ -70,7 +124,7 @@ test("production runner publishes only opaque mapping and safe profile facts", a
     "https://collab.test/api/v1/runners/runner_1/mappings",
   ]);
   expect(
-    requests.every(({ headers }) => headers.get("authorization") === "DPoP member-access"),
+    requests.every(({ headers }) => headers.get("authorization") === "Bearer member-access"),
   ).toBeTrue();
   const wire = JSON.stringify(requests.map(({ body }) => body));
   expect(wire).not.toContain("/tmp/");

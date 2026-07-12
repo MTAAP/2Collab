@@ -9,6 +9,7 @@ import type { Result } from "../shared/contracts/result.ts";
 import { verifyDpopProof } from "../shared/dpop.ts";
 import type { ServerEnvironment } from "../shared/environment.ts";
 import type { FoundationHttpDependencies } from "./adapters/http/app.ts";
+import { createResendEmailOtpTransport, readResendApiKeyFile } from "./adapters/email/resend.ts";
 import type { PublicAuthenticationPort } from "./adapters/http/middleware/authentication.ts";
 import type { PublicRateLimitPort } from "./adapters/http/middleware/request-limits.ts";
 import type { GitHubWebhookRouteDependencies } from "./adapters/http/routes/connectors-github.ts";
@@ -35,6 +36,8 @@ import { verifyCsrf } from "./modules/identity/csrf.ts";
 import { createDeviceAuthority } from "./modules/identity/devices.ts";
 import { createIdentityAuthority } from "./modules/identity/identity-authority.ts";
 import { createDpopVerifier, createSessionAuthority } from "./modules/identity/sessions.ts";
+import { createCollabBetterAuth } from "./modules/identity/better-auth.ts";
+import { createRegistrationPolicyService } from "./modules/identity/registration-policy.ts";
 import {
   prepareRunConfigurationSnapshot,
   resolveEffectiveRunConfiguration,
@@ -140,12 +143,19 @@ function databaseBrowserAuthentication(
     id: (prefix) => `${prefix}_${randomBytes(24).toString("base64url")}`,
   });
   const csrfByRequest = new WeakMap<Request, Uint8Array>();
-  const dpop = createDpopVerifier({ database, clock, verifyProof: verifyDpopProof });
+  const dpop = createDpopVerifier({
+    database,
+    clock,
+    verifyProof: verifyDpopProof,
+  });
   const cookie = (request: Request) => {
     const value = /(?:^|;\s*)collab_session=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
     const separator = value?.indexOf(".") ?? -1;
     return value && separator > 0
-      ? { sessionId: value.slice(0, separator), sessionProof: value.slice(separator + 1) }
+      ? {
+          sessionId: value.slice(0, separator),
+          sessionProof: value.slice(separator + 1),
+        }
       : null;
   };
   const authenticateRunnerDevice: NonNullable<
@@ -534,7 +544,10 @@ export async function createServerDependencies(
         return profile
           ? {
               ok: true as const,
-              value: { refreshedAt: clock(), profileFingerprint: profile.fingerprint },
+              value: {
+                refreshedAt: clock(),
+                profileFingerprint: profile.fingerprint,
+              },
             }
           : {
               ok: false as const,
@@ -616,8 +629,47 @@ export async function createServerDependencies(
     ? readFileSync(environment.bootstrapSecretFile, "utf8").trim()
     : undefined;
   const devices = createDeviceAuthority({ database, clock, id });
+  const registrationPolicy = createRegistrationPolicyService({
+    database,
+    clock,
+    id,
+  });
+  const configuredEmailOtp = (() => {
+    if (!environment.resendApiKeyFile || !environment.authEmailFrom) return undefined;
+    const apiKey = readResendApiKeyFile(environment.resendApiKeyFile);
+    if (!apiKey.ok) throw new Error("EMAIL_DELIVERY_CONFIGURATION_INVALID");
+    const transport = createResendEmailOtpTransport({
+      apiKey: apiKey.value,
+      from: environment.authEmailFrom,
+    });
+    return {
+      registrationPolicy,
+      transport: {
+        async send(request: Readonly<{ email: string; otp: string }>) {
+          const delivered = await transport.sendSignInOtp({
+            to: request.email,
+            otp: request.otp,
+          });
+          if (!delivered.ok) throw new Error("EMAIL_DELIVERY_FAILED");
+        },
+      },
+    };
+  })();
+  const betterAuth = !resources.foundation
+    ? createCollabBetterAuth({
+        database,
+        publicBaseUrl: environment.publicBaseUrl,
+        rpId: environment.rpId,
+        rpName: environment.rpName,
+        secret: environment.sessionSecret ?? Buffer.from(deploymentMasterKey).toString("base64url"),
+        ...(configuredEmailOtp ? { emailOtp: configuredEmailOtp } : {}),
+        clock,
+        id,
+      })
+    : undefined;
   const authentication =
     resources.foundation?.authentication ??
+    betterAuth?.authentication ??
     databaseBrowserAuthentication(database, clock, environment.publicBaseUrl, devices);
   const rateLimits = resources.foundation?.rateLimits ?? boundedRateLimits(clock);
   let boundAuthority: ExecutionAuthority | undefined;
@@ -774,7 +826,10 @@ export async function createServerDependencies(
           idempotencyKey: `workflow_preflight_${node.key}` as never,
           actor: schedulerActor,
           projectId: preset.projectId as never,
-          coordination: { kind: "EXISTING", coordinationRecordId: "workflow_preflight" as never },
+          coordination: {
+            kind: "EXISTING",
+            coordinationRecordId: "workflow_preflight" as never,
+          },
           goal,
           repository,
           execution,
@@ -1083,8 +1138,56 @@ export async function createServerDependencies(
     authentication,
     rateLimits,
     runs,
-    browserIdentity: resources.foundation ? undefined : identity,
-    deviceIdentity: resources.foundation ? undefined : devices,
+    registrationPolicy: resources.foundation
+      ? undefined
+      : {
+          configuredOrigin: environment.publicBaseUrl,
+          authentication,
+          rateLimits,
+          service: registrationPolicy,
+          emailLoginEnabled: configuredEmailOtp !== undefined,
+        },
+    browserIdentity: resources.foundation || betterAuth ? undefined : identity,
+    deviceIdentity: resources.foundation || betterAuth ? undefined : devices,
+    betterAuth: betterAuth
+      ? {
+          handle: betterAuth.handle,
+          ...(betterAuth.emailOtp
+            ? {
+                emailOtp: {
+                  database,
+                  configuredOrigin: environment.publicBaseUrl,
+                  clock,
+                  emailOtp: betterAuth.emailOtp,
+                  rateLimits,
+                },
+              }
+            : {}),
+          ...(bootstrapSecret
+            ? {
+                bootstrap: {
+                  database,
+                  configuredOrigin: environment.publicBaseUrl,
+                  bootstrapSecret,
+                  clock,
+                  id,
+                  safeEqual: betterAuth.safeEqual,
+                },
+              }
+            : {}),
+          ...(identity
+            ? {
+                invitations: {
+                  database,
+                  configuredOrigin: environment.publicBaseUrl,
+                  clock,
+                  id,
+                  exchangeInvitation: (command) => identity.exchangeInvitation(command),
+                },
+              }
+            : {}),
+        }
+      : undefined,
     runnerPairing: resources.foundation
       ? undefined
       : {
@@ -1167,9 +1270,15 @@ export async function createServerDependencies(
   return {
     ...server,
     components: {
-      foundation: { state: identity ? ("OPERATIONAL" as const) : ("NOT_CONFIGURED" as const) },
-      github: { state: resources.github ? ("OPERATIONAL" as const) : ("DISABLED" as const) },
-      outline: { state: resources.outline ? ("OPERATIONAL" as const) : ("DISABLED" as const) },
+      foundation: {
+        state: identity ? ("OPERATIONAL" as const) : ("NOT_CONFIGURED" as const),
+      },
+      github: {
+        state: resources.github ? ("OPERATIONAL" as const) : ("DISABLED" as const),
+      },
+      outline: {
+        state: resources.outline ? ("OPERATIONAL" as const) : ("DISABLED" as const),
+      },
       automation: {
         state: "OPERATIONAL" as const,
         engine: workflowEngine,

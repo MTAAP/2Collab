@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 const createdRun = {
   ok: true,
@@ -29,7 +29,7 @@ test("Foundation run composition launches through the public browser DTO", async
   await page.route("**/api/v1/runs", async (route) => {
     const request = route.request();
     expect(request.method()).toBe("POST");
-    expect(request.headers()["x-collab-csrf"]).toBe("csrf_test");
+    expect(request.headers()).not.toHaveProperty("x-collab-csrf");
     expect(request.postDataJSON()).toEqual({
       idempotencyKey: expect.any(String),
       projectId: "project_1",
@@ -45,7 +45,6 @@ test("Foundation run composition launches through the public browser DTO", async
     });
   });
   await page.goto("/runs");
-  await page.evaluate(() => sessionStorage.setItem("collab_csrf", "csrf_test"));
   await page.getByRole("button", { name: "New run" }).click();
   await page.getByRole("button", { name: "Launch run" }).click();
 
@@ -68,7 +67,6 @@ test("live state consumes only a committed public projection", async ({ page }) 
     });
   });
   await page.goto("/runs");
-  await page.evaluate(() => sessionStorage.setItem("collab_csrf", "csrf_test"));
   await page.reload();
 
   await expect(page.getByText("Committed update 1")).toBeVisible();

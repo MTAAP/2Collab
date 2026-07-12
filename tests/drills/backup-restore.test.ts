@@ -143,6 +143,25 @@ async function fixture() {
     ) VALUES ('deployment_1', 1, '${"1".repeat(64)}', 'READY', 1, 100, 100);
     INSERT INTO members(id, display_name, role, status, authority_epoch, revision, created_at)
       VALUES ('owner_1', 'Owner', 'OWNER', 'ACTIVE', 3, 1, 100);
+    INSERT INTO auth_users(id, name, email, emailVerified, createdAt, updatedAt)
+      VALUES ('auth_owner_1', 'Owner', 'auth_owner_1@identity.invalid', 0, 100000, 100000);
+    INSERT INTO auth_member_links(auth_user_id, member_id, authority_epoch_snapshot, created_at)
+      VALUES ('auth_owner_1', 'owner_1', 3, 100);
+    INSERT INTO auth_sessions(
+      id, expiresAt, token, createdAt, updatedAt, userId, purpose,
+      memberAuthorityEpoch, absoluteExpiresAt
+    ) VALUES ('auth_session_1', 999999000, 'restored-auth-session-token', 100000, 100000,
+      'auth_owner_1', 'BROWSER', 3, 999999000);
+    INSERT INTO auth_verifications(id, identifier, value, expiresAt, createdAt, updatedAt)
+      VALUES ('verification_1', 'sign-in-otp-auth_owner_1@identity.invalid', 'hash', 999999000, 100000, 100000);
+    INSERT INTO auth_email_registration_tickets(
+      id, secret_hash, normalized_email, auth_user_id, intended_member_id,
+      display_name, authorization_kind, policy_revision, state, created_at, expires_at
+    ) VALUES (
+      'email_ticket_1', X'${"77".repeat(32)}', 'auth_owner_1@identity.invalid',
+      'auth_owner_1', 'pending_member_1', 'Owner', 'ALLOWLIST', 1,
+      'AUTHORIZED', 100, 999999
+    );
     INSERT INTO sessions(
       id, member_id, proof_hash, kind, expires_at, csrf_hash,
       member_authority_epoch, revision, created_at
@@ -200,6 +219,14 @@ describe("authenticated backup and isolated restore", () => {
       backupDirectory: f.backupDir,
     });
     expect(loaded.ok && loaded.value.bytes).toEqual(key);
+    const hexEncoded = join(f.root, "secrets", "master-hex.key");
+    await writeFile(hexEncoded, Buffer.from(key).toString("hex"), { mode: 0o600 });
+    const loadedHex = await readDeploymentMasterKeyFile({
+      secretFile: hexEncoded,
+      dataDirectory: f.dataDir,
+      backupDirectory: f.backupDir,
+    });
+    expect(loadedHex.ok && loadedHex.value.bytes).toEqual(key);
     const linked = join(f.root, "linked.key");
     await symlink(valid, linked);
     expect(
@@ -229,7 +256,7 @@ describe("authenticated backup and isolated restore", () => {
     expect(result.value.manifest).toMatchObject({
       format: "2COLLAB_BACKUP_V1",
       algorithm: "AES_256_GCM_CHUNKED_V1",
-      schemaVersion: 16,
+      schemaVersion: 18,
       keyId: "master_1",
     });
     expect(result.value.manifest.chunkCount).toBeGreaterThan(0);
@@ -338,6 +365,29 @@ describe("authenticated backup and isolated restore", () => {
         )
         .get(),
     ).toEqual({ count: 0 });
+    expect(
+      database.query<{ count: number }, []>("SELECT count(*) AS count FROM auth_sessions").get(),
+    ).toEqual({ count: 0 });
+    expect(
+      database
+        .query<{ count: number }, []>("SELECT count(*) AS count FROM auth_verifications")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      database
+        .query<{ count: number }, []>(
+          "SELECT count(*) AS count FROM auth_email_registration_tickets",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      database
+        .query<{ authority_epoch: number; snapshot: number }, []>(
+          `SELECT members.authority_epoch, links.authority_epoch_snapshot AS snapshot
+           FROM members JOIN auth_member_links AS links ON links.member_id = members.id`,
+        )
+        .get(),
+    ).toEqual({ authority_epoch: 4, snapshot: 4 });
     expect(
       database
         .query<{ count: number }, []>(

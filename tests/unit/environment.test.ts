@@ -32,6 +32,21 @@ describe("readServerEnvironment", () => {
     expect(environment.outlineTokenFile).toBe("/run/secrets/outline_api_token");
   });
 
+  test("accepts only paired email OTP delivery configuration", () => {
+    const configured = readServerEnvironment({
+      RESEND_API_KEY_FILE: "/run/secrets/resend_api_key",
+      AUTH_EMAIL_FROM: "auth@example.com",
+    });
+    expect(configured.resendApiKeyFile).toBe("/run/secrets/resend_api_key");
+    expect(configured.authEmailFrom).toBe("auth@example.com");
+    expect(() => readServerEnvironment({ RESEND_API_KEY_FILE: "/tmp/key" })).toThrow(
+      "RESEND_API_KEY_FILE and AUTH_EMAIL_FROM",
+    );
+    expect(() => readServerEnvironment({ AUTH_EMAIL_FROM: "not-an-email" })).toThrow(
+      "RESEND_API_KEY_FILE and AUTH_EMAIL_FROM",
+    );
+  });
+
   test("rejects incomplete or non-HTTPS Outline configuration", () => {
     expect(() => readServerEnvironment({ OUTLINE_BASE_URL: "https://wiki.example.test/" })).toThrow(
       "configured together",

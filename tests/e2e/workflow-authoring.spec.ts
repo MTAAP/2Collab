@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 test("workflow authoring exposes a keyboard-operable synchronized outline", async ({ page }) => {
   await page.goto("/workflows/new");

@@ -28,5 +28,11 @@ test("HTTP and MCP translations consume the same GitHub command service", async 
   const second = fixture();
   const mcp = bindGitHubMutationClient(service(second));
   const mcpResult = await mcp.mutate(request);
-  expect(mcpResult).toEqual(httpResult);
+  if (mcpResult.ok && httpResult.ok) {
+    expect(mcpResult.value.observedAt).toBeGreaterThanOrEqual(httpResult.value.observedAt);
+    expect({ ...mcpResult.value, observedAt: 0 }).toEqual({
+      ...httpResult.value,
+      observedAt: 0,
+    });
+  } else expect(mcpResult).toEqual(httpResult);
 });

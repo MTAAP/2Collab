@@ -23,7 +23,7 @@ test("binds every connector identifier to exactly one provider", () => {
         "UPDATE connector_provider_bindings SET provider='GITHUB' WHERE connector_id='shared_1'",
       ),
     ).toThrow("CONNECTOR_PROVIDER_BINDING_IMMUTABLE");
-    expect(() => migrationCatalog.verifyClaimedSchema(database, 16)).not.toThrow();
+    expect(() => migrationCatalog.verifyClaimedSchema(database, 18)).not.toThrow();
   } finally {
     database.close();
   }

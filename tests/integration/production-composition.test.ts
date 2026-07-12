@@ -76,14 +76,17 @@ describe("packaged production composition", () => {
     const server = await composition(true);
     expect((await request(server, new Request("http://localhost/readyz"))).status).toBe(200);
 
-    const origin = { origin: "http://localhost:3210", "content-type": "application/json" };
+    const origin = {
+      origin: "http://localhost:3210",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    };
     const registration = await request(
       server,
-      new Request("http://localhost/api/v1/auth/passkeys/registration/begin", {
+      new Request("http://localhost/api/v1/bootstrap/auth/begin", {
         method: "POST",
         headers: origin,
         body: JSON.stringify({
-          idempotencyKey: "bootstrap_begin_1",
           bootstrapSecret: "bootstrap-secret-with-at-least-thirty-two-bytes",
           displayName: "Owner",
         }),
@@ -93,23 +96,20 @@ describe("packaged production composition", () => {
 
     const authentication = await request(
       server,
-      new Request("http://localhost/api/v1/auth/passkeys/authentication/begin", {
-        method: "POST",
-        headers: origin,
-        body: JSON.stringify({ idempotencyKey: "authentication_begin_1" }),
+      new Request("http://localhost/api/auth/passkey/generate-authenticate-options", {
+        headers: { origin: "http://localhost:3210", "sec-fetch-site": "same-origin" },
       }),
     );
     expect(authentication.status).toBe(200);
 
     const device = await request(
       server,
-      new Request("http://localhost/api/v1/device/authorization", {
+      new Request("http://localhost/api/auth/device/code", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          idempotencyKey: "device_begin_1",
-          deviceId: "cli_1",
-          senderKeyThumbprint: "sender_1",
+          client_id: "2collab-cli",
+          scope: "collab:cli",
         }),
       }),
     );

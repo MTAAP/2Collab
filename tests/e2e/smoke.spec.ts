@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 test("renders the Foundation shell at desktop and mobile widths", async ({ page }) => {
   await page.goto("/runs");

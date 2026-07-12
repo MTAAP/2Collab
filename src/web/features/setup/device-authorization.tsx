@@ -1,16 +1,39 @@
-import { useState } from "react";
-import { z } from "zod";
-import { browserJson } from "../../api-client.ts";
+import { useEffect, useState } from "react";
+import { authClient } from "../../auth-client.ts";
 
-const Approval = z.object({
-  ok: z.literal(true),
-  value: z.object({
-    approved: z.literal(true),
-  }),
-});
+export function DeviceAuthorization({ userCode }: Readonly<{ userCode: string }>) {
+  const session = authClient.useSession();
+  const [state, setState] = useState<"CLAIMING" | "READY" | "WORKING" | "APPROVED" | "FAILED">(
+    "CLAIMING",
+  );
+  const returnTo = `/device?user_code=${encodeURIComponent(userCode)}`;
 
-export function DeviceAuthorization({ deviceCodeId }: Readonly<{ deviceCodeId: string }>) {
-  const [state, setState] = useState<"READY" | "WORKING" | "APPROVED" | "FAILED">("READY");
+  async function claim(): Promise<boolean> {
+    const result = await authClient.device({ query: { user_code: userCode } });
+    if (result.error) return false;
+    if (result.data.status === "approved") {
+      setState("APPROVED");
+      return false;
+    }
+    return result.data.status === "pending";
+  }
+
+  useEffect(() => {
+    if (session.isPending) return;
+    if (!session.data) {
+      setState("READY");
+      return;
+    }
+    let active = true;
+    void authClient.device({ query: { user_code: userCode } }).then((result) => {
+      if (!active) return;
+      setState(result.error ? "FAILED" : result.data.status === "approved" ? "APPROVED" : "READY");
+    });
+    return () => {
+      active = false;
+    };
+  }, [session.data, session.isPending, userCode]);
+
   return (
     <main className="setup-page">
       <header className="setup-header">
@@ -22,9 +45,9 @@ export function DeviceAuthorization({ deviceCodeId }: Readonly<{ deviceCodeId: s
           <p className="utility">TRUSTED DEVICE</p>
           <h1>Authorize this CLI device?</h1>
           <p>Continue only if you started device enrollment on the Mac Studio.</p>
-          {!sessionStorage.getItem("collab_csrf") ? (
+          {!session.isPending && !session.data ? (
             <p>
-              <a href={`/login?returnTo=${encodeURIComponent(window.location.pathname)}`}>
+              <a href={`/login?returnTo=${encodeURIComponent(returnTo)}`}>
                 Sign in with your passkey first
               </a>
             </p>
@@ -37,27 +60,27 @@ export function DeviceAuthorization({ deviceCodeId }: Readonly<{ deviceCodeId: s
               <button
                 type="button"
                 className="primary-button"
-                disabled={state === "WORKING"}
+                disabled={state === "WORKING" || state === "CLAIMING" || !session.data}
                 onClick={async () => {
                   setState("WORKING");
                   try {
-                    await browserJson(
-                      `/api/v1/device/authorization/${encodeURIComponent(deviceCodeId)}/approve`,
-                      Approval,
-                      {
-                        method: "POST",
-                        body: JSON.stringify({
-                          idempotencyKey: `device_approve_${crypto.randomUUID().replaceAll("-", "")}`,
-                        }),
-                      },
-                    );
+                    if (!(await claim())) throw new Error("DEVICE_CLAIM_FAILED");
+                    const approval = await authClient.device.approve({
+                      userCode,
+                    });
+                    if (approval.error || !approval.data.success)
+                      throw new Error("DEVICE_AUTHORIZATION_FAILED");
                     setState("APPROVED");
                   } catch {
                     setState("FAILED");
                   }
                 }}
               >
-                {state === "FAILED" ? "Retry authorization" : "Authorize device"}
+                {state === "CLAIMING"
+                  ? "Checking device…"
+                  : state === "FAILED"
+                    ? "Retry authorization"
+                    : "Authorize device"}
               </button>
             </>
           )}

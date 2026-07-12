@@ -17,6 +17,8 @@ services:
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       DEPLOYMENT_MASTER_KEY_FILE: /run/secrets/deployment_master_key
       BOOTSTRAP_SECRET_FILE: /run/secrets/bootstrap_secret
+      RESEND_API_KEY_FILE: ${RESEND_API_KEY_FILE:-}
+      AUTH_EMAIL_FROM: ${AUTH_EMAIL_FROM:-}
     secrets:
       - source: deployment_master_key
         target: deployment_master_key

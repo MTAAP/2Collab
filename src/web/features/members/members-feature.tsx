@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { z } from "zod";
 import { browserJson } from "../../api-client.ts";
+import { RegistrationPolicyFeature } from "./registration-policy-feature.tsx";
+import { EmailOtpForm } from "../setup/email-otp-form.tsx";
 
 const InviteSchema = z.object({
   ok: z.literal(true),
@@ -8,6 +10,7 @@ const InviteSchema = z.object({
 });
 export function MembersFeature() {
   const [invite, setInvite] = useState<string>();
+  const [emailEnrolled, setEmailEnrolled] = useState(false);
   async function create(form: FormData) {
     const result = await browserJson("/api/v1/members/invitations", InviteSchema, {
       method: "POST",
@@ -67,6 +70,25 @@ export function MembersFeature() {
           </div>
         ) : null}
       </section>
+      <section className="data-panel" aria-labelledby="email-enrollment-title">
+        <header>
+          <div>
+            <h2 id="email-enrollment-title">Email sign-in</h2>
+            <small>Add a verified email as another local sign-in method.</small>
+          </div>
+        </header>
+        {emailEnrolled ? (
+          <p role="status">Email sign-in enrolled.</p>
+        ) : (
+          <EmailOtpForm
+            requestPath="/api/v1/auth/email-otp/enroll/request"
+            verifyPath="/api/v1/auth/email-otp/enroll/verify"
+            verifyLabel="Verify and enroll email"
+            onSuccess={() => setEmailEnrolled(true)}
+          />
+        )}
+      </section>
+      <RegistrationPolicyFeature />
     </>
   );
 }

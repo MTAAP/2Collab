@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 test("one runtime plans and a distinct runtime consumes the portable artifact", async ({
   page,

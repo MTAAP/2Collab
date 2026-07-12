@@ -8,7 +8,8 @@ import {
 } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readFile, realpath, rm, stat } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Result } from "../../shared/contracts/result.ts";
 import type { MigrationCatalog } from "../db/migrate.ts";
 import { inImmediateTransaction } from "../db/transaction.ts";
@@ -71,7 +72,7 @@ function pathIsWithin(parent: string, candidate: string): boolean {
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
 }
 
-/** Reads exactly 32 secret bytes from a restrictive file outside data and backup volumes. */
+/** Reads a 32-byte deployment secret in raw or canonical 64-character hex form. */
 export async function readDeploymentMasterKeyFile(
   input: Readonly<{
     secretFile: string | undefined;
@@ -102,12 +103,18 @@ export async function readDeploymentMasterKeyFile(
         metadata.dev !== linkMetadata.dev ||
         metadata.ino !== linkMetadata.ino ||
         (metadata.mode & 0o077) !== 0 ||
-        metadata.size !== 32
+        (metadata.size !== 32 && metadata.size !== 64)
       ) {
         return failure("MASTER_KEY_FILE_INVALID", "Deployment master key file is invalid.");
       }
-      const bytes = await handle.readFile();
-      if (bytes.length !== 32) {
+      const stored = await handle.readFile();
+      const bytes =
+        stored.length === 32
+          ? stored
+          : /^[a-f0-9]{64}$/.test(stored.toString("utf8"))
+            ? Buffer.from(stored.toString("utf8"), "hex")
+            : undefined;
+      if (bytes?.length !== 32) {
         return failure("MASTER_KEY_FILE_INVALID", "Deployment master key file is invalid.");
       }
       return {
@@ -473,6 +480,41 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+function databaseScratchDirectory(database: Database): string {
+  const file = database.query<{ file: string }, []>("PRAGMA database_list").get()?.file;
+  return file ? dirname(resolve(file)) : tmpdir();
+}
+
+async function verifySerializedDatabase(
+  bytes: Uint8Array,
+  migrations: MigrationCatalog,
+  schemaVersion: number,
+  scratchDirectory: string,
+): Promise<boolean> {
+  const path = join(
+    resolve(scratchDirectory),
+    `.2collab-database-verification.${crypto.randomUUID()}.sqlite`,
+  );
+  let database: Database | undefined;
+  try {
+    const handle = await open(path, "wx", 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    database = new Database(path, { readonly: true, strict: true });
+    migrations.verifyClaimedSchema(database, schemaVersion);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    database?.close();
+    await rm(path, { force: true });
+  }
+}
+
 function assertPathComponent(value: string): void {
   if (!validIdentifier(value) || basename(value) !== value) throw new Error("BACKUP_ID_INVALID");
 }
@@ -597,18 +639,16 @@ export async function createAuthenticatedBackup(
       await rm(finalPath, { force: true });
       return independentlyVerified;
     }
-    let verificationDatabase: Database | undefined;
-    try {
-      verificationDatabase = Database.deserialize(independentlyVerified.value.databaseBytes, {
-        readonly: true,
-        strict: true,
-      });
-      input.migrations.verifyClaimedSchema(verificationDatabase, manifest.schemaVersion);
-    } catch {
+    if (
+      !(await verifySerializedDatabase(
+        independentlyVerified.value.databaseBytes,
+        input.migrations,
+        manifest.schemaVersion,
+        databaseScratchDirectory(input.database),
+      ))
+    ) {
       await rm(finalPath, { force: true });
       return failure("BACKUP_INTEGRITY_FAILED", "Backup integrity verification failed.");
-    } finally {
-      verificationDatabase?.close();
     }
 
     try {
@@ -741,6 +781,7 @@ async function assessBackupUsability(
   input: Readonly<{
     row: RetentionRow;
     backupDirectory: string;
+    database: Database;
     masterKeys: ReadonlyMap<string, Uint8Array>;
     migrations: MigrationCatalog;
   }>,
@@ -770,16 +811,14 @@ async function assessBackupUsability(
   ) {
     return { kind: "UNAVAILABLE" };
   }
-  let database: Database | undefined;
-  try {
-    database = Database.deserialize(verified.value.databaseBytes, { readonly: true, strict: true });
-    input.migrations.verifyClaimedSchema(database, verified.value.manifest.schemaVersion);
-    return { kind: "USABLE" };
-  } catch {
-    return { kind: "CORRUPT", reason: "DATABASE_INVALID" };
-  } finally {
-    database?.close();
-  }
+  return (await verifySerializedDatabase(
+    verified.value.databaseBytes,
+    input.migrations,
+    verified.value.manifest.schemaVersion,
+    databaseScratchDirectory(input.database),
+  ))
+    ? { kind: "USABLE" }
+    : { kind: "CORRUPT", reason: "DATABASE_INVALID" };
 }
 
 /** Applies all bounds together and always preserves at least one verified usable backup. */
@@ -831,6 +870,7 @@ export async function enforceBackupRetention(
       const assessment = await assessBackupUsability({
         row,
         backupDirectory: input.backupDirectory,
+        database: input.database,
         masterKeys: input.masterKeys,
         migrations: input.migrations,
       });

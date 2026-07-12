@@ -1,6 +1,11 @@
 import { z } from "zod";
+import { isAbsolute } from "node:path";
 
 const PLACEHOLDER_SESSION_SECRET = "replace-with-a-random-production-secret";
+const optionalNonEmpty = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().min(1).optional(),
+);
 
 const serverEnvironmentSchema = z.object({
   BACKUP_DIR: z.string().min(1).default("./backups"),
@@ -13,8 +18,10 @@ const serverEnvironmentSchema = z.object({
   OUTLINE_TOKEN_FILE: z.string().min(1).optional(),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3210),
   PUBLIC_BASE_URL: z.string().min(1).default("http://localhost:3210"),
+  RESEND_API_KEY_FILE: optionalNonEmpty,
   RUNNER_COMPOSITION_MODULE: z.string().min(1).optional(),
   SESSION_SECRET: z.string().min(32).optional(),
+  AUTH_EMAIL_FROM: optionalNonEmpty,
   WEBAUTHN_RP_ID: z.string().min(1).default("localhost"),
   WEBAUTHN_RP_NAME: z.string().min(1).default("2Collab"),
 });
@@ -28,6 +35,8 @@ export type ServerEnvironment = {
   mode: "development" | "test" | "production";
   outlineBaseUrl?: string;
   outlineTokenFile?: string;
+  resendApiKeyFile?: string;
+  authEmailFrom?: string;
   port: number;
   publicBaseUrl: string;
   rpId: string;
@@ -109,6 +118,21 @@ export function readServerEnvironment(
       throw new Error("Invalid server environment: OUTLINE_BASE_URL must be an HTTPS origin");
   }
 
+  if (!!parsed.data.RESEND_API_KEY_FILE !== !!parsed.data.AUTH_EMAIL_FROM)
+    throw new Error(
+      "Invalid server environment: RESEND_API_KEY_FILE and AUTH_EMAIL_FROM must be configured together",
+    );
+  if (parsed.data.AUTH_EMAIL_FROM && !z.email().safeParse(parsed.data.AUTH_EMAIL_FROM).success)
+    throw new Error("Invalid server environment: AUTH_EMAIL_FROM must be one email address");
+  if (
+    parsed.data.NODE_ENV === "production" &&
+    parsed.data.RESEND_API_KEY_FILE &&
+    !isAbsolute(parsed.data.RESEND_API_KEY_FILE)
+  )
+    throw new Error(
+      "Invalid server environment: RESEND_API_KEY_FILE must be absolute in production",
+    );
+
   return {
     backupDir: parsed.data.BACKUP_DIR,
     bootstrapSecretFile: parsed.data.BOOTSTRAP_SECRET_FILE,
@@ -120,6 +144,12 @@ export function readServerEnvironment(
       ? {
           outlineBaseUrl: parsed.data.OUTLINE_BASE_URL,
           outlineTokenFile: parsed.data.OUTLINE_TOKEN_FILE,
+        }
+      : {}),
+    ...(parsed.data.RESEND_API_KEY_FILE
+      ? {
+          resendApiKeyFile: parsed.data.RESEND_API_KEY_FILE,
+          authEmailFrom: parsed.data.AUTH_EMAIL_FROM,
         }
       : {}),
     port: parsed.data.PORT,

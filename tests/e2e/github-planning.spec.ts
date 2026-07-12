@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures.ts";
 
 test("selected GitHub planning projects remain read-only projections", async ({ page }) => {
   await page.route("**/api/v1/projects/project_1/github/planning", async (route) => {

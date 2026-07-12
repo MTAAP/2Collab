@@ -19,17 +19,23 @@ import { RunsFeature } from "./features/runs/runs-feature.tsx";
 import { InvitationExchange } from "./features/setup/invitation-exchange.tsx";
 import { DeviceAuthorization } from "./features/setup/device-authorization.tsx";
 import { LoginFeature } from "./features/setup/login-feature.tsx";
+import { RecoveryFeature } from "./features/setup/recovery-feature.tsx";
 import { SetupFeature } from "./features/setup/setup-feature.tsx";
 import { OutlineFeature } from "./features/outline/index.tsx";
 import { WorkflowStudioFeature } from "./features/workflow-studio/editor.tsx";
 import { BoundedAutomationJourney } from "./features/workflows/execution.tsx";
 import { PlanningWorkflowJourney } from "./features/workflows/plan-artifact.tsx";
+import { authClient } from "./auth-client.ts";
 
 const navigation = [
   { href: "/runs", label: "Runs", icon: PlayIcon },
   { href: "/github", label: "GitHub", icon: GitBranchIcon },
   { href: "/inbox", label: "Inbox", icon: InboxIcon },
-  { href: "/command-center", label: "Command Center", icon: LayoutDashboardIcon },
+  {
+    href: "/command-center",
+    label: "Command Center",
+    icon: LayoutDashboardIcon,
+  },
   { href: "/presets", label: "Presets", icon: WorkflowIcon },
   { href: "/workflows", label: "Workflows", icon: WorkflowIcon },
   { href: "/runners", label: "Runners", icon: BotIcon },
@@ -37,7 +43,7 @@ const navigation = [
   { href: "/settings/team", label: "Team & access", icon: UsersIcon },
 ] as const;
 
-function AppShell() {
+function AppShell({ displayName }: Readonly<{ displayName: string }>) {
   const path = window.location.pathname;
   const content = path.startsWith("/settings/team") ? (
     <MembersFeature />
@@ -92,10 +98,10 @@ function AppShell() {
           Settings
         </a>
         <div className="member-chip">
-          <span>TK</span>
+          <span>{displayName.slice(0, 2).toUpperCase()}</span>
           <div>
-            <strong>Tim Kraus</strong>
-            <small>Owner</small>
+            <strong>{displayName}</strong>
+            <small>Team member</small>
           </div>
         </div>
       </aside>
@@ -104,13 +110,45 @@ function AppShell() {
   );
 }
 
+function AuthenticatedShell() {
+  const session = authClient.useSession();
+  if (session.isPending)
+    return (
+      <main className="setup-page">
+        <p>Checking session…</p>
+      </main>
+    );
+  if (!session.data) {
+    const returnTo = `${window.location.pathname}${window.location.search}`;
+    return (
+      <main className="setup-page">
+        <header className="setup-header">
+          <strong>Collab</strong>
+          <span>Sign in</span>
+        </header>
+        <div className="setup-layout">
+          <section className="setup-panel">
+            <p className="utility">TEAM ACCESS</p>
+            <h1>Authentication required</h1>
+            <a className="primary-button" href={`/login?returnTo=${encodeURIComponent(returnTo)}`}>
+              Sign in with passkey
+            </a>
+          </section>
+        </div>
+      </main>
+    );
+  }
+  return <AppShell displayName={session.data.user.name} />;
+}
+
 export function App() {
   const path = window.location.pathname;
   if (path === "/setup") return <SetupFeature />;
   if (path === "/join") return <InvitationExchange />;
   if (path === "/login") return <LoginFeature />;
-  const deviceAuthorization = /^\/device\/authorize\/([A-Za-z0-9_-]{1,128})$/.exec(path);
-  if (deviceAuthorization)
-    return <DeviceAuthorization deviceCodeId={deviceAuthorization[1] ?? ""} />;
-  return <AppShell />;
+  if (path === "/recover") return <RecoveryFeature />;
+  const userCode = new URLSearchParams(window.location.search).get("user_code");
+  if (path === "/device" && userCode && /^[A-Za-z0-9-]{1,128}$/.test(userCode))
+    return <DeviceAuthorization userCode={userCode} />;
+  return <AuthenticatedShell />;
 }

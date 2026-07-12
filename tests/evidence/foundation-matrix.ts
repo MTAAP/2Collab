@@ -19,8 +19,7 @@ export const localFoundationMatrix: readonly FoundationRequirementProof[] = Obje
         id: "EMPTY_BOOTSTRAP_ONE_OWNER",
         evidenceKind: "BROWSER_E2E",
         testPath: "tests/e2e/setup-and-members.spec.ts",
-        testName:
-          "empty deployment bootstrap registers the owner passkey without exposing session proof",
+        testName: "empty deployment bootstrap registers the owner with Better Auth and signs in",
       },
       {
         id: "RESTORE_PRESERVES_SINGLETON",
@@ -38,9 +37,9 @@ export const localFoundationMatrix: readonly FoundationRequirementProof[] = Obje
       {
         id: "IDENTITY_LIFECYCLE",
         evidenceKind: "INTEGRATION",
-        testPath: "tests/integration/identity/local-auth.test.ts",
+        testPath: "tests/integration/identity/better-auth-bootstrap.test.ts",
         testName:
-          "bootstrap is one-time, transactional, and creates an owner with a verified passkey",
+          "does not claim a deployment until the registered passkey exists and completes once",
       },
       {
         id: "IDENTITY_REPLAY",

@@ -117,6 +117,45 @@ function removeMemberTransaction(
         "UPDATE sessions SET revoked_at = ?, revision = revision + 1 WHERE member_id = ? AND revoked_at IS NULL",
       )
       .run(now, command.memberId);
+    if (tableExists(database, "auth_member_links")) {
+      if (tableExists(database, "auth_verifications")) {
+        database
+          .query(
+            `DELETE FROM auth_verifications
+             WHERE identifier IN (
+               SELECT 'sign-in-otp-' || lower(u.email) FROM auth_users u
+               JOIN auth_member_links l ON l.auth_user_id = u.id WHERE l.member_id = ?
+               UNION SELECT 'email-verification-otp-' || lower(u.email) FROM auth_users u
+               JOIN auth_member_links l ON l.auth_user_id = u.id WHERE l.member_id = ?
+               UNION SELECT 'forget-password-otp-' || lower(u.email) FROM auth_users u
+               JOIN auth_member_links l ON l.auth_user_id = u.id WHERE l.member_id = ?
+               UNION SELECT 'change-email-otp-' || lower(u.email) FROM auth_users u
+               JOIN auth_member_links l ON l.auth_user_id = u.id WHERE l.member_id = ?
+             )`,
+          )
+          .run(command.memberId, command.memberId, command.memberId, command.memberId);
+      }
+      if (tableExists(database, "auth_email_registration_tickets")) {
+        database
+          .query(
+            `DELETE FROM auth_email_registration_tickets
+             WHERE intended_member_id = ? OR auth_user_id IN (
+               SELECT auth_user_id FROM auth_member_links WHERE member_id = ?
+             )`,
+          )
+          .run(command.memberId, command.memberId);
+      }
+      database
+        .query(
+          "UPDATE auth_member_links SET revoked_at = ? WHERE member_id = ? AND revoked_at IS NULL",
+        )
+        .run(now, command.memberId);
+      database
+        .query(
+          "DELETE FROM auth_sessions WHERE userId IN (SELECT auth_user_id FROM auth_member_links WHERE member_id = ?)",
+        )
+        .run(command.memberId);
+    }
     database
       .query(
         "UPDATE device_credential_families SET revoked_at = ?, revision = revision + 1 WHERE member_id = ? AND revoked_at IS NULL",

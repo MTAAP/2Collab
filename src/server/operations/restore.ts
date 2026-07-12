@@ -5,11 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { Result } from "../../shared/contracts/result.ts";
 import type { MigrationCatalog } from "../db/migrate.ts";
 import { inImmediateTransaction } from "../db/transaction.ts";
-import {
-  authenticateAndDecryptBackup,
-  type BackupManifest,
-  type VerifiedBackup,
-} from "./backup.ts";
+import { authenticateAndDecryptBackup, type BackupManifest } from "./backup.ts";
 
 type RestoreInput = Readonly<{
   backupPath: string;
@@ -247,6 +243,22 @@ function invalidateAuthority(
     database
       .query("UPDATE members SET authority_epoch = authority_epoch + 1, revision = revision + 1")
       .run();
+    if (hasTable("auth_sessions")) database.query("DELETE FROM auth_sessions").run();
+    if (hasTable("auth_verifications")) database.query("DELETE FROM auth_verifications").run();
+    if (hasTable("auth_email_registration_tickets"))
+      database.query("DELETE FROM auth_email_registration_tickets").run();
+    if (hasTable("auth_member_links")) {
+      database
+        .query(
+          `UPDATE auth_member_links
+           SET authority_epoch_snapshot = (
+             SELECT members.authority_epoch FROM members
+             WHERE members.id = auth_member_links.member_id
+           )
+           WHERE revoked_at IS NULL`,
+        )
+        .run();
+    }
     database
       .query("UPDATE sessions SET revoked_at = coalesce(revoked_at, ?) WHERE revoked_at IS NULL")
       .run(input.now);
@@ -429,21 +441,6 @@ function invalidateAuthority(
   });
 }
 
-function verifySourceDatabase(
-  verified: VerifiedBackup,
-  migrations: MigrationCatalog,
-): Result<Database> {
-  let database: Database | undefined;
-  try {
-    database = Database.deserialize(verified.databaseBytes, { strict: true });
-    migrations.verifyClaimedSchema(database, verified.manifest.schemaVersion);
-    return { ok: true, value: database };
-  } catch {
-    database?.close();
-    return failure("BACKUP_SCHEMA_MISMATCH", "Backup schema is incompatible.");
-  }
-}
-
 export async function restoreBackup(input: RestoreInput): Promise<Result<RestoreResult>> {
   if (
     input.masterKey.length !== 32 ||
@@ -464,15 +461,19 @@ export async function restoreBackup(input: RestoreInput): Promise<Result<Restore
     if (!manifestMatchesCatalog(verified.value.manifest, input.migrations)) {
       return failure("BACKUP_SCHEMA_MISMATCH", "Backup schema is incompatible.");
     }
-    const source = verifySourceDatabase(verified.value, input.migrations);
-    if (!source.ok) return source;
-    source.value.close();
     try {
       await writeRestrictive(staging, verified.value.databaseBytes);
       let stagedDatabase: Database | undefined;
       try {
         stagedDatabase = new Database(staging, { strict: true });
-        input.migrations.verifyClaimedSchema(stagedDatabase, verified.value.manifest.schemaVersion);
+        try {
+          input.migrations.verifyClaimedSchema(
+            stagedDatabase,
+            verified.value.manifest.schemaVersion,
+          );
+        } catch {
+          throw new Error("BACKUP_SCHEMA_MISMATCH");
+        }
         input.migrations.migrateAndVerify(stagedDatabase);
         const now = input.clock();
         const restoreId = input.id("restore");
@@ -530,9 +531,11 @@ export async function restoreBackup(input: RestoreInput): Promise<Result<Restore
       } finally {
         stagedDatabase?.close();
       }
-    } catch {
+    } catch (cause) {
       await rm(staging, { force: true });
       await rm(marker, { force: true });
+      if (cause instanceof Error && cause.message === "BACKUP_SCHEMA_MISMATCH")
+        return failure("BACKUP_SCHEMA_MISMATCH", "Backup schema is incompatible.");
       return failure("RESTORE_STAGING_FAILED", "Restore staging failed.", "SAME_INPUT");
     }
   } finally {
