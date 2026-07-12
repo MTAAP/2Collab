@@ -1100,6 +1100,22 @@ export async function createServerDependencies(
             return runnerAuthentication.exchangeCredential(command);
           },
         },
+    runnerConfiguration: resources.foundation
+      ? undefined
+      : {
+          registerMapping: (command) => {
+            if (!runnerRegistry) throw new Error("RUNNER_REGISTRY_UNAVAILABLE");
+            return runnerRegistry.registerMapping(command);
+          },
+          replaceMapping: (command) => {
+            if (!runnerRegistry) throw new Error("RUNNER_REGISTRY_UNAVAILABLE");
+            return runnerRegistry.replaceMapping(command);
+          },
+          advertiseProfile: (command) => {
+            if (!runnerRegistry) throw new Error("RUNNER_REGISTRY_UNAVAILABLE");
+            return runnerRegistry.advertiseProfile(command);
+          },
+        },
     readiness: {
       ready: () =>
         boundAuthority !== undefined &&
