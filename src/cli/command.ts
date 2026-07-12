@@ -13,6 +13,7 @@ import { templateCommand } from "./commands/templates.ts";
 import { workflowCommand } from "./commands/workflows.ts";
 import type { DeviceEnrollment } from "./credentials.ts";
 import type { ProjectsApi } from "./ports/projects-api.ts";
+import type { ProductionRunnerManagement } from "../runner/production.ts";
 
 export type CliIo = {
   error: (line: string) => void;
@@ -30,6 +31,7 @@ export type CliDependencies = {
   workflowOperations?: WorkflowAuthoringOperations;
   templateOperations?: TemplateBindingOperations;
   deviceEnrollment?: DeviceEnrollment;
+  runnerManagement?: ProductionRunnerManagement;
 };
 
 const defaultIo: CliIo = {
@@ -45,6 +47,7 @@ const HELP = [
   "Commands:",
   "  doctor     Validate the local bootstrap runtime and server configuration",
   "  auth       Begin or complete OS-keychain-backed device enrollment",
+  "  runner     Pair, install, start, or inspect the local runner service",
   "  init       Link the current checkout to an existing Project",
   "  list       Show the current Project coordination view",
   "  projects   Show all locally known Projects",
@@ -108,6 +111,39 @@ export async function runCli(
       return 2;
     } catch (error) {
       io.error(error instanceof Error ? error.message : "DEVICE_ENROLLMENT_FAILED");
+      return 1;
+    }
+  }
+
+  if (command === "runner") {
+    if (!dependencies.runnerManagement) {
+      io.error("RUNNER_NOT_CONFIGURED");
+      return 3;
+    }
+    try {
+      const [action, phase] = commandArgs;
+      let result: unknown;
+      if (action === "pair" && phase === "begin" && commandArgs.length === 2)
+        result = await dependencies.runnerManagement.pairBegin();
+      else if (action === "pair" && phase === "complete" && commandArgs.length === 2)
+        result = await dependencies.runnerManagement.pairComplete();
+      else if (action === "install" && commandArgs.length === 1)
+        result = await dependencies.runnerManagement.install();
+      else if (action === "start" && commandArgs.length === 1)
+        result = await dependencies.runnerManagement.start();
+      else if (action === "daemon" && commandArgs.length === 1) {
+        result = await dependencies.runnerManagement.start();
+      } else if (action === "status" && commandArgs.length === 1)
+        result = await dependencies.runnerManagement.status();
+      else {
+        io.error("RUNNER_ARGUMENTS_INVALID");
+        return 2;
+      }
+      io.log(JSON.stringify(result));
+      if (action === "daemon") await new Promise(() => undefined);
+      return 0;
+    } catch (error) {
+      io.error(error instanceof Error ? error.message : "RUNNER_OPERATION_FAILED");
       return 1;
     }
   }

@@ -13,6 +13,7 @@ import {
 import type { CliDependencies } from "./command.ts";
 import { startStdioMcpBridge } from "./commands/mcp.ts";
 import { createDeviceCredentialProvider, createDeviceEnrollment } from "./credentials.ts";
+import { createProductionRunnerManagement } from "../runner/production.ts";
 
 export type CliResources = Readonly<{
   cwd?: string;
@@ -65,5 +66,15 @@ export function createCliDependencies(
     deviceEnrollment: baseUrl.success
       ? createDeviceEnrollment(baseUrl.data, resources.fetch)
       : undefined,
+    runnerManagement:
+      baseUrl.success && credentials && home
+        ? createProductionRunnerManagement({
+            baseUrl: baseUrl.data,
+            home,
+            executable: process.execPath,
+            deviceCredentials: credentials,
+            fetch: resources.fetch,
+          })
+        : undefined,
   };
 }

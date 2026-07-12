@@ -139,6 +139,40 @@ function databaseBrowserAuthentication(
       ? { sessionId: value.slice(0, separator), sessionProof: value.slice(separator + 1) }
       : null;
   };
+  const authenticateRunnerDevice: NonNullable<
+    PublicAuthenticationPort["authenticateRunnerDevice"]
+  > = async (request) => {
+    const authorization = request.headers.get("authorization") ?? "";
+    const senderKeyThumbprint = request.headers.get("dpop-key-thumbprint") ?? "";
+    const proof = request.headers.get("dpop") ?? "";
+    const nonce = request.headers.get("dpop-nonce") ?? "";
+    if (!devices || !authorization.startsWith("DPoP ") || proof.length < 1 || nonce.length < 1)
+      return {
+        ok: false,
+        error: {
+          code: "DEVICE_AUTHENTICATION_REQUIRED",
+          message: "Device authentication is required.",
+          retry: "NEVER",
+        },
+      };
+    const verified = await devices.verifyAccess({
+      accessToken: authorization.slice(5),
+      senderKeyThumbprint,
+    });
+    if (!verified.ok) return verified;
+    const accessTokenHash = new Bun.CryptoHasher("sha256")
+      .update(authorization.slice(5))
+      .digest("hex");
+    const proofResult = await dpop.verify({
+      proof,
+      method: request.method,
+      uri: request.url,
+      nonce,
+      senderKeyThumbprint,
+      accessTokenHash,
+    });
+    return proofResult.ok ? verified : proofResult;
+  };
   return {
     async authenticateBrowser(request) {
       const credential = cookie(request);
@@ -165,46 +199,19 @@ function databaseBrowserAuthentication(
       };
     },
     async authenticateDevice(request) {
-      const authorization = request.headers.get("authorization") ?? "";
-      const senderKeyThumbprint = request.headers.get("dpop-key-thumbprint") ?? "";
-      const proof = request.headers.get("dpop") ?? "";
-      const nonce = request.headers.get("dpop-nonce") ?? "";
-      if (!devices || !authorization.startsWith("DPoP ") || proof.length < 1 || nonce.length < 1)
-        return {
-          ok: false,
-          error: {
-            code: "DEVICE_AUTHENTICATION_REQUIRED",
-            message: "Device authentication is required.",
-            retry: "NEVER",
-          },
-        };
-      const verified = await devices.verifyAccess({
-        accessToken: authorization.slice(5),
-        senderKeyThumbprint,
-      });
+      const verified = await authenticateRunnerDevice(request);
       if (!verified.ok) return verified;
-      const accessToken = authorization.slice(5);
-      const accessTokenHash = new Bun.CryptoHasher("sha256").update(accessToken).digest("hex");
-      const dpopVerified = await dpop.verify({
-        proof,
-        method: request.method,
-        uri: request.url,
-        nonce,
-        senderKeyThumbprint,
-        accessTokenHash,
-      });
-      return dpopVerified.ok
-        ? {
-            ok: true,
-            value: {
-              kind: "MEMBER" as const,
-              memberId: verified.value.memberId as never,
-              sessionId: verified.value.deviceFamilyId as never,
-              sessionProof: proof,
-            },
-          }
-        : dpopVerified;
+      return {
+        ok: true,
+        value: {
+          kind: "MEMBER" as const,
+          memberId: verified.value.memberId as never,
+          sessionId: verified.value.deviceFamilyId as never,
+          sessionProof: request.headers.get("dpop") ?? "",
+        },
+      };
     },
+    authenticateRunnerDevice,
     verifyBrowserMutation(request) {
       const csrfHash = csrfByRequest.get(request);
       return (
@@ -1056,6 +1063,12 @@ export async function createServerDependencies(
           : configuration;
       },
     });
+  let runnerRegistry:
+    | Awaited<ReturnType<typeof createProductionServer>>["runnerRegistry"]
+    | undefined;
+  let runnerAuthentication:
+    | Awaited<ReturnType<typeof createProductionServer>>["runnerAuthentication"]
+    | undefined;
   const dependencies: FoundationHttpDependencies = {
     configuredOrigin,
     authentication,
@@ -1063,6 +1076,30 @@ export async function createServerDependencies(
     runs,
     browserIdentity: resources.foundation ? undefined : identity,
     deviceIdentity: resources.foundation ? undefined : devices,
+    runnerPairing: resources.foundation
+      ? undefined
+      : {
+          beginPairing: (command) => {
+            if (!runnerRegistry) throw new Error("RUNNER_REGISTRY_UNAVAILABLE");
+            return runnerRegistry.beginPairing(command);
+          },
+          confirmPairing: (command) => {
+            if (!runnerRegistry) throw new Error("RUNNER_REGISTRY_UNAVAILABLE");
+            return runnerRegistry.confirmPairing(command);
+          },
+          consumePairing: (command) => {
+            if (!runnerRegistry) throw new Error("RUNNER_REGISTRY_UNAVAILABLE");
+            return runnerRegistry.consumePairing(command);
+          },
+        },
+    runnerAuthentication: resources.foundation
+      ? undefined
+      : {
+          exchangeCredential: (command) => {
+            if (!runnerAuthentication) throw new Error("RUNNER_AUTHENTICATION_UNAVAILABLE");
+            return runnerAuthentication.exchangeCredential(command);
+          },
+        },
     readiness: {
       ready: () =>
         boundAuthority !== undefined &&
@@ -1097,6 +1134,8 @@ export async function createServerDependencies(
     database,
     infrastructure: runnerInfrastructure,
   });
+  runnerRegistry = server.runnerRegistry;
+  runnerAuthentication = server.runnerAuthentication;
   boundAuthority = server.authority;
   await resources.startup?.();
   if (!resources.automation) await workflowScheduler.tick();

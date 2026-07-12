@@ -12,6 +12,7 @@ import { createDeviceAuthRoutes } from "./routes/device-auth.ts";
 import { createOutlineDocumentRoutes } from "./routes/outline-documents.ts";
 import { createOutlineSearchRoutes } from "./routes/outline-search.ts";
 import { createRunRoutes } from "./routes/runs.ts";
+import { createRunnerPairingRoutes } from "./routes/runner-pairing.ts";
 import { foundationSecurityHeaders } from "./security-headers.ts";
 
 export type FoundationHttpDependencies = Readonly<{
@@ -21,6 +22,8 @@ export type FoundationHttpDependencies = Readonly<{
   runs: PublicRunOperations;
   browserIdentity?: Parameters<typeof createBrowserAuthRoutes>[0]["identity"];
   deviceIdentity?: Parameters<typeof createDeviceAuthRoutes>[0]["authority"];
+  runnerPairing?: Parameters<typeof createRunnerPairingRoutes>[0]["registry"];
+  runnerAuthentication?: Parameters<typeof createRunnerPairingRoutes>[0]["runnerAuthentication"];
   mcp?: (request: Request) => Promise<Response>;
   readiness?: Readonly<{ ready: () => boolean }>;
   outline?: Readonly<{
@@ -53,6 +56,16 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
       createDeviceAuthRoutes({
         authority: dependencies.deviceIdentity,
         authentication: dependencies.authentication,
+      }),
+    );
+  }
+  if (dependencies.runnerPairing) {
+    app.route(
+      "/api/v1/runners/pairing",
+      createRunnerPairingRoutes({
+        registry: dependencies.runnerPairing,
+        authentication: dependencies.authentication,
+        runnerAuthentication: dependencies.runnerAuthentication,
       }),
     );
   }
