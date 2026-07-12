@@ -19,10 +19,17 @@ type DispatchRow = Readonly<{
   runner_id: string;
   run_id: string;
   attempt_id: string;
+  project_id: string;
+  repository_id: string;
+  run_revision: number;
+  attempt_revision: number;
+  worktree_identity: string;
   goal: string;
   repository_mode: "MUTATING" | "INSPECT_ONLY";
   repository_assurance: "ADVISORY" | "ENFORCED";
   base_commit: string;
+  base_branch: string;
+  intended_branch: string | null;
   mapping_revision: number;
   profile_version_id: string;
   profile_fingerprint: string;
@@ -70,8 +77,11 @@ export function createDurableRunnerDispatch(
       const row = input.database
         .query<DispatchRow, [string]>(
           `SELECT o.id AS outbox_id, o.semantic_digest, o.expires_at, o.runner_id,
-                  r.id AS run_id, a.id AS attempt_id, r.goal, r.repository_mode,
-                  r.repository_assurance, r.base_commit, a.mapping_revision,
+                  r.id AS run_id, a.id AS attempt_id, r.project_id, r.repository_id,
+                  r.revision AS run_revision, a.revision AS attempt_revision,
+                  r.worktree_identity, r.goal, r.repository_mode,
+                  r.repository_assurance, r.base_commit, r.base_branch, r.intended_branch,
+                  a.mapping_revision,
                   a.profile_version_id, a.profile_fingerprint, a.host, a.interaction,
                   policy.deadline_at, envelope.id AS envelope_id, envelope.recipe_id,
                   envelope.recipe_version, recipe.recipe_digest, envelope.envelope_digest,
@@ -123,6 +133,11 @@ export function createDurableRunnerDispatch(
         semanticDigest: row.semantic_digest,
         runId: row.run_id,
         attemptId: row.attempt_id,
+        projectId: row.project_id,
+        repositoryId: row.repository_id,
+        runRevision: row.run_revision,
+        attemptRevision: row.attempt_revision,
+        worktreeIdentity: row.worktree_identity,
         dispatchPermit: permit,
         goal: row.goal,
         instructions: {
@@ -146,6 +161,8 @@ export function createDurableRunnerDispatch(
         repositoryMode: row.repository_mode,
         repositoryAssurance: row.repository_assurance,
         baseRevision: row.base_commit,
+        baseBranch: row.base_branch,
+        ...(row.intended_branch === null ? {} : { intendedBranch: row.intended_branch }),
         host: row.host,
         interaction: row.interaction,
         profileVersionId: row.profile_version_id,

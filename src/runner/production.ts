@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, lstat, mkdir, realpath, rename, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import {
   createRunnerCryptography,
   type RunnerKeyPair,
@@ -13,6 +13,11 @@ import {
 } from "./credentials/runner-store.ts";
 import { createSqliteRunnerOutboundStore } from "./transport/sqlite-outbound-store.ts";
 import { createRunnerWssClient } from "./transport/wss-client.ts";
+import { createLocalRunnerConfiguration } from "./local-configuration.ts";
+import { createProductionRunnerExecution } from "./production-composition.ts";
+import { createLocalProfileRegistry, fingerprintLocalProfile } from "./profiles.ts";
+import { remoteIdentityFromUrl } from "./repository/publish.ts";
+import { observeRepositoryBase } from "./repository/base-observation.ts";
 
 type Store = ReturnType<typeof createRunnerCredentialStore>;
 type DeviceCredentialProvider = Readonly<{
@@ -88,7 +93,11 @@ export function createProductionRunnerManagement(
     async pairBegin() {
       const keyPair = await cryptography.generateKeyPair();
       const keyId = `runner_key_${randomUUID().replaceAll("-", "")}`;
-      const value = await post<{ pairingId: string; pairingSecret: string; expiresAt: number }>(
+      const value = await post<{
+        pairingId: string;
+        pairingSecret: string;
+        expiresAt: number;
+      }>(
         "/api/v1/runners/pairing/begin",
         { idempotencyKey: `runner_pair_${randomUUID().replaceAll("-", "")}` },
         true,
@@ -112,20 +121,23 @@ export function createProductionRunnerManagement(
       const pending = await requireStored();
       if (!pending.pendingPairingSecret || !pending.pendingPairingId)
         throw new Error("RUNNER_PAIRING_NOT_PENDING");
-      const value = await post<{ runnerId: string; runnerEpoch: number; runnerCredential: string }>(
-        "/api/v1/runners/pairing/consume",
-        {
-          idempotencyKey: `runner_consume_${randomUUID().replaceAll("-", "")}`,
-          pairingSecret: pending.pendingPairingSecret,
-          keyId: pending.keyId,
-          keyProof: proof(pending.keyPair, pending.keyId),
-        },
-      );
+      const value = await post<{
+        runnerId: string;
+        runnerEpoch: number;
+        ownerMemberId: string;
+        runnerCredential: string;
+      }>("/api/v1/runners/pairing/consume", {
+        idempotencyKey: `runner_consume_${randomUUID().replaceAll("-", "")}`,
+        pairingSecret: pending.pendingPairingSecret,
+        keyId: pending.keyId,
+        keyProof: proof(pending.keyPair, pending.keyId),
+      });
       await store.save(origin, {
         keyPair: pending.keyPair,
         keyId: pending.keyId,
         runnerId: value.runnerId,
         runnerEpoch: value.runnerEpoch,
+        ownerMemberId: value.ownerMemberId,
         runnerCredential: value.runnerCredential,
       });
       return { paired: true as const, runnerId: value.runnerId };
@@ -149,14 +161,20 @@ export function createProductionRunnerManagement(
     async install() {
       const current = await management.status();
       if (current.state === "UNPAIRED")
-        return { state: "CONFIRMATION_REQUIRED" as const, ...(await management.pairBegin()) };
+        return {
+          state: "CONFIRMATION_REQUIRED" as const,
+          ...(await management.pairBegin()),
+        };
       if (current.state === "PAIRING") await management.pairComplete();
       const directory = join(input.home, "Library", "LaunchAgents");
       const target = join(directory, "dev.2collab.runner.plist");
       const temporary = `${target}.${process.pid}.tmp`;
-      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>dev.2collab.runner</string><key>ProgramArguments</key><array><string>${input.executable.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</string><string>runner</string><string>daemon</string></array><key>EnvironmentVariables</key><dict><key>COLLAB_BASE_URL</key><string>${origin.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${join(input.home, ".collab", "runner.log")}</string><key>StandardErrorPath</key><string>${join(input.home, ".collab", "runner.error.log")}</string></dict></plist>\n`;
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>dev.2collab.runner</string><key>ProgramArguments</key><array><string>${input.executable.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</string><string>runner</string><string>daemon</string></array><key>EnvironmentVariables</key><dict><key>COLLAB_BASE_URL</key><string>${origin.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</string><key>PATH</key><string>${(Bun.env.PATH ?? "/usr/bin:/bin").replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${join(input.home, ".collab", "runner.log")}</string><key>StandardErrorPath</key><string>${join(input.home, ".collab", "runner.error.log")}</string></dict></plist>\n`;
       await mkdir(directory, { recursive: true, mode: 0o700 });
-      await mkdir(join(input.home, ".collab"), { recursive: true, mode: 0o700 });
+      await mkdir(join(input.home, ".collab"), {
+        recursive: true,
+        mode: 0o700,
+      });
       await writeFile(temporary, xml, { mode: 0o600, flag: "wx" });
       await rename(temporary, target);
       await chmod(target, 0o600);
@@ -172,16 +190,120 @@ export function createProductionRunnerManagement(
       if (code !== 0) throw new Error("RUNNER_SERVICE_INSTALL_FAILED");
       return { state: "INSTALLED" as const, label: "dev.2collab.runner" };
     },
+    async configureProject(
+      configuration: Readonly<{
+        projectId: string;
+        repositoryId: string;
+        mappingRevision: number;
+        checkout: string;
+        baseBranch: string;
+        remoteName?: string;
+        remoteRef?: string;
+      }>,
+    ) {
+      const checkout = await realpath(configuration.checkout);
+      const metadata = await lstat(checkout);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink())
+        throw new Error("RUNNER_PROJECT_MAPPING_INVALID");
+      const remoteName = configuration.remoteName ?? "origin";
+      const child = Bun.spawn(["git", "-C", checkout, "remote", "get-url", remoteName], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      const [exitCode, url] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+      const remoteUrl = url.trim();
+      if (exitCode !== 0 || !remoteUrl || remoteUrl.includes("\n"))
+        throw new Error("RUNNER_PROJECT_REMOTE_INVALID");
+      return createLocalRunnerConfiguration(
+        join(input.home, ".collab", "runner-config.json"),
+      ).saveProject({
+        projectId: configuration.projectId,
+        repositoryId: configuration.repositoryId,
+        mappingRevision: configuration.mappingRevision,
+        checkout,
+        baseBranch: configuration.baseBranch,
+        remoteName,
+        remoteIdentity: remoteIdentityFromUrl(remoteUrl),
+        remoteRef: configuration.remoteRef ?? `refs/heads/${configuration.baseBranch}`,
+      });
+    },
+    async installDefaultProfile(
+      configuration: Readonly<{
+        runtime: "CODEX" | "CLAUDE";
+        profileVersionId: string;
+        executable?: string;
+      }>,
+    ) {
+      const executable =
+        configuration.executable ??
+        Bun.which(configuration.runtime === "CODEX" ? "codex" : "claude");
+      if (!executable) throw new Error("RUNNER_PROFILE_EXECUTABLE_NOT_FOUND");
+      const canonicalExecutable = await realpath(executable);
+      if (
+        basename(canonicalExecutable) !== (configuration.runtime === "CODEX" ? "codex" : "claude")
+      )
+        throw new Error("RUNNER_PROFILE_EXECUTABLE_INVALID");
+      const draft = {
+        adapter: configuration.runtime,
+        executable: canonicalExecutable,
+        fixedArguments: configuration.runtime === "CODEX" ? ["exec", "-"] : ["-p"],
+        promptTransport: {
+          headless: "STDIN" as const,
+          interactive: "TERMINAL_INPUT" as const,
+        },
+        supportedInteractions: ["HEADLESS" as const],
+      };
+      const database = openRunnerDatabase(join(input.home, ".collab", "runner.db"));
+      try {
+        const profile = {
+          ...draft,
+          fingerprint: fingerprintLocalProfile(draft),
+        };
+        const saved = createLocalProfileRegistry(database, () =>
+          Math.floor(Date.now() / 1_000),
+        ).publish(configuration.profileVersionId, configuration.profileVersionId, 1, profile);
+        if (!saved.ok) throw new Error(saved.error.code);
+        return saved.value;
+      } finally {
+        database.close();
+      }
+    },
     async start() {
       const credential = await requireStored();
-      if (!credential.runnerCredential || !credential.runnerId)
+      if (!credential.runnerCredential || !credential.runnerId || !credential.ownerMemberId)
         throw new Error("RUNNER_PAIRING_REQUIRED");
       const database = openRunnerDatabase(join(input.home, ".collab", "runner.db"));
       const httpsEndpoint = new URL("/runner/v1", origin).toString();
       const wssEndpoint = new URL(httpsEndpoint);
       wssEndpoint.protocol = "wss:";
       let heartbeat: ReturnType<typeof setInterval> | undefined;
-      const client = createRunnerWssClient({
+      const authority = new Map<string, (result: Result<Readonly<{ consumed: true }>>) => void>();
+      let execution: ReturnType<typeof createProductionRunnerExecution>;
+      const localConfiguration = createLocalRunnerConfiguration(
+        join(input.home, ".collab", "runner-config.json"),
+      );
+      let client: ReturnType<typeof createRunnerWssClient>;
+      const sendHeartbeat = async () => {
+        const repositoryObservations = (
+          await Promise.all(
+            localConfiguration.listProjects().map(async (mapping) => {
+              try {
+                return await observeRepositoryBase({
+                  projectId: mapping.projectId,
+                  mappingRevision: mapping.mappingRevision,
+                  repositoryRoot: mapping.checkout,
+                  baseBranch: mapping.baseBranch,
+                });
+              } catch {
+                return undefined;
+              }
+            }),
+          )
+        ).filter((value) => value !== undefined);
+        client.send({ kind: "HEARTBEAT", repositoryObservations });
+      };
+      client = createRunnerWssClient({
         endpoint: wssEndpoint.toString(),
         supportedRanges: [{ major: 1, minimumMinor: 0, maximumMinor: 0 }],
         outboundStore: createSqliteRunnerOutboundStore(database),
@@ -207,17 +329,95 @@ export function createProductionRunnerManagement(
         },
         onEnvelope: async (envelope) => {
           if (envelope.body.kind === "HEARTBEAT_ACK" && !heartbeat)
-            heartbeat = setInterval(
-              () => client.send({ kind: "HEARTBEAT", repositoryObservations: [] }),
-              10_000,
-            );
-          // Delivery is deliberately not acknowledged until the local execution composition starts it.
+            heartbeat = setInterval(() => void sendHeartbeat(), 10_000);
+          if (envelope.body.kind === "AUTHORITY_RESPONSE") {
+            const resolve = authority.get(envelope.body.requestId);
+            if (resolve) {
+              authority.delete(envelope.body.requestId);
+              resolve(
+                envelope.body.result.kind === "CONSUME_PERMIT"
+                  ? { ok: true, value: { consumed: true } }
+                  : {
+                      ok: false,
+                      error: {
+                        code:
+                          envelope.body.result.kind === "ERROR"
+                            ? envelope.body.result.code
+                            : "PERMIT_INVALID",
+                        message: "Dispatch permit was rejected.",
+                        retry: "NEVER",
+                      },
+                    },
+              );
+            }
+          }
+          if (envelope.body.kind === "LAUNCH_ATTEMPT") {
+            const started = await execution.launch(envelope.body);
+            if (started.ok)
+              client.send({
+                kind: "OPERATION_ACKNOWLEDGEMENT",
+                eventId: `event_${randomUUID().replaceAll("-", "")}`,
+                deliveryId: envelope.body.deliveryId,
+                semanticDigest: envelope.body.semanticDigest,
+              });
+          }
+          if (envelope.body.kind === "CANCEL_ATTEMPT") {
+            const cancelled = await execution.cancel(envelope.body.attemptId, envelope.body.reason);
+            if (cancelled.ok && cancelled.value.requested)
+              client.send({
+                kind: "OPERATION_ACKNOWLEDGEMENT",
+                eventId: `event_${randomUUID().replaceAll("-", "")}`,
+                deliveryId: envelope.body.deliveryId,
+                semanticDigest: envelope.body.semanticDigest,
+              });
+          }
         },
+      });
+      execution = createProductionRunnerExecution({
+        database,
+        configuration: localConfiguration,
+        managedRoot: join(input.home, ".collab", "worktrees"),
+        runnerId: credential.runnerId,
+        ownerMemberId: credential.ownerMemberId,
+        home: input.home,
+        path: Bun.env.PATH ?? "/usr/bin:/bin",
+        send: (body) => client.send(body),
+        consumePermit: ({ permit }) =>
+          new Promise((resolve) => {
+            const requestId = `request_${randomUUID().replaceAll("-", "")}`;
+            const eventId = `event_${randomUUID().replaceAll("-", "")}`;
+            const timeout = setTimeout(() => {
+              authority.delete(requestId);
+              resolve({
+                ok: false,
+                error: {
+                  code: "PERMIT_TIMEOUT",
+                  message: "Dispatch permit timed out.",
+                  retry: "REFRESH",
+                },
+              });
+            }, 10_000);
+            authority.set(requestId, (result) => {
+              clearTimeout(timeout);
+              resolve(result);
+            });
+            const sent = client.send({
+              kind: "CONSUME_DISPATCH_PERMIT",
+              eventId,
+              requestId,
+              payload: { permit },
+            });
+            if (!sent.ok) {
+              clearTimeout(timeout);
+              authority.delete(requestId);
+              resolve(sent);
+            }
+          }),
       });
       await client.start();
       const initial = setInterval(() => {
         if (client.state === "ACTIVE") {
-          client.send({ kind: "HEARTBEAT", repositoryObservations: [] });
+          void sendHeartbeat();
           clearInterval(initial);
         }
       }, 100);

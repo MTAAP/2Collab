@@ -15,6 +15,7 @@ import { CommitShaSchema, IdentifierSchema, InstantSchema, Sha256Schema } from "
 import { EffectiveInstructionEnvelopeSchema } from "./presets.ts";
 import { RetryDispositionSchema } from "./result.ts";
 import { AuthoritySessionViewSchema } from "./runs.ts";
+import { GitRefSchema } from "./runners.ts";
 
 export const RunnerOperationSchema = z.discriminatedUnion("kind", [
   z
@@ -35,7 +36,10 @@ export const RunnerOperationSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z
-    .object({ kind: z.literal("CANCEL_GATE_EVALUATION"), gateEvaluationId: IdentifierSchema })
+    .object({
+      kind: z.literal("CANCEL_GATE_EVALUATION"),
+      gateEvaluationId: IdentifierSchema,
+    })
     .strict(),
 ]);
 
@@ -210,7 +214,12 @@ export const RunnerMessageBodySchema = z.discriminatedUnion("kind", [
       kind: z.literal("HEADLESS_OUTPUT_CHUNK"),
       target: z.discriminatedUnion("kind", [
         z.object({ kind: z.literal("ATTEMPT"), attemptId: IdentifierSchema }).strict(),
-        z.object({ kind: z.literal("GATE"), gateEvaluationId: IdentifierSchema }).strict(),
+        z
+          .object({
+            kind: z.literal("GATE"),
+            gateEvaluationId: IdentifierSchema,
+          })
+          .strict(),
       ]),
       stream: z.enum(["STDOUT", "STDERR"]),
       sequence: z.number().int().nonnegative(),
@@ -229,6 +238,11 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
       semanticDigest: Sha256Schema,
       runId: IdentifierSchema,
       attemptId: IdentifierSchema,
+      projectId: IdentifierSchema.optional(),
+      repositoryId: IdentifierSchema.optional(),
+      runRevision: z.number().int().positive().optional(),
+      attemptRevision: z.number().int().positive().optional(),
+      worktreeIdentity: IdentifierSchema.optional(),
       dispatchPermit: z.string().min(32).max(8_192),
       goal: z.string().min(1).max(16_384),
       instructions: EffectiveInstructionEnvelopeSchema,
@@ -237,6 +251,8 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
       repositoryMode: z.enum(["INSPECT_ONLY", "MUTATING"]),
       repositoryAssurance: z.enum(["ADVISORY", "ENFORCED"]),
       baseRevision: CommitShaSchema,
+      baseBranch: GitRefSchema.optional(),
+      intendedBranch: GitRefSchema.optional(),
       host: z.enum(["NATIVE", "ORCA"]),
       interaction: z.enum(["HEADLESS", "INTERACTIVE"]),
       profileVersionId: IdentifierSchema,
@@ -279,7 +295,10 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
       requestId: IdentifierSchema,
       result: z.discriminatedUnion("kind", [
         z
-          .object({ kind: z.literal("CONSUME_PERMIT"), session: AuthoritySessionViewSchema })
+          .object({
+            kind: z.literal("CONSUME_PERMIT"),
+            session: AuthoritySessionViewSchema,
+          })
           .strict(),
         z
           .object({
@@ -296,7 +315,10 @@ export const ServerMessageBodySchema = z.discriminatedUnion("kind", [
           })
           .strict(),
         z
-          .object({ kind: z.literal("RELEASE_AUTHORITY_SESSION"), released: z.literal(true) })
+          .object({
+            kind: z.literal("RELEASE_AUTHORITY_SESSION"),
+            released: z.literal(true),
+          })
           .strict(),
         z
           .object({

@@ -128,6 +128,29 @@ export function createLocalProcessRegistry(
       }
     },
 
+    recordExited(attemptId: string, exitCode: number): Result<void> {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(attemptId) ||
+        !Number.isSafeInteger(exitCode) ||
+        exitCode < 0 ||
+        exitCode > 255
+      )
+        return failure("PROCESS_DISPOSITION_INVALID", "Process disposition is invalid.");
+      try {
+        const changed = database
+          .query(
+            `UPDATE local_processes SET state = 'EXITED', last_disposition = ?, updated_at = ?
+             WHERE attempt_id = ? AND state = 'STARTED'`,
+          )
+          .run(`EXIT_CODE_${exitCode}`, clock(), attemptId);
+        return changed.changes === 1
+          ? { ok: true, value: undefined }
+          : failure("PROCESS_STATE_CONFLICT", "Local process state changed.");
+      } catch {
+        return failure("PROCESS_STATE_FAILED", "Local process state failed.");
+      }
+    },
+
     inspect(attemptId: string): Result<
       Readonly<{
         state: "RESERVED" | "STARTING" | "STARTED" | "FAILED_TO_START" | "EXITED" | "UNKNOWN";

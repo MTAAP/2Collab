@@ -31,6 +31,8 @@ function sourceLayer(path: string): Layer {
     path === "src/server/app.ts" ||
     path === "src/server/dependencies.ts" ||
     path === "src/server/github-production-composition.ts" ||
+    path === "src/runner/production.ts" ||
+    path === "src/runner/production-composition.ts" ||
     path === "src/server/index.ts"
   ) {
     return "ENTRYPOINT";
@@ -38,7 +40,7 @@ function sourceLayer(path: string): Layer {
   return "MODULE";
 }
 
-function entrypointFamily(path: string): "CLI" | "WEB" | "SERVER" | undefined {
+function entrypointFamily(path: string): "CLI" | "WEB" | "SERVER" | "RUNNER" | undefined {
   if (path.startsWith("src/cli/")) return "CLI";
   if (path.startsWith("src/web/")) return "WEB";
   if (
@@ -49,6 +51,8 @@ function entrypointFamily(path: string): "CLI" | "WEB" | "SERVER" | undefined {
   ) {
     return "SERVER";
   }
+  if (path === "src/runner/production.ts" || path === "src/runner/production-composition.ts")
+    return "RUNNER";
   return undefined;
 }
 
@@ -96,7 +100,11 @@ export function validateImportEdge(importer: string, specifier: string): ImportD
     return { allowed: false, importer, target, reason: "ADAPTER_TO_ENTRYPOINT" };
   }
   if (source === "ENTRYPOINT" && destination === "ENTRYPOINT") {
-    const allowed = entrypointFamily(importer) === entrypointFamily(target);
+    const sourceFamily = entrypointFamily(importer);
+    const destinationFamily = entrypointFamily(target);
+    const allowed =
+      sourceFamily === destinationFamily ||
+      (sourceFamily === "CLI" && destinationFamily === "RUNNER");
     return { allowed, importer, target, reason: allowed ? undefined : "ENTRYPOINT_TO_ENTRYPOINT" };
   }
   if (ranks[destination] > ranks[source]) {

@@ -5,6 +5,7 @@ export type StoredRunnerCredential = Readonly<{
   keyId: string;
   runnerId?: string;
   runnerEpoch?: number;
+  ownerMemberId?: string;
   runnerCredential?: string;
   pendingPairingSecret?: string;
   pendingPairingId?: string;
@@ -17,7 +18,10 @@ async function security(arguments_: readonly string[]) {
     stdout: "pipe",
     stderr: "ignore",
   });
-  return { exitCode: await child.exited, stdout: await new Response(child.stdout).text() };
+  return {
+    exitCode: await child.exited,
+    stdout: await new Response(child.stdout).text(),
+  };
 }
 
 export function createRunnerCredentialStore() {
