@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { runCli, type CliIo } from "../../src/cli/command.ts";
+import { type CliIo, runCli } from "../../src/cli/command.ts";
 
 function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -53,5 +53,49 @@ describe("collab CLI", () => {
       "Unknown command: launch",
       "Run 'collab --help' to list bootstrap commands.",
     ]);
+  });
+
+  test("routes two-step RFC 8628 enrollment through the OS credential seam", async () => {
+    const output: string[] = [];
+    const base = {
+      environment: {},
+      runtimeVersion: "1.3.10",
+      deviceEnrollment: {
+        begin: async () => ({
+          userCode: "ABCD-EFGH",
+          approvalUrl: "https://collab.example/device?user_code=ABCDEFGH",
+          expiresAt: 1_800,
+          interval: 5,
+        }),
+        complete: async () => ({ enrolled: true as const }),
+      },
+    };
+    expect(
+      await runCli(
+        ["auth", "begin"],
+        {
+          log: (line) => output.push(line),
+          error: (line) => output.push(line),
+        },
+        base,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(output.pop() ?? "{}")).toEqual({
+      userCode: "ABCD-EFGH",
+      approvalUrl: "https://collab.example/device?user_code=ABCDEFGH",
+      expiresAt: 1_800,
+      interval: 5,
+    });
+    expect(
+      await runCli(
+        ["auth", "complete"],
+        {
+          log: (line) => output.push(line),
+          error: (line) => output.push(line),
+        },
+        base,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(output.pop() ?? "{}")).toEqual({ enrolled: true });
   });
 });

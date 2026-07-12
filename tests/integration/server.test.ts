@@ -71,7 +71,7 @@ describe("collab-server", () => {
     await writeFile(join(docsRoot, "PRIVATE.md"), "not public\n");
     await writeFile(join(webRoot, "index.html"), "<h1>2Collab</h1>\n");
 
-    const app = createApp({ docsRoot, webRoot });
+    const app = createApp(undefined, { docsRoot, webRoot });
 
     const documentResponse = await app.request("/docs/START-HERE.md");
     expect(documentResponse.status).toBe(200);

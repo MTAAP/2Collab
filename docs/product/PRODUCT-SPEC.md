@@ -10,10 +10,10 @@ tags:
 aliases:
   - Core Idea
   - New Iteration Brief
-status: draft
+status: accepted
 ---
 
-# MTAAP Core Knowledge
+# 2Collab Product Specification
 
 ## Executive Summary
 
@@ -375,7 +375,7 @@ PENDING -> STARTING -> RUNNING
 - `EXITED` means the process ended. MTAAP records its exit code and termination signal, but a zero exit code does not by itself mean the Run Goal was achieved.
 - `FAILED_TO_START` means the runner acknowledged the attempt but never started its process because setup, adapter, or worktree preparation failed.
 - `CANCELLED` means an authorized cancellation ended or aborted the attempt.
-- `TIMED_OUT` means the attempt exceeded its policy deadline and runner termination was attempted or confirmed.
+- `TIMED_OUT` means the attempt exceeded its policy deadline and the runner locally confirmed that the process terminated through the deadline path. Deadline expiry first denies further authority and records `TERMINATION_REQUESTED`; an unreachable or otherwise unconfirmed process remains nonterminal during reconciliation and becomes `LOST` after the normal grace rather than being falsely reported stopped.
 - `LOST` means the runner became unavailable and could not reconcile the process state before the configured grace period expired.
 
 `EXITED`, `FAILED_TO_START`, `CANCELLED`, `TIMED_OUT`, and `LOST` are immutable terminal attempt states. An attempt's exit status is evidence, not an Agent Run result: the shared server decides the corresponding run transition separately, and a failed attempt may be followed by another attempt pursuing the same Run Goal.
@@ -400,7 +400,7 @@ The run stays `RUNNING` during a durable automatic managed-loop delay because no
 
 V1 has no unbounded loop mode. Every Managed Loop must define all three of: a semantic stop condition tied to its Run Goal, a positive maximum number of Execution Attempts, and an absolute wall-clock deadline. Every created attempt counts against the maximum, including failed starts, lost processes, and retries, so infrastructure trouble cannot accidentally reset the budget. The server evaluates the stop condition and remaining bounds before creating each next attempt.
 
-A Runtime-Owned Loop has opaque internal ticks, so Collab cannot honestly enforce an iteration count or interpret its internal completion rule. It must still have a positive absolute deadline carried in the execution policy and enforced by the runner even while disconnected from the server. Reaching that deadline terminates the process through the normal cancellation path and records the attempt as `TIMED_OUT`.
+A Runtime-Owned Loop has opaque internal ticks, so Collab cannot honestly enforce an iteration count or interpret its internal completion rule. It must still have a positive absolute deadline carried in the execution policy and enforced by the runner even while disconnected from the server. Reaching that deadline denies authority and requests termination through the normal path; confirmed local termination records `TIMED_OUT`, while an unconfirmed process follows reconciliation to `LOST`.
 
 Runner owners may configure profiles with generous duration ceilings and a self-hosted deployment may raise its allowed ceilings, but neither can represent infinity, omit the final deadline, or use a sentinel value that disables enforcement. A dispatch may choose only limits within the stricter profile and deployment ceilings. The effective bounds are recorded with the Agent Run so later configuration changes do not silently widen work already in progress.
 
@@ -444,9 +444,13 @@ Before removal, the runner reports the remote URL identity, remote ref, commit S
 
 If the worktree is dirty, contains untracked files, has commits not verified on the remote, or cleanup itself fails, the runner retains it and surfaces an explicit cleanup action instead of guessing that the remaining state is expendable.
 
+Retention uses the closed safe reasons `RUN_NOT_TERMINAL`, `ACTIVE_ATTEMPT`, `TRACKED_CHANGES`, `UNTRACKED_FILES`, `UNPUBLISHED_HEAD`, `REMOTE_UNAVAILABLE`, `HEAD_CHANGED`, `CLEANUP_FAILED`, and `AUTHORITY_UNAVAILABLE`. The runner records an opaque Retained Local Work identifier, observation revision/digest, exact HEAD, bounded repository-relative changed-path summary, counts, age, disk usage, and publish state in its local registry and sends only the bounded path-free or repository-relative evidence projection to the server. Retained work has no automatic expiry.
+
 Dirty or unpublished terminal worktrees have no automatic expiry in v1. MTAAP shows their age, disk usage, branch, commit status, and changed-file summary to project members, but only the Registered Runner's owner may authorize destructive cleanup on that machine. Other members may request cleanup but cannot discard the runner owner's local state.
 
 For a clean worktree whose commits are not yet published, the owner may choose **Publish**, which asks the runner to push the existing local branch through its configured git credentials and then reruns the cleanup checks. Publish never invents a commit from dirty files. For a dirty worktree, MTAAP offers **Open locally** and **Discard**; Discard requires an explicit confirmation after showing uncommitted files and unpushed commits, removes the local worktree, and records an auditable destructive-cleanup event without uploading file contents.
+
+Attempt-driven publication consumes the current session/fence-bound operation authorization. Terminal retained-work Publish and Discard instead use separate short-lived runner-owner authorizations bound to the retained-work ID, observation revision/digest, expected HEAD, configured remote/ref, and requested operation; they never fabricate a live Attempt or Authority Session. Automatic cleanup consumes a committed server cleanup authorization proving terminal Run state and no active Attempt. Every destructive step reacquires the local lock and rechecks HEAD, status, remote reachability, and authorization; a changed observation fails toward retention. Only explicit owner Discard may use force, after current confirmation, and failure remains retained.
 
 ### Work Item Mutation Guard V1
 
@@ -498,7 +502,7 @@ Document review is asynchronous and must not keep the originating agent process 
 
 Agent-authored Outline changes require approval by default. A human may explicitly grant an agent write scope over named existing documents; within that scope, the agent may make repeated non-destructive content edits without per-change approval. Documents outside the scope continue through the asynchronous proposal queue. Creating documents, moving or archiving them, deleting them, and changing sharing or permissions remain approval-gated even when content editing is granted. A concurrent external edit invalidates the direct-write path and turns the agent's next change into a reviewable conflict instead of silently overwriting the newer source.
 
-Before every granted write, MTAAP refreshes the document and compares its current source revision with the revision the Agent Run edited. If they differ, v1 never overwrites or auto-merges the content. It stores the base, current source, and proposed change as a conflict proposal that a human can edit, apply, reject, or hand to a focused follow-up run. The originating run continues or completes independently. Automatic document merging is deferred until real conflict patterns justify the additional machinery.
+Before every granted write, MTAAP refreshes the document and compares its current source revision with the revision the Agent Run edited. If they differ, v1 never overwrites or auto-merges the content. It stores the base and current source references and revisions plus the bounded agent-authored proposed change or patch as a conflict proposal that a human can edit, apply, reject, or hand to a focused follow-up run. Fetched base and current document bodies remain in Outline and are retrieved on demand when an authorized member resolves the conflict; they are not copied into coordination tables, audit payloads, logs, backups, or runner outboxes. The originating run continues or completes independently. Automatic document merging is deferred until real conflict patterns justify the additional machinery.
 
 MTAAP serializes its own bot writes per document and records the pre-write and returned source revisions. This prevents races between MTAAP operations but cannot lock a human editing directly in Outline, so Outline's revision history remains the recovery path for the narrow race between the final revision check and the external write.
 
@@ -530,7 +534,7 @@ V1 ships exactly two installable artifacts from one repository and build system.
 
 **`collab`** is one local executable installed on each trusted developer machine. Its interactive commands, background runner daemon, OS credential-store integration, project registry, worktree manager, durable outbox, and Bundled Execution Adapters share the same installation. `collab runner` controls the local service, while `collab mcp` provides a local stdio bridge for agent clients that cannot connect directly to the server's authenticated MCP transport; the bridge contains no separate coordination logic.
 
-The repository may retain separate server, local-client, protocol, domain, connector, and adapter packages for testability and ownership, but package boundaries do not imply more operational components. The server and local executable use a versioned protocol handshake and may be upgraded independently only within an explicitly supported compatibility range.
+The repository may retain separate server, local-client, protocol, domain, connector, and adapter source modules and directories for testability and ownership, but all remain inside the one root package and build graph. Module boundaries do not imply more operational components. The server and local executable use a versioned protocol handshake and may be upgraded independently only within an explicitly supported compatibility range.
 
 V1 requires no Redis, message broker, external worker fleet, separate frontend hosting, separate MCP deployment, or server-hosted execution pool. A small team operates one server container plus one `collab` installation per trusted machine; later scale may split internal modules without changing their semantic contracts.
 
@@ -548,11 +552,15 @@ V1 documents the Compose and user-service paths as the supported operational con
 
 Collab always authenticates a concrete Collab Member and issues its own application session. Network reachability through localhost, a private LAN, Tailscale, Cloudflare Tunnel, or another reverse proxy never becomes authorization by itself, and v1 has no `AUTH_DISABLED` mode. Multiple login providers may be enabled simultaneously without changing project membership, roles, grants, approvals, or audit attribution.
 
-V1 supports three authentication provider classes. `LOCAL` verifies credentials held by Collab. `OIDC` accepts a configured standards-compliant issuer and validates its authorization response, issuer, audience, state, nonce, signature, expiry, and subject. `AUTH_PROXY` accepts identity only through an explicitly configured provider verifier: Cloudflare Access requires cryptographic validation of its assertion and expected issuer and audience, while Tailscale Serve headers require the origin to be unreachable except through the trusted local proxy path. Tailscale Funnel traffic has no Tailscale identity assertion and therefore uses another Collab login method.
+The application session and provider protocol machinery are implemented by an exactly pinned, embedded Better Auth module mounted in the existing Hono/Bun server and backed by the same SQLite database. This is an internal implementation boundary, not another deployable service. Better Auth owns passkey ceremonies, browser sessions, trusted-origin enforcement, provider protocol plumbing, and RFC 8628 CLI device authorization; Collab continues to own Member identity, bootstrap, invitations, membership, roles, authority epochs, audit, recovery, runner identity, and Execution Authority.
+
+Every Better Auth user links explicitly one-to-one to an immutable Collab Member. Passkey-only users retain opaque internal email-shaped identifiers. A user created through local email OTP carries the normalized address that was actually verified, but the address is provider identity data rather than a membership or account-linking key. Matching email strings never merge identities, attach a second identity, or create membership. Browser and CLI-device sessions carry distinct purposes, and every request revalidates the linked active Member and authority epoch with cookie caching disabled.
+
+V1 supports three authentication provider classes. `LOCAL` verifies either a user-verified passkey or a short-lived, single-use email OTP held by Collab. Resend may deliver an email OTP but is never an identity or authorization provider. `OIDC` accepts a configured standards-compliant issuer and validates its authorization response, issuer, audience, state, nonce, signature, expiry, and subject. `AUTH_PROXY` accepts identity only through an explicitly configured provider verifier: Cloudflare Access requires cryptographic validation of its assertion and expected issuer and audience, while Tailscale Serve headers require the origin to be unreachable except through the trusted local proxy path. Tailscale Funnel traffic has no Tailscale identity assertion and therefore uses another Collab login method.
 
 Every verified provider identity maps to an internal, immutable Collab Member identifier before a session is issued. An upstream email address or group does not silently create project membership or grant permissions, and identities from different providers are never auto-linked merely because their email strings match. Joining and identity linking require an invitation, the first-run bootstrap flow, or confirmation from an already authenticated account.
 
-All browser providers converge on the same secure session and revocation machinery, CSRF protection, audit actor, and reauthentication rules. CLI, MCP bridge, and runner authentication continue to use their scoped device and capability credentials rather than borrowing a browser cookie or trusting proxy headers forwarded by an agent process.
+All browser providers converge on the same secure session and revocation machinery, CSRF protection, audit actor, and reauthentication rules. Better Auth protects its authentication routes. Collab JSON mutations additionally require the exact configured origin, same-origin Fetch Metadata, a non-simple JSON content type, and the secure host-only SameSite session cookie; no JavaScript-readable CSRF bearer is stored in a browser tab. CLI, MCP bridge, and runner authentication continue to use scoped device and capability credentials rather than borrowing a browser cookie or trusting proxy headers forwarded by an agent process.
 
 ### Break-Glass Owner Recovery V1
 
@@ -566,13 +574,21 @@ An operator may disable the ordinary `LOCAL` login form after another provider w
 
 ### Local Passkey Authentication V1
 
-Ordinary `LOCAL` authentication is passwordless in v1 and uses WebAuthn passkeys with user verification required. A Collab Member may register and name multiple platform or roaming credentials, inspect their creation and last-used times, and revoke them individually. Collab stores the credential identifier, public key, signature-counter state, and required protocol metadata; biometric material and private keys never leave the member's authenticator.
+Ordinary `LOCAL` authentication is passwordless in v1 and supports WebAuthn passkeys with user verification required plus an optionally configured verified-email OTP. A Collab Member may register and name multiple platform or roaming credentials, inspect their creation and last-used times, and revoke them individually. Collab stores the credential identifier, public key, signature-counter state, and required protocol metadata; biometric material and private keys never leave the member's authenticator. Email OTP uses a six-digit Better Auth code stored only as a hash, expires after five minutes, allows three attempts, rotates on resend, and is delivered only through the configured Resend sender. Responses do not reveal whether an address exists or is eligible.
 
 Each member may also generate a set of high-entropy, single-use recovery codes. Only salted hashes are stored, the clear codes are shown once, redeeming one invalidates that code, and generating a replacement set invalidates every unused code in the previous set. Recovery-code use creates an auditable short-lived recovery session and requires the member to register a new passkey before returning to ordinary use. Owners retain the separate host-level break-glass path.
 
 Passkey registration and authentication use the configured public base URL as the exact expected origin and a deliberately configured WebAuthn Relying Party ID. The wizard permits HTTPS origins or the localhost development exception and warns that changing the effective domain invalidates existing local credentials. Such a change requires another already-linked provider, a member recovery code, or host-level owner recovery to register replacement passkeys.
 
-V1 does not store passwords, implement TOTP, send password-reset email, or use security questions. `OIDC` and `AUTH_PROXY` remain independent alternative login providers rather than weaker fallbacks disguised as local credentials.
+The embedded Better Auth passkey plugin is configured for discoverable credentials and user verification. Collab's verification callbacks reject any registration or authentication result that does not report user verification, independent of library defaults. The Better Auth email-OTP plugin has implicit sign-up disabled: Collab authorizes a bounded provisional user through an active invitation or the current registration policy before an OTP may be sent, and creates an explicit Member link before a browser session may be issued. Password sign-up, password login, password reset, magic-link login, and automatic account linking remain disabled.
+
+V1 does not store passwords, implement TOTP, send password-reset email, use magic-link authentication, or use security questions. `OIDC` and `AUTH_PROXY` remain independent alternative login providers rather than weaker fallbacks disguised as local credentials.
+
+### Registration Policy V1
+
+Registration policy governs only creation of a new Collab Member; it never replaces offboarding, role changes, or the active Member check performed on every session. The default mode is `INVITE_ONLY`. `CLOSED` denies all new network registration, while `ALLOWLIST` permits a newly verified address only when an active exact-address or domain allow rule matches. An active deny rule always wins. Domain rules match the exact normalized ASCII domain by default and include subdomains only when that rule explicitly opts in. Collab trims and lowercases addresses consistently with the pinned email-OTP provider, converts the domain through IDNA, and never strips plus tags or applies provider-specific alias rewriting.
+
+An existing explicitly linked active Member may continue signing in with a previously verified email when registration policy changes. A new self-registration or invitation registration always creates a `MEMBER`, never an `OWNER`. An invitation may authorize one bounded provisional verified-email identity only while its exact exchange session remains active. Email equality never links to an existing Member. Policy mode and allow/deny rules are owner-managed, revision-guarded, auditable records rather than generic JSON.
 
 ### Team Invitations V1
 
@@ -580,7 +596,7 @@ Only an existing owner may create, inspect, or revoke a pending team invitation 
 
 The invitation secret is placed in the URL fragment so it is not sent in the initial HTTP request, proxy logs, or referrer. The web client immediately exchanges it through a protected POST for a short-lived, HTTP-only invitation session, while the server stores only the invitation-token hash. The session authorizes only completion of that specific invitation and is neither a Collab login session nor a reusable bearer credential. Expiry, revocation, or successful use invalidates it permanently.
 
-Before acceptance, the invitee sees the deployment, team, inviter, `MEMBER` role, and expiry. They then either register a local passkey or authenticate through an enabled `OIDC` or `AUTH_PROXY` provider. Only after successful authentication does Collab create or bind the immutable Collab Member Identity, add the team membership, consume the invitation, and issue the ordinary application session. Possessing an upstream identity without an invitation never joins the team.
+Before acceptance, the invitee sees the deployment, team, inviter, `MEMBER` role, and expiry. They then register a local passkey, verify a configured local email OTP, or authenticate through an enabled `OIDC` or `AUTH_PROXY` provider. Only after successful authentication does Collab create or bind the immutable Collab Member Identity, add the team membership, consume the invitation, and issue the ordinary application session. Possessing an upstream identity without an invitation never joins the team.
 
 The acceptance, expiry, revocation, and resulting membership are audited. After onboarding, the welcome flow offers the authenticated CLI device-pairing command and runner installation instructions; joining the team never silently registers a machine or exposes a runner.
 
@@ -1017,6 +1033,8 @@ Profiles are data passed to the runner's existing Execution Adapter implementati
 
 Only the Registered Runner's owner may create or edit a profile. The shared server knows its opaque profile identifier, display name, adapter, generic execution traits, risk summary, version, and configuration fingerprint, but never receives its executable path, full argument values, environment, or credentials. Profiles may not contain task or workflow instructions; those remain visible and auditable in the Personal Run Preset, Team Run Template, or individual Agent Run. An owner may expose selected profiles to selected project mappings on a Shared Runner; any material profile change creates a new version and requires that sharing acknowledgement to be renewed.
 
+Profiles and restart-reconciliation state live in a versioned runner-local SQLite database at `~/.collab/runner.db` with owner-only filesystem permissions. It stores profile versions, safe fingerprints, OS-credential-store references, opaque run/worktree/host process identities, immutable launch digests, and last local dispositions, but never raw output, terminal transcripts, fetched source bodies, clear credentials, or server-owned lifecycle decisions. Environment values and long-lived secrets remain in the OS credential store or explicit local configuration and are resolved only by the supervisor. Corruption fails visibly; the runner never silently recreates state and starts a duplicate process.
+
 An invocation using a profile may be a long-running autonomous process, including a polling loop requested by its effective workflow instructions, provided the Execution Attempt still has an explicit deadline or budget, emits heartbeats, remains cancellable, and never stays alive merely to wait for human review. Permission-bypassing profiles are allowed only when locally configured and explicitly acknowledged by the runner owner; another project member cannot introduce or widen those flags through a dispatch request.
 
 V1 profiles are limited to installed, supported Execution Adapters. Within that adapter, the runner owner may supply arbitrary fixed arguments such as model, permission, effort, or runtime behavior flags, subject to adapter validation, but may not embed task or workflow instruction content in those arguments. The adapter reserves any arguments required to preserve prompt placement, structured output decoding, worktree ownership, process supervision, and the runner's security invariants; conflicting or unsupported combinations fail locally before process start.
@@ -1061,6 +1079,10 @@ server_url = "https://collab.example.com"
 base_branch = "main"
 ```
 
+Project and team identifiers are opaque bounded identifiers. The `proj_` and `team_` prefixes above are illustrative, not a validation or routing rule; clients accept the canonical identifiers issued by the server. `server_url` is a canonical origin, not a general URL: production uses HTTPS, local development may use HTTP only with the exact `localhost` hostname, credentials/query/fragment/path are forbidden, and equivalent trailing-slash spellings normalize to one stored origin. `base_branch` is a normalized Git ref and rejects option-like, absolute, traversal-like, control-containing, and otherwise invalid ref names.
+
+`collab init --project <project-id> --server <origin>` links the current canonical checkout to an existing server Project after authenticating the Member and validating the deployment, team, project, and base branch. It does not create server Projects or silently overwrite `.collab/config.toml`; Project creation remains an owner action in the shared web/API surface. The config file is written atomically only after validation, and retrying an interrupted identical link is safe. Replacing a stale local checkout mapping requires the explicit `--replace-local-mapping` flag after the same server identity and Project are revalidated.
+
 The tracker file is separate from agent guidance files like `AGENTS.md` or `CLAUDE.md`. This keeps machine-readable config clean and avoids parsing ambiguity. Agent guidance can still live in those files and be loaded by the context assembler.
 
 Authorization is **team-scoped**, while credentials remain per-user so grants, approvals, and human edits have a real actor. A local runner is paired with a signed-in user through a one-time code confirmed in the web interface. Its long-lived credential is stored in the OS credential store, never a project file; normal access uses short-lived, audience-restricted, DPoP sender-constrained tokens with rotating refresh credentials. Local agent processes receive short-lived Run Capabilities limited to one Agent Run and its allowed operations rather than a reusable user, team, or runner secret.
@@ -1069,7 +1091,7 @@ The repo file is not just for humans. It is also how the agent knows which proje
 
 ### Global Project Registry
 
-The CLI should also work from outside a repo. A global registry in `~/.collab/global.db` or `~/.collab/projects.json` remembers every project that has been invoked at least once. This lets a developer run commands like `collab projects` or `collab status --all` from anywhere on their machine.
+The CLI should also work from outside a repo. A SQLite global registry at `~/.collab/global.db` remembers every project that has been invoked at least once. This lets a developer run commands like `collab projects` or `collab status --all` from anywhere on their machine.
 
 From this global view, the user can:
 
@@ -1078,7 +1100,7 @@ From this global view, the user can:
 - Start multiple agents in different projects in parallel.
 - Use git worktrees so each active Agent Run has its own isolated working directory while its sequential Execution Attempts preserve local state.
 
-The global registry maps `project_id` to the local repo path, so `collab start --project proj_abc123` works from any directory. Canonical project state remains on the shared server; the registry stores only local paths, runner metadata, cache pointers, and last access time.
+The versioned global registry keys a Project by canonical `(server_origin, project_id)` and maps it to one preferred canonical checkout, so `collab start --project proj_abc123` works from any directory without merging same-spelled identifiers from different deployments. The canonical path is unique locally; a conflicting Project or second checkout fails visibly unless the explicit, revalidated replacement flow applies. Invoking Collab from a linked Git worktree may use that worktree for the current command but never silently replaces the preferred checkout or records a transient Agent Run Worktree as canonical. Corruption is reported rather than silently deleting or recreating the database. Canonical project state remains on the shared server; the registry stores only local paths, runner metadata, cache pointers, and last access time, and no absolute path crosses a server/domain interface.
 
 The primary command for the global view should be `collab projects`. It lists all known projects with their current state and active Agent Runs. If the user is inside a repo, `collab` with no subcommand can show repo-level status; if outside a repo, it can show the global view. This makes `collab` feel like a command center, not just a per-repo utility.
 
@@ -1089,9 +1111,15 @@ Commands for the global view:
 - `collab status --all` — show all active Agent Runs across all projects.
 - `collab flush` — retry queued idempotent runner events after a network interruption.
 
+`collab start` is the canonical Agent Run creation command. `collab run` is a documented compatibility alias that uses the identical parser, request schema, idempotency key, and result; it is not a second launch behavior.
+
+Inside a repository, `collab list` is the project-local coordination view and `collab status` is its current execution summary. Before run persistence is available, these surfaces report project identity plus an explicit `RUN_STATE_UNAVAILABLE` field rather than inventing an idle or empty run state. Full web/CLI parity for Project discovery is complete only when the later surface-composition slice exposes the same canonical Project ID.
+
 ### Runner Registration and Web Launch
 
 Each local runner registers a stable identity, immutable owner, execution adapters, project-to-repo mappings, Runner Dispatch Audience, policy revision, runner epoch, and heartbeat with the shared server. A runner is eligible for a launch only when it is recently online, has the selected project mapped locally, supports the requested execution environment, and authorizes the dispatcher for the exact project/profile exposure.
+
+Runner enrollment is layered on, but distinct from, an authenticated CLI device. The CLI authenticates through Better Auth's RFC 8628 device authorization flow using Collab's exact client identifier and closed general CLI scope (`collab:cli`). The resulting short-lived bearer session is purpose-tagged `CLI_DEVICE`, stored only in the local OS credential store, revalidated against current Member authority on every request, and never accepted as browser or runner identity. `collab runner install` uses that device session to begin a separate ten-minute, hash-only runner pairing; the signed-in Member confirms the displayed code in the web interface, and consuming it once returns a runner credential bound immutably to that Member and the runner's own key. A device credential is never accepted as a runner credential, pairing never transfers an existing runner to another owner, and reconnecting preserves runner identity rather than re-pairing.
 
 Runners are `OWNER_ONLY` by default. Their owner may change the audience to `TEAM` and expose exact project mapping and Custom Launch Profile version pairs, allowing any current Collab team member to choose only those combinations as a dispatch target. Sharing never exposes credentials, commands, private profiles, or filesystem paths through Collab and can be revoked only by the runner owner. Headless and Interactive choices use the same eligibility rule.
 
@@ -1107,15 +1135,21 @@ The selected runner must acknowledge the launch before an Execution Attempt beco
 
 ### Secure Runner Data Plane
 
-The runner establishes an outbound-only WSS control and data channel to the shared server over TLS 1.3, with TLS 1.2 allowed only when required for compatibility. Certificate validation is mandatory and v1 has no insecure bypass. Browsers receive committed coordination updates through authenticated SSE; the bidirectional runner channel is separate because it carries dispatch, acknowledgement, cancellation, progress, and live output.
+The runner establishes an outbound-only WSS control and data channel to the shared server over TLS 1.3, with TLS 1.2 allowed only when required for compatibility. Certificate validation is mandatory and v1 has no insecure bypass. Browsers receive committed coordination updates through authenticated SSE; the bidirectional runner channel is separate because it carries dispatch, acknowledgement, cancellation, progress, and live output. The HTTP upgrade uses a fresh short-lived, DPoP-bound runner-audience access token minted through the shared device/session authority from the distinct runner credential; tokens, proofs, and pairing values never enter URLs, subprotocol names, logs, or close reasons.
 
-Runner messages use a small typed protocol rather than remotely supplied commands. Every frame is schema-validated and carries a server-assigned message identifier, runner and Agent Run identifiers, the applicable Execution Attempt or Gate Evaluation identifier, issue and expiry times, and replay protection. The channel enforces message-size limits, per-run and per-runner rate limits, heartbeats, idle timeouts, bounded reconnects, and backpressure. The runner rejects duplicate or stale messages, mismatched assignments, unsupported adapter options, unapproved gate fingerprints, unmapped projects, non-canonical paths, and revoked credentials.
+After authentication, `CLIENT_HELLO` and `SERVER_WELCOME` negotiate an explicit protocol major/minor range. The server selects the highest mutually supported version and returns a fresh connection identifier plus the effective heartbeat, idle, byte, rate, and backpressure ceilings; no overlap or downgrade fails closed. V1 permits one active connection per runner identity: a newer authenticated connection increments the connection fence and closes the old connection, and every later frame is checked against the current fence before any semantic effect.
+
+Runner messages use a small typed protocol rather than remotely supplied commands. Each direction has a separate closed envelope and operation union. The authenticated origin assigns a bounded message identifier and strictly increasing connection sequence; the receiver deduplicates by origin, direction, connection, and identifier, rejects changed-payload reuse and sequence regression, and uses durable command/event idempotency keys for effects that survive reconnect. Frames carry only the exact Agent Run plus Execution Attempt or Gate Evaluation identifiers required by their variant, with issue and expiry times and no independently optional duplicate identifiers. Runner identity, epoch, and actor are derived from the authenticated connection rather than trusted from the body.
+
+The channel measures decoded UTF-8 application bytes before parsing, accepts at most 64 KiB, rejects binary frames, disables application-message compression, rejects unknown keys/kinds and noncanonical time relationships, and enforces per-run and per-runner rate limits, application heartbeats, idle timeouts, bounded reconnects, and byte/item backpressure. The runner rejects duplicate or stale messages, mismatched assignments, unsupported adapter options, unapproved gate fingerprints, unmapped projects, non-canonical paths, and revoked credentials. Application heartbeats establish server-received runner liveness; WebSocket ping/pong is transport-only.
 
 The server may request only allowlisted operations such as `LaunchAttempt`, `CancelAttempt`, `ExecuteLocalGate`, and `CancelGateEvaluation`. It never supplies a shell command, arbitrary executable path, gate command, caller-controlled working directory, environment dump, or raw credentials. The runner constructs an argument array from a locally configured adapter or resolves a gate from an owner-approved manifest fingerprint, validates the project mapping, resolves the run's opaque local worktree identifier, and passes a minimal explicit environment.
 
+Dispatch is commit-before-delivery. SQLite stores a safe outbox intent referencing permit claims and their hash, never the signed clear capability; after commit the transport reconstructs the short-lived signed permit, sends in order, and marks delivery only after semantic acknowledgement. Socket write, runner acknowledgement, and process start are three separate facts. Disconnect before acknowledgement resends the committed intent without creating or consuming another permit or process. Transport deduplication in this slice is connection-scoped; later accepted-event persistence supplies restart durability and must preserve the same idempotency semantics.
+
 Raw headless agent stdout, stderr, and local gate output are sensitive and live-only by default. The runner applies best-effort local redaction for common tokens, authorization headers, private keys, and passwords before transmission, then streams bounded sequence-numbered chunks only to authorized project members. Interactive terminal byte streams and transcripts remain local rather than using this path. The server may keep a bounded in-memory reconnect buffer during an active headless attempt or Gate Evaluation but does not write raw process output, flattened runtime prompts, fetched source bodies, or environment data to SQLite, backups, or the Durable Outbox. The web interface renders permitted output as escaped terminal text and rejects unsafe links and control sequences.
 
-For owner diagnostics, the runner may retain an opt-in encrypted local tail capped by both bytes and age, disabled by default for interactive sessions and never synchronized to the server. Only the runner owner can reveal or export it through a local command after reauthentication; project members see only its presence, size, expiry, and a correlation identifier. Expiry securely removes the tail on a best-effort basis, and disabling collection prevents future capture rather than claiming forensic erasure from storage snapshots. Structured safe evidence remains the normal shared debugging surface.
+For owner diagnostics, the runner may retain an opt-in encrypted local tail capped by both bytes and age, disabled by default for interactive sessions and never synchronized to the server. Only the runner owner can reveal or export it through a local command after reauthentication; project members see only an allowlisted metadata projection containing enabled state, bounded byte count, expiry, and a correlation identifier. Payload, filename, local path, encryption metadata, and key identity never synchronize. Expiry securely removes the tail on a best-effort basis, and disabling collection prevents future capture rather than claiming forensic erasure from storage snapshots. Structured safe evidence remains the normal shared debugging surface.
 
 Durable coordination stores versioned authored instruction components, explicitly bounded attached previews, structured lifecycle events, progress summaries, decisions, approved excerpts, exit status, verification evidence, hashes, and reference provenance. Pairing, dispatch, acknowledgement, cancellation, authentication failures, policy rejections, revocation, and access to sensitive live streams are audited without recording tokens, fetched source bodies, or the flattened runtime prompt.
 
@@ -1177,7 +1211,7 @@ The **Shared Coordination Server is the source of truth** for MTAAP-owned state.
 2. **Read cache**: The local runner may retain recently fetched task context and run metadata so an already-started execution can continue through a brief outage.
 3. **Durable outbox**: Structured progress, notes, and verification evidence receive idempotency keys and are queued locally if the server is unreachable. Raw prompts and process output are never placed in the outbox.
 4. **Reconnect**: The runner submits queued events in order. The server deduplicates them and revalidates any requested state transition against current authoritative state.
-5. **Live projection**: The server broadcasts committed events to web and CLI clients through SSE by default. WebSockets are added only if a real bidirectional transport requirement appears.
+5. **Live projection**: The server broadcasts committed events to browser and ordinary API clients through SSE. The runner uses the separately specified outbound WSS data plane because dispatch, acknowledgement, cancellation, and session control are already a real bidirectional transport requirement.
 
 ### Offline Safety Boundary
 
@@ -1193,6 +1227,48 @@ The server stores coordination state and connector credentials, not developer gi
 
 The documented restore drill starts in an isolated target, verifies backup integrity and schema compatibility before opening network listeners, restores with an explicitly supplied master key, invalidates server sessions and short-lived capabilities, increments connector and runner authority epochs, and requires owners to review or reauthorize external connectors before queued mutations resume. Losing the encryption key is reported as unrecoverable credential loss rather than bypassed; restoring an old backup cannot resurrect a revoked token or permit. Key rotation, backup retention and deletion, restore time, and connector reauthorization outcomes are audited. Local runner communication uses the paired runner identity, sender-constrained short-lived access tokens, and short-lived Run Capabilities over the outbound WSS channel. Connector webhooks and outbox events are idempotent so retries are safe.
 
+Restore is an offline command mode that never constructs listeners, schedulers, webhook handlers, connector workers, or runner transports and holds an exclusive data-directory lock. It authenticates and decrypts into restrictive staging, validates SQLite integrity/foreign keys/migration and application invariants, installs a cryptographically fresh deployment authority incarnation, invalidates all sessions/capabilities/permits/leases/operation authorizations, advances runner and connector epochs, marks connectors `REVIEW_REQUIRED`, writes the restore audit, and revalidates staging before atomic promotion. The previous target remains active until that safe staged database is fsynced and promoted; normal startup refuses an incomplete restore marker. The authority incarnation is bound into every replayable credential/capability so restoring onto a fresh machine cannot collide with an integer epoch from later than the backup.
+
+Backup payloads use versioned chunked AES-256-GCM with unique random 96-bit nonces and an HKDF-derived, domain-separated backup key from the external deployment master key. A canonical authenticated manifest binds format/build/schema/migration digest, backup and deployment fingerprints, source authority incarnation, key ID, algorithm/chunk parameters, lengths, digests, and creation time. The master key is read from a restrictive secret file outside data and backup volumes and is never supplied on argv or persisted. Versioned per-credential-class data keys are wrapped by the master key; credential row identity/class/key version/revision form AEAD associated data. Class-key rotation is resumable and isolated; master-key rotation rewraps class keys and preserves access to retained verified backups until they are deliberately re-encrypted or retired.
+
+### Operational Bounds V1
+
+V1 ships finite defaults for every security-sensitive lifetime and buffer. Deployments may configure them only within positive validated ranges, and an Agent Run snapshots every effective bound that governs it so a later configuration change cannot widen work already in progress.
+
+| Policy | Default |
+|---|---:|
+| Team invitation expiry | 48 hours |
+| Invitation exchange session | 15 minutes |
+| Fresh privileged verification | 5 minutes |
+| WebAuthn ceremony challenge | 5 minutes |
+| Browser idle / absolute session | 12 hours / 7 days |
+| Recovery session | 15 minutes |
+| Host recovery code | 10 minutes |
+| OIDC authorization transaction | 10 minutes |
+| CLI/device pairing code | 10 minutes |
+| Device access token | 10 minutes |
+| Device refresh credential | Not issued in v1 |
+| DPoP proof clock window / replay retention | 5 minutes / 10 minutes |
+| Dispatch Permit lifetime | 30 seconds |
+| Authority Session lifetime / renewal cadence | 30 seconds / 10 seconds |
+| Mutation disconnect grace | 15 seconds |
+| Runner heartbeat / offline / lost grace | 10 / 30 / 90 seconds |
+| Structured WSS frame | 64 KiB |
+| Runner WSS rate per runner / per run | 100 / 50 frames per second, bursts 200 / 100 |
+| Runner WSS send queue | 1,024 frames and 1 MiB |
+| Runner WSS future-issued clock allowance | 30 seconds |
+| Live output chunk / in-memory reconnect buffer | 16 KiB / 1 MiB per attempt |
+| Runner reconnect maximum backoff | 30 seconds |
+| Runner safe context cache | 64 MiB total, 4 MiB per run, 7 days |
+| Runner durable semantic outbox | 10,000 events and 64 MiB, with 10% reserved for terminal/checkpoint events |
+| Accepted runner-event dedup retention | 90 days |
+| Verified backup retention | 30 days, 10 backups, and 10 GiB; never prune the sole verified backup |
+| Source-unavailable automatic refresh grace | 5 minutes |
+| Encrypted local diagnostic tail | 2 MiB and 24 hours |
+| Resolved Inbox retention | 90 days |
+
+No infinity value, zero sentinel, disabled deadline, unbounded retry, or unbounded output mode is valid. A deployment may lower a bound immediately for future work. Raising a ceiling affects only newly created sessions, attempts, runs, or workflow executions.
+
 ## Dogfood Delivery Slices and Exit Criteria
 
 The specification describes one v1, but implementation should reach it through four vertically usable slices. A later slice may begin behind a feature flag, but the team does not call an earlier slice complete from schema or static UI alone.
@@ -1203,6 +1279,7 @@ The specification describes one v1, but implementation should reach it through f
 
 2. **GitHub coordination: work reaches delivery**
    - Add the GitHub App, issue and pull-request projections and mutations, Milestones, selected GitHub Projects, Assignment versus Delegation, canonical Coordination Records, mutation guards, diff evidence, GitHub checks, Inbox, and Command Center.
+   - Pull-request review and merge remain GitHub operations in v1. Collab links to them, reconciles their authoritative state, and records the resulting evidence; it does not gain an unlisted review-submission or merge mutation.
    - Exit when a real connected issue can be triaged, assigned, delegated, implemented, published with a closing reference, reviewed, merged, and observed closing from GitHub without Collab fabricating source state; missed webhook reconciliation, stale replace-style edits, late source linking, and connector scope narrowing are exercised successfully.
 
 3. **Outline collaboration: knowledge is genuinely bidirectional**

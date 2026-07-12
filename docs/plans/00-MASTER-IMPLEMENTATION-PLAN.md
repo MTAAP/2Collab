@@ -10,6 +10,8 @@
 
 **Tech Stack:** Bun 1.3+, TypeScript 7, Hono 4, React 19, Vite 8, React Flow 12, Zod 4, `bun:sqlite`, WebAuthn, Bun test, Playwright, Docker Compose.
 
+**Migration reconciliation:** The immutable Foundation history includes corrective migration `0006_foundation_configuration_corrections`. The remaining phase ranges are therefore GitHub `0007-0009`, Outline `0010-0012`, and Automation `0013-0015`.
+
 ## Global constraints
 
 - The [Acceptance Matrix](../acceptance/ACCEPTANCE-MATRIX.md) IDs are stable. Never renumber an accepted requirement; mark supersession explicitly.
@@ -76,29 +78,21 @@ export type Result<T> =
 
 // src/server/modules/execution-authority/contract.ts
 export interface ExecutionAuthority {
-  previewAttempt(input: PreviewAttemptInput): Promise<AttemptAuthorityPreview>;
-  decide<C extends AuthorityCommand>(command: C): Promise<AuthorityDecisionFor<C>>;
-}
-
-// src/server/modules/runs/contract.ts
-export interface RunCoordinator {
-  create(command: CreateRun): Promise<Result<AgentRun>>;
-  inspect(query: InspectRun): Promise<Result<RunView>>;
-  cancel(command: CancelRun): Promise<Result<RunView>>;
-  checkpoint(command: RecordCheckpoint): Promise<Result<DurableCheckpoint>>;
-  acceptEvent(command: AcceptAttemptEvent): Promise<Result<RunView>>;
+  preview(request: AuthorityPreviewRequest): Promise<AuthorityPreview>;
+  execute<C extends CollabCommand>(command: C): Promise<Result<CommandResultFor<C>>>;
+  query<Q extends CoordinationQuery>(query: Q): Promise<Result<QueryResultFor<Q>>>;
 }
 
 // src/server/modules/connectors/contract.ts
 export interface SourceConnector<TReference, TProjection, TMutation> {
-  inspect(reference: TReference): Promise<Result<Observed<TProjection>>>;
-  mutate(command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
-  reconcile(scope: ConnectorScope): AsyncIterable<ReconciliationEvent<TProjection>>;
+  inspect(scope: ConnectorScope, reference: TReference): Promise<Result<Observed<TProjection>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
+  scan(scope: ConnectorScope, cursor?: ReconciliationCursor): AsyncIterable<Result<ReconciliationEvent<TProjection>>>;
 }
-export interface ContextConnector<TReference, TDocument, TMutation> {
-  search(query: ScopedSearch): Promise<Result<readonly ContextReference[]>>;
-  read(reference: TReference): Promise<Result<Observed<TDocument>>>;
-  mutate(command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TDocument>>>;
+export interface ContextConnector<TReference, TLiveRead, TProjection, TMutation> {
+  search(scope: ConnectorScope, query: ScopedSearch): Promise<Result<EphemeralSearchPage<TReference>>>;
+  read(scope: ConnectorScope, reference: TReference): Promise<Result<EphemeralObserved<TLiveRead>>>;
+  mutate(authorization: ConnectorOperationAuthorization, command: ExactRevisionMutation<TMutation>): Promise<Result<Observed<TProjection>>>;
 }
 
 // src/server/modules/workflows/contract.ts
@@ -116,10 +110,10 @@ The full authority command types live in `src/shared/contracts/execution-authori
 
 | Phase | Migration files | Owned schema groups |
 |---|---|---|
-| Foundation | `src/server/db/migrations/0001_foundation.sql` through `0004_foundation_operations.sql` | deployment, members, credentials, sessions, projects, runners, policies, runs, attempts, permits, authority sessions, checkpoints, evidence, presets, audit, outbox, backup metadata |
-| GitHub | `src/server/db/migrations/0101_github.sql` through `0103_github_attention.sql` | connector installations/scopes, source projections, canonical records, source links, mutation provenance, collision summaries, inbox |
-| Outline | `src/server/db/migrations/0201_outline.sql` through `0203_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
-| Automation | `src/server/db/migrations/0301_workflows.sql` through `0303_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
+| Foundation | `src/server/db/migrations/0001_foundation.sql` through corrective `0006_foundation_configuration_corrections.sql` | deployment, members, credentials, sessions, upgrade-safe Projects/base branches, generic connector epochs/scopes, runners, policies, Coordination Records, source links, mutation guards, runs, attempts and causes, permits, authority sessions, checkpoints, evidence, immutable configuration snapshots, presets, audit, outbox, backup metadata |
+| GitHub | `src/server/db/migrations/0007_github.sql` through `0009_github_attention.sql` | connector installations/scopes, source projections, canonical aliases/source links, mutation provenance, collision summaries, inbox |
+| Outline | `src/server/db/migrations/0010_outline.sql` through `0012_outline_proposals.sql` | delegated grants, bot connection, read scopes, document references, write grants, proposals, working-document references |
+| Automation | `src/server/db/migrations/0013_workflows.sql` through `0015_gates_telemetry.sql` | template versions, workflow definitions/layouts, presets, executions, steps, results, decisions, stop state, gates, evaluations, usage aggregation |
 
 Every migration has an adjacent `*.verify.ts` integration test that opens the previous schema fixture, migrates forward, verifies invariants, and proves backup/restore compatibility. Destructive rollback is never improvised; rollback means restore the pre-migration authenticated backup and run the recorded schema compatibility check.
 
@@ -140,6 +134,16 @@ For every task group in a phase plan:
 2. **GitHub coordination** starts only after Foundation security, authority, backup, and runner gates pass.
 3. **Outline collaboration** starts only after the same Foundation gate. It may execute alongside GitHub but cannot duplicate identity, credentials, exact-revision mutation, or revocation logic.
 4. **Bounded automation** starts after Foundation and GitHub exit because its canonical dogfood operates on a real pull request. Outline is not a required runtime dependency.
+
+### Implementation sequencing versus acceptance evidence
+
+Local implementation may proceed into a later phase after the earlier phase's shared interfaces, migrations, local security suites, and strict fixture contracts pass, even when a timed or disposable-provider dogfood proof is still `IN_PROGRESS` or `BLOCKED`. This code-ahead rule does not convert mocked or unexecuted behavior into `PASS`: the Acceptance Matrix status changes only when its exact observable proof is captured from running software. GitHub and Outline may therefore be implemented against strict local adapters after Foundation's local prerequisites exist, and bounded automation may be implemented after local GitHub exact-revision and check-observation contracts exist.
+
+### Integration policy
+
+`main` is the integration trunk. A phase implementation may advance `main` after its locally achievable package, security, migration, and composition gates pass, while separately identified live-provider, multi-machine, reviewer, or timed evidence remains `IN_PROGRESS_EXTERNAL`. Later phase work branches from that verified integration revision and must not relabel pending external evidence as `PASS`.
+
+GitHub coordination and Outline collaboration may proceed in parallel after the Foundation local gate. Bounded automation may begin after the integrated GitHub exact-revision mutation and check-observation contracts pass locally. Each parallel stream owns its phase-specific adapters, migrations, modules, UI, tests, and evidence; changes to shared contracts or authority behavior require integration review before another stream builds on them.
 
 ## Fifteen orphan risks: master disposition
 
@@ -166,13 +170,18 @@ For every task group in a phase plan:
 Run from the repository root:
 
 ```bash
-bun install --frozen-lockfile
+bun ci
 bun run format:check
 bun run lint
 bun run typecheck
-bun test tests/unit tests/integration tests/protocol
+bun run test
 bun run build
-bun run test:e2e
+bunx playwright install chromium
+bun run test:e2e:run
+bun run audit:public
+bun run manifest:verify
+docker compose config --quiet
+docker build --tag 2collab:verify .
 ```
 
 Expected: every command exits 0. Phase-specific live connector or runner drills are additional and cannot be replaced by the common suite.

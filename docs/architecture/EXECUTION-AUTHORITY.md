@@ -23,26 +23,42 @@
 
 ## Module interface
 
-The interface has one read method and one closed command method. Callers learn the command they need, not the implementation's policy graph, transaction structure, or adapters.
+The interface has one side-effect-free preview method, one closed command method, and one closed query method. Callers learn the command or query they need, not the implementation's lifecycle reducers, policy graph, transaction structure, or adapters. The command method also accepts bounded coordination observations so callers never have to order a separate public Run Coordinator call around an authority decision.
 
 ```ts
 interface ExecutionAuthority {
   preview(request: AuthorityPreviewRequest): Promise<AuthorityPreview>;
-  execute(command: AuthorityCommand): Promise<AuthorityDecision>;
+  execute<C extends CollabCommand>(command: C): Promise<Result<CommandResultFor<C>>>;
+  query<Q extends CoordinationQuery>(query: Q): Promise<Result<QueryResultFor<Q>>>;
 }
 
-type AuthorityCommand =
+type CollabCommand =
   | LaunchRun
   | AuthorizeAttempt
+  | AcceptAttemptEvent
+  | RecordCheckpoint
+  | RecordEvidence
+  | RecordRunResult
+  | LinkSourceReference
+  | AcknowledgeCollision
   | ConsumePermit
   | RenewAuthoritySession
   | AuthorizeOperation
   | ReleaseAuthoritySession
   | ReplaceRunnerPolicy
   | ApplyRevocation;
+
+type CoordinationQuery =
+  | InspectCoordinationRecord
+  | InspectRun
+  | InspectAttempt
+  | InspectEvidence
+  | InspectProjection;
 ```
 
 Every command carries a unique idempotency key, authenticated actor, expected aggregate revisions, and requested operation. Reusing a key with identical input returns the original committed result. Reusing it with different input returns `IDEMPOTENCY_CONFLICT`.
+
+Attempt events, checkpoints, evidence, results, links, and acknowledgements are closed bounded schemas. The implementation routes them through private lifecycle and evidence modules. No raw transcript, source body, diff, environment, credential, command, or absolute path is accepted.
 
 ### Preview
 

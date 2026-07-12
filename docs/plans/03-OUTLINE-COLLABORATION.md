@@ -8,6 +8,8 @@
 
 **Phase requirements:** `OUT-001` through `OUT-010`.
 
+**Migration range:** `0010-0012`, following GitHub `0007-0009`.
+
 ## Entry gate
 
 - Foundation identity, exact-revision operation authorization, encrypted credentials, audit, backup/restore, Context Recipes, and offboarding pass.
@@ -41,7 +43,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0201_outline.sql` and verifier.
+- Create `src/server/db/migrations/0010_outline.sql` and verifier.
 - Create `src/shared/contracts/outline.ts`.
 - Create `src/server/adapters/outline/{contract,oauth,bot-auth,client,scope}.ts`.
 - Create `src/server/modules/connectors/outline-credentials.ts`.
@@ -97,6 +99,7 @@ export interface DocumentCollaboration {
 - [ ] Require the authenticated delegated member identity for direct human edits; bot credentials are rejected for this path.
 - [ ] Implement read-compare-write or native conditional mutation with an explicit residual-race result.
 - [ ] Prove stale saves preserve both authored change and latest source reference for focused resolution.
+- [ ] Implement direct human document creation through the delegated member identity with collection scope and exact returned revision; destructive move/archive/delete remains separately approval-gated.
 - [ ] Run integration and two-browser co-edit journeys; expect PASS.
 
 **Failure drill:** Revoke member OAuth after editor load, change collection scope, delete/move document, and race an external update. No stale browser session overwrites current content.
@@ -107,7 +110,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0202_outline_grants.sql` and verifier.
+- Create `src/server/db/migrations/0011_outline_grants.sql` and verifier.
 - Create `src/shared/contracts/document-grants.ts`.
 - Create `src/server/modules/documents/{contract,write-grants,agent-operations}.ts`.
 - Create `src/server/modules/execution-authority/outline-operations.ts`.
@@ -118,6 +121,7 @@ export interface DocumentCollaboration {
 
 - [ ] Property-test grants against run ID, exact document IDs, operation set, expiry, connector epoch, member revision, and grant revision.
 - [ ] Prove another run/document/destructive action and a changed exact approval subject fail.
+- [ ] Test additional-document requests as non-authorizing requests; only an explicit member decision extends the exact existing-run grant.
 - [ ] Implement operation-level authorization immediately before every bot mutation; historical envelope is a ceiling, not current permission.
 - [ ] Run unit and integration suites; expect PASS.
 
@@ -129,7 +133,7 @@ export interface DocumentCollaboration {
 
 **Files:**
 
-- Create `src/server/db/migrations/0203_outline_proposals.sql` and verifier.
+- Create `src/server/db/migrations/0012_outline_proposals.sql` and verifier.
 - Create `src/shared/contracts/document-proposals.ts`.
 - Create `src/server/modules/documents/{proposals,conflicts,working-documents}.ts`.
 - Create `src/web/features/outline/{proposals,working-documents}/`.
@@ -140,6 +144,8 @@ export interface DocumentCollaboration {
 - [ ] Test immutable proposal base revision, bounded authored patch, author/run provenance, apply decision, and latest-source conflict reference.
 - [ ] Modify Outline externally between propose/apply and prove application creates conflict rather than overwrite.
 - [ ] Test working-document linkage/editing without implicit canonical status or run completion coupling.
+- [ ] Test explicit `KEEP`, `PROMOTE`, and `ARCHIVE` dispositions. Keep is the no-action default; Promote and Archive are separately authorized Outline operations.
+- [ ] Persist only source identifiers/revisions and the bounded authored proposal or patch. Fetch current source bodies on demand during authorized resolution and prove fetched base/current bodies never enter coordination storage or backups.
 - [ ] Run all narrow suites; expect PASS.
 
 ## Task Group 6: Revocation, canary scans, and two-member dogfood

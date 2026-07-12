@@ -1,0 +1,137 @@
+[
+  {
+    "requirement": "GHB-001",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-002",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-003",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-004",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-005",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-006",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-007",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-008",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-009",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-010",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-011",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-012",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-013",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-014",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  },
+  {
+    "requirement": "GHB-015",
+    "build": "NOT_RUN",
+    "gitRevision": "NOT_RUN",
+    "localTestsPassed": false,
+    "liveTestsPassed": false,
+    "reviewed": false,
+    "blocked": "LIVE_DISPOSABLE_INSTALLATION_REQUIRED"
+  }
+]
