@@ -9,6 +9,8 @@ const serverEnvironmentSchema = z.object({
   DEPLOYMENT_MASTER_KEY_FILE: z.string().min(1).optional(),
   HOST: z.string().min(1).default("127.0.0.1"),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  OUTLINE_BASE_URL: z.string().min(1).optional(),
+  OUTLINE_TOKEN_FILE: z.string().min(1).optional(),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3210),
   PUBLIC_BASE_URL: z.string().min(1).default("http://localhost:3210"),
   RUNNER_COMPOSITION_MODULE: z.string().min(1).optional(),
@@ -24,6 +26,8 @@ export type ServerEnvironment = {
   deploymentMasterKeyFile: string | undefined;
   hostname: string;
   mode: "development" | "test" | "production";
+  outlineBaseUrl?: string;
+  outlineTokenFile?: string;
   port: number;
   publicBaseUrl: string;
   rpId: string;
@@ -83,6 +87,28 @@ export function readServerEnvironment(
       );
   }
 
+  if (!!parsed.data.OUTLINE_BASE_URL !== !!parsed.data.OUTLINE_TOKEN_FILE)
+    throw new Error(
+      "Invalid server environment: OUTLINE_BASE_URL and OUTLINE_TOKEN_FILE must be configured together",
+    );
+  if (parsed.data.OUTLINE_BASE_URL) {
+    let outlineUrl: URL;
+    try {
+      outlineUrl = new URL(parsed.data.OUTLINE_BASE_URL);
+    } catch {
+      throw new Error("Invalid server environment: OUTLINE_BASE_URL must be an HTTPS origin");
+    }
+    if (
+      outlineUrl.protocol !== "https:" ||
+      outlineUrl.username !== "" ||
+      outlineUrl.password !== "" ||
+      outlineUrl.pathname !== "/" ||
+      outlineUrl.search !== "" ||
+      outlineUrl.hash !== ""
+    )
+      throw new Error("Invalid server environment: OUTLINE_BASE_URL must be an HTTPS origin");
+  }
+
   return {
     backupDir: parsed.data.BACKUP_DIR,
     bootstrapSecretFile: parsed.data.BOOTSTRAP_SECRET_FILE,
@@ -90,6 +116,12 @@ export function readServerEnvironment(
     deploymentMasterKeyFile: parsed.data.DEPLOYMENT_MASTER_KEY_FILE,
     hostname: parsed.data.HOST,
     mode: parsed.data.NODE_ENV,
+    ...(parsed.data.OUTLINE_BASE_URL
+      ? {
+          outlineBaseUrl: parsed.data.OUTLINE_BASE_URL,
+          outlineTokenFile: parsed.data.OUTLINE_TOKEN_FILE,
+        }
+      : {}),
     port: parsed.data.PORT,
     publicBaseUrl: parsed.data.PUBLIC_BASE_URL,
     rpId: parsed.data.WEBAUTHN_RP_ID,

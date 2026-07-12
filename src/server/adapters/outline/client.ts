@@ -1,5 +1,7 @@
 export type OutlineHttpRequest = Readonly<{
   endpoint:
+    | "auth.info"
+    | "collections.list"
     | "documents.search"
     | "documents.info"
     | "documents.create"
