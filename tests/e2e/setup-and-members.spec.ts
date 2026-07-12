@@ -111,3 +111,23 @@ test("invitation fragment is cleared before exchange and becomes an HttpOnly joi
   );
   expect(invitationCookie).toMatchObject({ httpOnly: true, path: "/join", sameSite: "Strict" });
 });
+
+test("signed-in owner approves the exact CLI device authorization", async ({ page }) => {
+  await page.addInitScript(() => sessionStorage.setItem("collab_csrf", "c".repeat(32)));
+  await page.route("**/api/v1/device/authorization/device_code_1/approve", async (route) => {
+    expect(route.request().headers()["x-collab-csrf"]).toBe("c".repeat(32));
+    expect(route.request().postDataJSON()).toMatchObject({ idempotencyKey: expect.any(String) });
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        value: { deviceCodeId: "device_code_1", state: "APPROVED", revision: 2 },
+      }),
+    });
+  });
+
+  await page.goto("/device/authorize/device_code_1");
+  await expect(page.getByRole("heading", { name: "Authorize this CLI device?" })).toBeVisible();
+  await page.getByRole("button", { name: "Authorize device" }).click();
+  await expect(page.getByText("CLI device authorized")).toBeVisible();
+});
