@@ -23,6 +23,27 @@ describe("readServerEnvironment", () => {
     expect(readServerEnvironment({ PORT: "4321" }).port).toBe(4321);
   });
 
+  test("accepts a paired HTTPS Outline origin and token file", () => {
+    const environment = readServerEnvironment({
+      OUTLINE_BASE_URL: "https://wiki.example.test/",
+      OUTLINE_TOKEN_FILE: "/run/secrets/outline_api_token",
+    });
+    expect(environment.outlineBaseUrl).toBe("https://wiki.example.test/");
+    expect(environment.outlineTokenFile).toBe("/run/secrets/outline_api_token");
+  });
+
+  test("rejects incomplete or non-HTTPS Outline configuration", () => {
+    expect(() => readServerEnvironment({ OUTLINE_BASE_URL: "https://wiki.example.test/" })).toThrow(
+      "configured together",
+    );
+    expect(() =>
+      readServerEnvironment({
+        OUTLINE_BASE_URL: "http://wiki.example.test/",
+        OUTLINE_TOKEN_FILE: "/run/secrets/outline_api_token",
+      }),
+    ).toThrow("HTTPS origin");
+  });
+
   test("rejects a port outside the TCP range", () => {
     expect(() => readServerEnvironment({ PORT: "70000" })).toThrow("PORT");
   });

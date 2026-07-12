@@ -42,6 +42,7 @@
     "evidence:foundation-exit": "bun run scripts/foundation-evidence.ts check-exit",
     "outline:evidence": "bun run scripts/outline-evidence.ts",
     "outline:evidence:validate": "bun run outline:evidence validate docs/evidence/outline/LOCAL-EVIDENCE.json",
+    "outline:live-smoke": "bun run scripts/outline-live-smoke.ts",
     "github:evidence": "bun run scripts/github-evidence.ts",
     "github:evidence:validate": "bun run github:evidence validate docs/evidence/github/LOCAL-EVIDENCE.json",
     "github:live:preflight": "bun run scripts/github-live-preflight.ts",
