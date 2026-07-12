@@ -5,9 +5,7 @@ import { browserJson } from "../../api-client.ts";
 const Approval = z.object({
   ok: z.literal(true),
   value: z.object({
-    deviceCodeId: z.string(),
-    state: z.literal("APPROVED"),
-    revision: z.number().int().positive(),
+    approved: z.literal(true),
   }),
 });
 

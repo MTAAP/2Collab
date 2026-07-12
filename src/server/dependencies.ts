@@ -119,6 +119,15 @@ function boundedRateLimits(clock: () => number): PublicRateLimitPort {
   };
 }
 
+export function canonicalPublicRequestUrl(request: Request, configuredOrigin: string): string {
+  const internalUrl = new URL(request.url);
+  const publicUrl = new URL(configuredOrigin);
+  publicUrl.pathname = internalUrl.pathname;
+  publicUrl.search = internalUrl.search;
+  publicUrl.hash = "";
+  return publicUrl.toString();
+}
+
 function databaseBrowserAuthentication(
   database: ReturnType<typeof openDatabase>,
   clock: () => number,
@@ -166,7 +175,7 @@ function databaseBrowserAuthentication(
     const proofResult = await dpop.verify({
       proof,
       method: request.method,
-      uri: request.url,
+      uri: canonicalPublicRequestUrl(request, configuredOrigin),
       nonce,
       senderKeyThumbprint,
       accessTokenHash,

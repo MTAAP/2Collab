@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createProductionComposition } from "../../src/server/dependencies.ts";
+import {
+  canonicalPublicRequestUrl,
+  createProductionComposition,
+} from "../../src/server/dependencies.ts";
 import type { ServerEnvironment } from "../../src/shared/environment.ts";
 
 const directories: string[] = [];
@@ -51,6 +54,15 @@ async function request(
 }
 
 describe("packaged production composition", () => {
+  test("canonicalizes proxy-internal request URLs to the configured public origin", () => {
+    expect(
+      canonicalPublicRequestUrl(
+        new Request("http://127.0.0.1:3210/api/v1/runners/pairing/begin?attempt=1"),
+        "https://collab.tailnet.example:8443",
+      ),
+    ).toBe("https://collab.tailnet.example:8443/api/v1/runners/pairing/begin?attempt=1");
+  });
+
   test("stays not ready when browser bootstrap is not attainable", async () => {
     const server = await composition(false);
     expect((await request(server, new Request("http://localhost/readyz"))).status).toBe(503);

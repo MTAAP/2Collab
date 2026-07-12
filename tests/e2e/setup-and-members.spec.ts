@@ -156,7 +156,7 @@ test("signed-in owner approves the exact CLI device authorization", async ({ pag
       contentType: "application/json",
       body: JSON.stringify({
         ok: true,
-        value: { deviceCodeId: "device_code_1", state: "APPROVED", revision: 2 },
+        value: { approved: true },
       }),
     });
   });
