@@ -47,7 +47,7 @@ const HELP = [
   "Commands:",
   "  doctor     Validate the local bootstrap runtime and server configuration",
   "  auth       Begin or complete OS-keychain-backed device enrollment",
-  "  runner     Pair, install, start, or inspect the local runner service",
+  "  runner     Pair, configure, install, start, or inspect the local runner service",
   "  init       Link the current checkout to an existing Project",
   "  list       Show the current Project coordination view",
   "  projects   Show all locally known Projects",
@@ -135,7 +135,71 @@ export async function runCli(
         result = await dependencies.runnerManagement.start();
       } else if (action === "status" && commandArgs.length === 1)
         result = await dependencies.runnerManagement.status();
-      else {
+      else if (action === "project" && phase === "configure") {
+        const values = new Map<string, string>();
+        const allowed = new Set([
+          "--project",
+          "--repository",
+          "--revision",
+          "--checkout",
+          "--base-branch",
+          "--remote",
+          "--remote-ref",
+        ]);
+        for (let index = 2; index < commandArgs.length; index += 2) {
+          const key = commandArgs[index];
+          const value = commandArgs[index + 1];
+          if (!key || !allowed.has(key) || !value || values.has(key))
+            throw new Error("RUNNER_ARGUMENTS_INVALID");
+          values.set(key, value);
+        }
+        const revision = Number(values.get("--revision"));
+        const projectId = values.get("--project");
+        const repositoryId = values.get("--repository");
+        const checkout = values.get("--checkout");
+        const baseBranch = values.get("--base-branch");
+        if (
+          !projectId ||
+          !repositoryId ||
+          !checkout ||
+          !baseBranch ||
+          !Number.isSafeInteger(revision) ||
+          revision < 1
+        )
+          throw new Error("RUNNER_ARGUMENTS_INVALID");
+        result = await dependencies.runnerManagement.configureProject({
+          projectId,
+          repositoryId,
+          mappingRevision: revision,
+          checkout,
+          baseBranch,
+          ...(values.get("--remote") ? { remoteName: values.get("--remote") } : {}),
+          ...(values.get("--remote-ref") ? { remoteRef: values.get("--remote-ref") } : {}),
+        });
+      } else if (action === "profile" && phase === "install-default") {
+        const values = new Map<string, string>();
+        const allowed = new Set(["--runtime", "--id", "--executable"]);
+        for (let index = 2; index < commandArgs.length; index += 2) {
+          const key = commandArgs[index];
+          const value = commandArgs[index + 1];
+          if (!key || !allowed.has(key) || !value || values.has(key))
+            throw new Error("RUNNER_ARGUMENTS_INVALID");
+          values.set(key, value);
+        }
+        const runtime = values.get("--runtime");
+        const profileVersionId = values.get("--id");
+        if (
+          (runtime !== "CODEX" && runtime !== "CLAUDE") ||
+          !profileVersionId ||
+          !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(profileVersionId)
+        )
+          throw new Error("RUNNER_ARGUMENTS_INVALID");
+        result = await dependencies.runnerManagement.installDefaultProfile({
+          runtime,
+          profileVersionId,
+          ...(values.get("--executable") ? { executable: values.get("--executable") } : {}),
+        });
+      } else {
         io.error("RUNNER_ARGUMENTS_INVALID");
         return 2;
       }
@@ -229,7 +293,10 @@ export async function runCli(
           JSON.stringify(
             await initProject(
               { cwd, projectId, serverOrigin, replaceLocalMapping },
-              { projectsApi: dependencies.projectsApi, registry: dependencies.registry },
+              {
+                projectsApi: dependencies.projectsApi,
+                registry: dependencies.registry,
+              },
             ),
           ),
         );
@@ -257,7 +324,10 @@ export async function runCli(
         JSON.stringify(
           await projectStatus(
             { cwd, all },
-            { projectsApi: dependencies.projectsApi, registry: dependencies.registry },
+            {
+              projectsApi: dependencies.projectsApi,
+              registry: dependencies.registry,
+            },
           ),
         ),
       );
