@@ -52,6 +52,10 @@ function proof(
   });
 }
 
+function configurationIdempotencyKey(kind: "mapping" | "profile", values: unknown): string {
+  return `runner_${kind}_${createHash("sha256").update(JSON.stringify(values)).digest("hex")}`;
+}
+
 export function createProductionRunnerManagement(
   input: Readonly<{
     baseUrl: string;
@@ -268,6 +272,98 @@ export function createProductionRunnerManagement(
       } finally {
         database.close();
       }
+    },
+    async registerMapping(configuration: Readonly<{ projectId: string; localMappingId: string }>) {
+      const credential = await requireStored();
+      if (!credential.runnerId) throw new Error("RUNNER_PAIRING_REQUIRED");
+      return post<{
+        runnerId: string;
+        projectId: string;
+        revision: number;
+        localMappingId: string;
+        createdAt: number;
+      }>(
+        `/api/v1/runners/${encodeURIComponent(credential.runnerId)}/mappings`,
+        {
+          idempotencyKey: configurationIdempotencyKey("mapping", [
+            "REGISTER",
+            credential.runnerId,
+            configuration.projectId,
+            configuration.localMappingId,
+          ]),
+          projectId: configuration.projectId,
+          localMappingId: configuration.localMappingId,
+        },
+        true,
+      );
+    },
+    async replaceMapping(
+      configuration: Readonly<{
+        projectId: string;
+        localMappingId: string;
+        expectedRevision: number;
+      }>,
+    ) {
+      const credential = await requireStored();
+      if (!credential.runnerId) throw new Error("RUNNER_PAIRING_REQUIRED");
+      return post<{
+        runnerId: string;
+        projectId: string;
+        revision: number;
+        localMappingId: string;
+        createdAt: number;
+      }>(
+        `/api/v1/runners/${encodeURIComponent(credential.runnerId)}/mappings`,
+        {
+          idempotencyKey: configurationIdempotencyKey("mapping", [
+            "REPLACE",
+            credential.runnerId,
+            configuration.projectId,
+            configuration.localMappingId,
+            configuration.expectedRevision,
+          ]),
+          ...configuration,
+        },
+        true,
+      );
+    },
+    async advertiseProfile(
+      configuration: Readonly<{
+        profileId?: string;
+        expectedVersion?: number;
+        displayName: string;
+        adapter: "CLAUDE" | "CODEX" | "PI" | "OPENCODE";
+        hosts: readonly ("NATIVE" | "ORCA")[];
+        interactions: readonly ("HEADLESS" | "INTERACTIVE")[];
+        riskSummary: string;
+        fingerprint: string;
+      }>,
+    ) {
+      const credential = await requireStored();
+      if (!credential.runnerId) throw new Error("RUNNER_PAIRING_REQUIRED");
+      return post<{
+        runnerId: string;
+        profileId: string;
+        version: number;
+        fingerprint: string;
+      }>(
+        `/api/v1/runners/${encodeURIComponent(credential.runnerId)}/profiles`,
+        {
+          idempotencyKey: configurationIdempotencyKey("profile", [
+            credential.runnerId,
+            configuration.profileId ?? null,
+            configuration.expectedVersion ?? null,
+            configuration.displayName,
+            configuration.adapter,
+            configuration.hosts,
+            configuration.interactions,
+            configuration.riskSummary,
+            configuration.fingerprint,
+          ]),
+          ...configuration,
+        },
+        true,
+      );
     },
     async start() {
       const credential = await requireStored();

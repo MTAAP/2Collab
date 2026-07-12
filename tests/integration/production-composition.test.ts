@@ -109,5 +109,15 @@ describe("packaged production composition", () => {
       new Request("http://localhost/api/v1/workflow-presets/bind", { method: "POST" }),
     ];
     for (const input of automationRoutes) expect((await request(server, input)).status).toBe(401);
+    expect(
+      (
+        await request(
+          server,
+          new Request("http://localhost/api/v1/runners/runner_1/mappings", {
+            method: "POST",
+          }),
+        )
+      ).status,
+    ).toBe(401);
   });
 });

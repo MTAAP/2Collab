@@ -39,6 +39,39 @@ const defaultIo: CliIo = {
   log: (line) => console.log(line),
 };
 
+function validIdentifier(value: string | undefined): value is string {
+  return value !== undefined && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
+}
+
+function parseRunnerOptions(
+  args: readonly string[],
+  allowed: readonly string[],
+): Map<string, string> {
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index];
+    const value = args[index + 1];
+    if (!key || !allowed.includes(key) || !value || values.has(key))
+      throw new Error("RUNNER_ARGUMENTS_INVALID");
+    values.set(key, value);
+  }
+  return values;
+}
+
+function uniqueList<const T extends readonly string[]>(
+  value: string | undefined,
+  allowed: T,
+): T[number][] | undefined {
+  const values = value?.split(",");
+  return values &&
+    values.length > 0 &&
+    values.length <= allowed.length &&
+    values.every((item) => (allowed as readonly string[]).includes(item)) &&
+    new Set(values).size === values.length
+    ? values
+    : undefined;
+}
+
 const HELP = [
   "2Collab bootstrap CLI",
   "",
@@ -198,6 +231,80 @@ export async function runCli(
           runtime,
           profileVersionId,
           ...(values.get("--executable") ? { executable: values.get("--executable") } : {}),
+        });
+      } else if (action === "mapping" && (phase === "register" || phase === "replace")) {
+        const values = parseRunnerOptions(
+          commandArgs.slice(2),
+          phase === "register"
+            ? ["--project", "--mapping-id"]
+            : ["--project", "--mapping-id", "--expected-revision"],
+        );
+        const projectId = values.get("--project");
+        const localMappingId = values.get("--mapping-id");
+        if (!validIdentifier(projectId) || !validIdentifier(localMappingId))
+          throw new Error("RUNNER_ARGUMENTS_INVALID");
+        if (phase === "register") {
+          result = await dependencies.runnerManagement.registerMapping({
+            projectId,
+            localMappingId,
+          });
+        } else {
+          const expectedRevision = Number(values.get("--expected-revision"));
+          if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+            throw new Error("RUNNER_ARGUMENTS_INVALID");
+          result = await dependencies.runnerManagement.replaceMapping({
+            projectId,
+            localMappingId,
+            expectedRevision,
+          });
+        }
+      } else if (action === "profile" && phase === "advertise") {
+        const values = parseRunnerOptions(commandArgs.slice(2), [
+          "--id",
+          "--expected-version",
+          "--display-name",
+          "--runtime",
+          "--hosts",
+          "--interactions",
+          "--risk-summary",
+          "--fingerprint",
+        ]);
+        const profileId = values.get("--id");
+        const expectedVersionValue = values.get("--expected-version");
+        const expectedVersion = Number(expectedVersionValue);
+        const displayName = values.get("--display-name");
+        const adapter = values.get("--runtime");
+        const hosts = uniqueList(values.get("--hosts"), ["NATIVE", "ORCA"] as const);
+        const interactions = uniqueList(values.get("--interactions"), [
+          "HEADLESS",
+          "INTERACTIVE",
+        ] as const);
+        const riskSummary = values.get("--risk-summary");
+        const fingerprint = values.get("--fingerprint");
+        if (
+          (profileId === undefined) !== (expectedVersionValue === undefined) ||
+          (profileId !== undefined && !validIdentifier(profileId)) ||
+          (expectedVersionValue !== undefined &&
+            (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1)) ||
+          !displayName ||
+          displayName.length > 120 ||
+          !["CLAUDE", "CODEX", "PI", "OPENCODE"].includes(adapter ?? "") ||
+          !hosts ||
+          !interactions ||
+          !riskSummary ||
+          riskSummary.length > 240 ||
+          !fingerprint ||
+          !/^[a-f0-9]{64}$/.test(fingerprint)
+        )
+          throw new Error("RUNNER_ARGUMENTS_INVALID");
+        result = await dependencies.runnerManagement.advertiseProfile({
+          ...(profileId ? { profileId, expectedVersion } : {}),
+          displayName,
+          adapter: adapter as "CLAUDE" | "CODEX" | "PI" | "OPENCODE",
+          hosts,
+          interactions,
+          riskSummary,
+          fingerprint,
         });
       } else {
         io.error("RUNNER_ARGUMENTS_INVALID");

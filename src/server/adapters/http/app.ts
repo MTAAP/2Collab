@@ -13,6 +13,7 @@ import { createOutlineDocumentRoutes } from "./routes/outline-documents.ts";
 import { createOutlineSearchRoutes } from "./routes/outline-search.ts";
 import { createRunRoutes } from "./routes/runs.ts";
 import { createRunnerPairingRoutes } from "./routes/runner-pairing.ts";
+import { createRunnerConfigurationRoutes } from "./routes/runner-configuration.ts";
 import { foundationSecurityHeaders } from "./security-headers.ts";
 
 export type FoundationHttpDependencies = Readonly<{
@@ -24,6 +25,7 @@ export type FoundationHttpDependencies = Readonly<{
   deviceIdentity?: Parameters<typeof createDeviceAuthRoutes>[0]["authority"];
   runnerPairing?: Parameters<typeof createRunnerPairingRoutes>[0]["registry"];
   runnerAuthentication?: Parameters<typeof createRunnerPairingRoutes>[0]["runnerAuthentication"];
+  runnerConfiguration?: Parameters<typeof createRunnerConfigurationRoutes>[0]["registry"];
   mcp?: (request: Request) => Promise<Response>;
   readiness?: Readonly<{ ready: () => boolean }>;
   outline?: Readonly<{
@@ -66,6 +68,17 @@ export function createFoundationHttpApp(dependencies: FoundationHttpDependencies
         registry: dependencies.runnerPairing,
         authentication: dependencies.authentication,
         runnerAuthentication: dependencies.runnerAuthentication,
+      }),
+    );
+  }
+  if (dependencies.runnerConfiguration) {
+    app.route(
+      "/api/v1/runners",
+      createRunnerConfigurationRoutes({
+        configuredOrigin: dependencies.configuredOrigin,
+        authentication: dependencies.authentication,
+        rateLimits: dependencies.rateLimits,
+        registry: dependencies.runnerConfiguration,
       }),
     );
   }
