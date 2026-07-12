@@ -77,6 +77,41 @@ test("empty deployment bootstrap registers the owner passkey without exposing se
   await expect(page.getByRole("heading", { name: "Your team is ready" })).toBeVisible();
   expect(await page.evaluate(() => sessionStorage.getItem("collab_csrf"))).toBe("c".repeat(32));
   expect(await page.textContent("body")).not.toContain("private-proof");
+
+  await page.route("**/api/v1/auth/passkeys/authentication/begin", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        value: {
+          challengeId: "authentication_challenge_1",
+          options: {
+            challenge: base64url("foundation-authentication-challenge"),
+            rpId: "localhost",
+            timeout: 60_000,
+            userVerification: "required",
+          },
+        },
+      }),
+    });
+  });
+  await page.route("**/api/v1/auth/passkeys/authentication/finish", async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({
+      challengeId: "authentication_challenge_1",
+      response: { type: "public-key" },
+    });
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        value: { memberId: "member_1", expiresAt: 1_800, csrfProof: "d".repeat(32) },
+      }),
+    });
+  });
+  await page.goto("/login?returnTo=%2Frunners");
+  await page.getByRole("button", { name: "Use passkey" }).click();
+  await expect(page).toHaveURL(/\/runners$/);
+  expect(await page.evaluate(() => sessionStorage.getItem("collab_csrf"))).toBe("d".repeat(32));
 });
 
 test("invitation fragment is cleared before exchange and becomes an HttpOnly join cookie", async ({

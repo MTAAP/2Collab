@@ -30,6 +30,20 @@ export function registrationOptions(
   return publicKey;
 }
 
+export function authenticationOptions(
+  options: Record<string, unknown>,
+): PublicKeyCredentialRequestOptions {
+  const publicKey = structuredClone(options) as unknown as PublicKeyCredentialRequestOptions & {
+    challenge: string | ArrayBuffer;
+  };
+  if (typeof publicKey.challenge === "string") publicKey.challenge = decode(publicKey.challenge);
+  publicKey.allowCredentials = publicKey.allowCredentials?.map((credential) => ({
+    ...credential,
+    id: typeof credential.id === "string" ? decode(credential.id) : credential.id,
+  }));
+  return publicKey;
+}
+
 export function serializeCredential(credential: PublicKeyCredential): Record<string, unknown> {
   const response = credential.response as AuthenticatorAttestationResponse;
   return {
@@ -40,6 +54,23 @@ export function serializeCredential(credential: PublicKeyCredential): Record<str
       attestationObject: encode(response.attestationObject),
       clientDataJSON: encode(response.clientDataJSON),
       transports: response.getTransports?.() ?? [],
+    },
+  };
+}
+
+export function serializeAuthenticationCredential(
+  credential: PublicKeyCredential,
+): Record<string, unknown> {
+  const response = credential.response as AuthenticatorAssertionResponse;
+  return {
+    id: credential.id,
+    rawId: encode(credential.rawId),
+    type: credential.type,
+    response: {
+      authenticatorData: encode(response.authenticatorData),
+      clientDataJSON: encode(response.clientDataJSON),
+      signature: encode(response.signature),
+      userHandle: response.userHandle ? encode(response.userHandle) : null,
     },
   };
 }

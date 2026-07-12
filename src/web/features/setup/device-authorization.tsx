@@ -24,6 +24,13 @@ export function DeviceAuthorization({ deviceCodeId }: Readonly<{ deviceCodeId: s
           <p className="utility">TRUSTED DEVICE</p>
           <h1>Authorize this CLI device?</h1>
           <p>Continue only if you started device enrollment on the Mac Studio.</p>
+          {!sessionStorage.getItem("collab_csrf") ? (
+            <p>
+              <a href={`/login?returnTo=${encodeURIComponent(window.location.pathname)}`}>
+                Sign in with your passkey first
+              </a>
+            </p>
+          ) : null}
           {state === "APPROVED" ? (
             <p>CLI device authorized. Return to the Mac Studio to complete enrollment.</p>
           ) : (

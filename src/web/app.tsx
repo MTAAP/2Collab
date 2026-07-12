@@ -18,6 +18,7 @@ import { RunnersFeature } from "./features/runners/runners-feature.tsx";
 import { RunsFeature } from "./features/runs/runs-feature.tsx";
 import { InvitationExchange } from "./features/setup/invitation-exchange.tsx";
 import { DeviceAuthorization } from "./features/setup/device-authorization.tsx";
+import { LoginFeature } from "./features/setup/login-feature.tsx";
 import { SetupFeature } from "./features/setup/setup-feature.tsx";
 import { OutlineFeature } from "./features/outline/index.tsx";
 import { WorkflowStudioFeature } from "./features/workflow-studio/editor.tsx";
@@ -107,6 +108,7 @@ export function App() {
   const path = window.location.pathname;
   if (path === "/setup") return <SetupFeature />;
   if (path === "/join") return <InvitationExchange />;
+  if (path === "/login") return <LoginFeature />;
   const deviceAuthorization = /^\/device\/authorize\/([A-Za-z0-9_-]{1,128})$/.exec(path);
   if (deviceAuthorization)
     return <DeviceAuthorization deviceCodeId={deviceAuthorization[1] ?? ""} />;
