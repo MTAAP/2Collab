@@ -1,9 +1,11 @@
-import type { MemberActor } from "../../../../shared/contracts/actors.ts";
+import type { MemberActor, VerifiedDevicePrincipal } from "../../../../shared/contracts/actors.ts";
 import type { Result } from "../../../../shared/contracts/result.ts";
 
 export interface PublicAuthenticationPort {
   authenticateBrowser(request: Request): Promise<Result<MemberActor>>;
   authenticateDevice(request: Request): Promise<Result<MemberActor>>;
+  /** Retains the sender-constrained device identity for runner enrollment only. */
+  authenticateRunnerDevice?(request: Request): Promise<Result<VerifiedDevicePrincipal>>;
   verifyBrowserMutation(request: Request, actor: MemberActor): boolean;
 }
 
