@@ -1,10 +1,37 @@
-import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
+import { serveStatic } from "hono/bun";
 import { APP_METADATA } from "../shared/app-metadata.ts";
+import type { FoundationHttpDependencies } from "./adapters/http/app.ts";
+import { createFoundationHttpApp } from "./adapters/http/app.ts";
+import {
+  createGitHubConnectorRoutes,
+  type GitHubWebhookRouteDependencies,
+} from "./adapters/http/routes/connectors-github.ts";
+import {
+  createGitHubIssueRoutes,
+  type GitHubIssueRouteDependencies,
+} from "./adapters/http/routes/github-issues.ts";
+import { createGitHubPlanningRoutes } from "./adapters/http/routes/github-planning.ts";
+import { createInboxRoutes } from "./adapters/http/routes/inbox.ts";
+import { createTemplateRoutes } from "./adapters/http/routes/templates.ts";
+import { createWorkflowRuntimeRoutes } from "./adapters/http/routes/workflow-runtime.ts";
+import { createWorkflowRoutes } from "./adapters/http/routes/workflows.ts";
+import { foundationSecurityHeaders } from "./adapters/http/security-headers.ts";
 
 type AppOptions = {
   docsRoot?: string;
+  githubIssues?: GitHubIssueRouteDependencies;
+  githubPlanning?: Parameters<typeof createGitHubPlanningRoutes>[0];
+  githubWebhooks?: GitHubWebhookRouteDependencies;
+  inbox?: Parameters<typeof createInboxRoutes>[0];
   webRoot?: string;
+  automation?: Readonly<{
+    authentication: FoundationHttpDependencies["authentication"];
+    rateLimits: FoundationHttpDependencies["rateLimits"];
+    workflows: Parameters<typeof createWorkflowRoutes>[0]["operations"];
+    templates: Parameters<typeof createTemplateRoutes>[0]["operations"];
+    runtime?: Parameters<typeof createWorkflowRuntimeRoutes>[0]["operations"];
+  }>;
 };
 
 type ErrorBody = {
@@ -18,8 +45,17 @@ function errorBody(code: ErrorBody["error"]["code"], message: string): ErrorBody
   return { error: { code, message } };
 }
 
-export function createApp(options: AppOptions = {}): Hono {
+export function createApp(
+  dependencies?: FoundationHttpDependencies,
+  options: AppOptions = {},
+): Hono {
   const app = new Hono();
+
+  app.use("*", foundationSecurityHeaders());
+  app.use("*", async (context, next) => {
+    context.header("cache-control", "no-store");
+    await next();
+  });
 
   app.get("/healthz", (context) =>
     context.json({
@@ -30,6 +66,19 @@ export function createApp(options: AppOptions = {}): Hono {
     }),
   );
 
+  app.get("/readyz", (context) => {
+    const readiness = dependencies?.readiness;
+    const ready = readiness ? readiness.ready() : false;
+    return ready
+      ? context.json({
+          apiVersion: APP_METADATA.apiVersion,
+          service: APP_METADATA.packageName,
+          status: "OK",
+          version: APP_METADATA.version,
+        })
+      : context.json({ status: "NOT_READY" }, 503);
+  });
+
   app.get("/api/v1", (context) =>
     context.json({
       apiVersion: APP_METADATA.apiVersion,
@@ -37,6 +86,48 @@ export function createApp(options: AppOptions = {}): Hono {
       version: APP_METADATA.version,
     }),
   );
+
+  if (dependencies) {
+    app.route("/", createFoundationHttpApp(dependencies));
+  }
+  if (options.githubWebhooks) {
+    app.route("/", createGitHubConnectorRoutes(options.githubWebhooks));
+  }
+  if (options.githubIssues) {
+    app.route("/", createGitHubIssueRoutes(options.githubIssues));
+  }
+  if (options.githubPlanning) {
+    app.route("/", createGitHubPlanningRoutes(options.githubPlanning));
+  }
+  if (options.inbox) app.route("/", createInboxRoutes(options.inbox));
+  if (options.automation) {
+    app.route(
+      "/",
+      createWorkflowRoutes({
+        authentication: options.automation.authentication,
+        rateLimits: options.automation.rateLimits,
+        operations: options.automation.workflows,
+      }),
+    );
+    if (options.automation.runtime) {
+      app.route(
+        "/",
+        createWorkflowRuntimeRoutes({
+          authentication: options.automation.authentication,
+          rateLimits: options.automation.rateLimits,
+          operations: options.automation.runtime,
+        }),
+      );
+    }
+    app.route(
+      "/",
+      createTemplateRoutes({
+        authentication: options.automation.authentication,
+        rateLimits: options.automation.rateLimits,
+        operations: options.automation.templates,
+      }),
+    );
+  }
 
   app.all("/api/*", (context) =>
     context.json(errorBody("NOT_FOUND", "The requested API resource does not exist."), 404),

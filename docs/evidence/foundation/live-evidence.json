@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "frozenBuild": {
+    "buildId": "foundation-9c8fc20edcec7ac7",
+    "artifactManifestSha256": "6ea168823f5e1b6f5f6906b19e5953f7f9ebb463b41d67702ea32c5dd01d9ca6",
+    "repositoryCommit": "9c8fc20edcec7ac7b12950be5acf748d38889b4b"
+  },
+  "timezone": "Europe/Berlin",
+  "initializedAt": "2026-07-11T17:50:27.101Z",
+  "machines": [],
+  "runs": [],
+  "restores": [],
+  "days": []
+}

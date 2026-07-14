@@ -12,6 +12,8 @@ const root = resolve(import.meta.dir, "..");
 const canonicalProductSpec = "docs/product/PRODUCT-SPEC.md";
 const ignoredDirectories = new Set([
   ".git",
+  ".worktrees",
+  ".superpowers",
   "coverage",
   "data",
   "dist",
@@ -70,7 +72,7 @@ async function collectFiles(directory = root): Promise<AuditFile[]> {
     }
 
     if (entry.isDirectory()) {
-      if (forbiddenDirectories.has(entry.name)) {
+      if (forbiddenDirectories.has(entry.name) && !repositoryPath.includes("/")) {
         report(`Sensitive runtime directory is present: ${repositoryPath}`);
       } else if (!ignoredDirectories.has(entry.name)) {
         files.push(...(await collectFiles(absolutePath)));

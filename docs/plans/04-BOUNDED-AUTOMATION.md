@@ -8,6 +8,8 @@
 
 **Phase requirements:** `AUT-001` through `AUT-014`.
 
+**Migration range:** `0013-0015`, following Outline `0010-0012`.
+
 ## Entry gate
 
 - Foundation and GitHub coordination phases pass completely.
@@ -35,15 +37,21 @@ export interface GateCoordinator {
 
 // src/shared/contracts/workflow.ts
 export type WorkflowNode =
-  | RunStepNode
-  | ParallelInspectNode
-  | JoinNode
+  | StartNode
+  | AgentRunNode
   | HumanDecisionNode
-  | ConditionNode
+  | ResultRouterNode
+  | ParallelSplitNode
+  | JoinNode
   | TerminalNode;
 export type WorkflowDefinition = Readonly<{
+  inputs: readonly WorkflowInput[];
   nodes: readonly WorkflowNode[];
   transitions: readonly WorkflowTransition[];
+  maximumRunCount: number;
+  cycleBounds: Readonly<Record<string, number>>;
+  maximumParallelBranches: number;
+  maximumConcurrency: number;
   absoluteDeadlineMs: number;
 }>;
 ```
@@ -56,7 +64,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0301_workflows.sql` and verifier.
+- Create `src/server/db/migrations/0013_workflows.sql` and verifier.
 - Create `src/shared/contracts/{templates,workflow}.ts`.
 - Create `src/server/modules/templates/{contract,run-templates,versioning,bindings}.ts`.
 - Create `src/server/adapters/http/routes/templates.ts` and MCP tools `src/server/adapters/mcp/template-tools.ts`.
@@ -78,7 +86,8 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 - Create `src/server/modules/workflows/{contract,definition,validation,versioning}.ts`.
 - Create `src/server/adapters/http/routes/workflows.ts`.
-- Create `src/web/features/workflow-studio/{editor,definition-adapter,validation-panel}.tsx`.
+- Create `src/web/features/workflow-studio/{editor,definition-adapter,validation-panel,structured-outline,history,yaml-io}.tsx`.
+- Create `src/server/modules/workflows/{drafts,yaml}.ts`, CLI workflow-authoring commands, and MCP schema-authoring tools.
 - Test `tests/unit/workflows/{definition,validation,layout}.test.ts`, `tests/e2e/workflow-authoring.spec.ts`.
 
 **Test-first sequence:**
@@ -87,6 +96,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 - [ ] Implement pure validation with stable path-addressed diagnostics.
 - [ ] Prove layout-only edits do not change semantic hash/version and semantic edits do.
 - [ ] Adapt React Flow nodes/edges to canonical schema at the UI seam; server rejects raw React Flow objects.
+- [ ] Test optimistic shared draft revisions, stale-draft duplicate-as-new behavior, undo/redo, YAML import/export sanitization, HTTP/CLI/MCP parity, keyboard operation, and synchronized structured outline.
 - [ ] Run unit and authoring E2E suites; expect PASS.
 
 **Failure drill:** Tamper browser payload to add executable fields, change semantic edges without expected version, and publish an invalid graph. All fail before activation.
@@ -97,7 +107,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0302_workflow_execution.sql` and verifier.
+- Create `src/server/db/migrations/0014_workflow_execution.sql` and verifier.
 - Create `src/server/modules/templates/workflow-presets.ts`.
 - Create `src/server/modules/workflows/{workflow-engine,scheduler,idempotency,deadlines}.ts`.
 - Create `src/server/modules/workflows/step-run-factory.ts`.
@@ -156,7 +166,7 @@ The `CanvasLayout` contract contains positions, viewport, and collapsed groups o
 
 **Files:**
 
-- Create `src/server/db/migrations/0303_gates_telemetry.sql` and verifier.
+- Create `src/server/db/migrations/0015_gates_telemetry.sql` and verifier.
 - Create `src/shared/contracts/{gates,stop-policies}.ts`.
 - Create `src/server/modules/gates/{contract,manifest,fingerprints,evaluations}.ts`.
 - Create `src/runner/gates/{manifest-loader,local-evaluator}.ts`.

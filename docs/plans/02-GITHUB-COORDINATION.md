@@ -8,6 +8,8 @@
 
 **Phase requirements:** `GHB-001` through `GHB-015`.
 
+**Migration range:** `0007-0009`; Foundation corrective migration `0006` is immutable history.
+
 ## Entry gate
 
 - Foundation requirements `FND-001`–`FND-019` pass.
@@ -39,10 +41,10 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0101_github.sql` and verifier.
+- Create `src/server/db/migrations/0007_github.sql` and verifier.
 - Create `src/shared/contracts/github.ts`.
 - Create `src/server/adapters/github/{contract,app-auth,client,scope,webhooks,reconciliation}.ts`.
-- Create `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts`.
+- Extend the Foundation `src/server/modules/connectors/{credentials,epochs,scope-policy}.ts` primitives only through their existing typed interfaces.
 - Create `src/server/adapters/http/routes/connectors-github.ts`.
 - Test `tests/unit/github/`, `tests/integration/github/app-scope.test.ts`, `webhook-reconciliation.test.ts`.
 
@@ -83,9 +85,9 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0102_coordination_records.sql` and verifier.
+- Create `src/server/db/migrations/0008_coordination_source_mapping.sql` and verifier; Foundation already owns Coordination Records and mutation guards.
 - Create `src/shared/contracts/coordination-records.ts`.
-- Create `src/server/modules/coordination-records/{contract,registry,canonical-key,late-link}.ts`.
+- Extend `src/server/modules/coordination-records/{canonical-key,registry,source-links}.ts` with provider canonical mapping, late linking, and audited coalescing.
 - Create `src/server/modules/github-coordination/{assignment,delegation,delivery}.ts`.
 - Create `src/server/adapters/http/routes/coordination-records.ts` and MCP tools in `src/server/adapters/mcp/github-tools.ts`.
 - Test `tests/integration/coordination-records/`, `tests/integration/github/assignment-delegation.test.ts`, `delivery.test.ts`.
@@ -126,7 +128,7 @@ export interface CoordinationRecordRegistry {
 
 **Files:**
 
-- Create `src/server/db/migrations/0103_github_attention.sql` and verifier.
+- Create `src/server/db/migrations/0009_github_attention.sql` and verifier.
 - Create `src/server/modules/inbox/{events,inbox,command-center}.ts`.
 - Create `src/web/features/{inbox,command-center}/`.
 - Create `tests/drills/github-scope-narrowing.test.ts`, `github-member-offboarding.test.ts`, `github-missed-webhook.test.ts`.
@@ -138,6 +140,8 @@ export interface CoordinationRecordRegistry {
 - [ ] Test attention-event deduplication, personal read state, derived lanes, and absence of draggable lifecycle writes.
 - [ ] Run missed-webhook and stale-edit drills against fixtures, then the same journeys against disposable live GitHub resources.
 - [ ] Complete the real issue-to-observed-closure dogfood journey and attach source URLs/revisions, Collab record/run IDs, audit IDs, and sanitized evidence.
+
+Pull-request review and merge remain GitHub-native actions in this journey. Collab links to them, observes signed webhooks and reconciliation results, and records exact revisions; it does not submit reviews or merge pull requests through an unlisted mutation.
 
 ## Verification commands
 

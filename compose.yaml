@@ -11,11 +11,28 @@ services:
       HOST: 0.0.0.0
       PORT: 3210
       DATA_DIR: /data
-      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set to at least 32 random characters}
+      BACKUP_DIR: /backups
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3210}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      DEPLOYMENT_MASTER_KEY_FILE: /run/secrets/deployment_master_key
+      BOOTSTRAP_SECRET_FILE: /run/secrets/bootstrap_secret
+    secrets:
+      - source: deployment_master_key
+        target: deployment_master_key
+        uid: "1000"
+        gid: "1000"
+        mode: 0o600
+      - source: bootstrap_secret
+        target: bootstrap_secret
+        uid: "1000"
+        gid: "1000"
+        mode: 0o600
     ports:
-      - "${COLLAB_BIND_HOST:-127.0.0.1}:${COLLAB_PORT:-3210}:3210"
+      - "127.0.0.1:3210:3210"
     volumes:
       - collab-data:/data
+      - collab-backups:/backups
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
@@ -24,6 +41,12 @@ services:
     security_opt:
       - no-new-privileges:true
 
+secrets:
+  deployment_master_key:
+    file: ${DEPLOYMENT_MASTER_KEY_FILE:-./deploy/secrets/deployment_master_key}
+  bootstrap_secret:
+    file: ${BOOTSTRAP_SECRET_FILE:-./deploy/secrets/bootstrap_secret}
+
 volumes:
   collab-data:
-
+  collab-backups:
