@@ -89,6 +89,67 @@ test("production REST provider uses fixed endpoints and returns bounded normaliz
   ]);
   expect(JSON.stringify(created)).not.toContain("source body");
   expect(JSON.stringify(created)).not.toContain("installation-secret");
+  const mismatched = await provider.mutate(
+    {
+      kind: "CONNECTOR_OPERATION",
+      id: "authorization_2",
+      proof: "p".repeat(32),
+      projectId: scope.projectId,
+      connectorId: scope.connectorId,
+      connectorEpoch: 1,
+      reference: "REPOSITORY:999",
+      operation: "CREATE_ISSUE",
+      actionDigest,
+      expiresAt: 100,
+    },
+    {
+      projectId: scope.projectId,
+      connectorId: scope.connectorId,
+      connectorEpoch: 1,
+      idempotencyKey: "create_2",
+      precondition: { kind: "ABSENT" },
+      actionDigest,
+      mutation,
+    },
+  );
+  expect(mismatched).toMatchObject({
+    ok: false,
+    error: { code: "CONNECTOR_AUTHORIZATION_INVALID" },
+  });
+  expect(calls).toHaveLength(2);
+});
+
+test("reconciliation skips one malformed provider record and continues with later valid records", async () => {
+  const provider = createGitHubRestProvider({
+    connectorId: "github_1",
+    clock: () => 1,
+    selectedRepositoryIds: () => ["101"],
+    selectedProjectIds: () => [],
+    token: async () => ({ ok: true, value: "installation-secret" }),
+    repository: () => ({
+      ok: true,
+      value: { repositoryId: "101", owner: "owner", name: "repo", nodeId: "R_101" },
+    }),
+    workItemNodeId: () => ({ ok: true, value: "I_42" }),
+    fetcher: async (url) => {
+      const path = new URL(String(url)).pathname;
+      if (path.endsWith("/issues"))
+        return Response.json([
+          { ...issue, number: 41, state_reason: "provider_added_a_new_value" },
+          issue,
+        ]);
+      return Response.json([]);
+    },
+  });
+
+  const events = [];
+  for await (const event of provider.scan(scope)) events.push(event);
+
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    ok: true,
+    value: { reference: "ISSUE:101:42", value: { kind: "ISSUE", number: 42 } },
+  });
 });
 
 test("Projects paginate fields and items, refresh eligibility, and use the clear-field mutation", async () => {

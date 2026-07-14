@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MemberActor } from "../../../shared/contracts/actors.ts";
+import { IdentifierSchema } from "../../../shared/contracts/ids.ts";
 import { OutlineReferenceSchema } from "../../../shared/contracts/outline.ts";
 import { ScopedSearchSchema } from "../../modules/connectors/contract.ts";
 
@@ -17,7 +18,13 @@ export function registerOutlineTools(
     {
       title: "Search Outline",
       description: "Search current scoped Outline documents.",
-      inputSchema: z.object({ query: ScopedSearchSchema }).strict(),
+      inputSchema: z
+        .object({
+          projectId: IdentifierSchema,
+          connectorId: IdentifierSchema,
+          query: ScopedSearchSchema,
+        })
+        .strict(),
     },
     async (input) => ({
       content: [
@@ -30,7 +37,13 @@ export function registerOutlineTools(
     {
       title: "Read Outline document",
       description: "Read one current scoped Outline document.",
-      inputSchema: z.object({ reference: OutlineReferenceSchema }).strict(),
+      inputSchema: z
+        .object({
+          projectId: IdentifierSchema,
+          connectorId: IdentifierSchema,
+          reference: OutlineReferenceSchema,
+        })
+        .strict(),
     },
     async (input) => ({
       content: [

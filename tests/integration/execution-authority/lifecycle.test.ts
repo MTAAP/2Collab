@@ -8,7 +8,10 @@ import {
   type DispatchPermitClaims,
   type RefreshedAuthorityFacts,
 } from "../../../src/server/modules/execution-authority/execution-authority.ts";
-import { createOperationAuthorizationConsumer } from "../../../src/server/modules/execution-authority/fencing.ts";
+import {
+  createConnectorAttemptAuthority,
+  createOperationAuthorizationConsumer,
+} from "../../../src/server/modules/execution-authority/fencing.ts";
 import {
   prepareRunConfigurationSnapshot,
   resolveEffectiveRunConfiguration,
@@ -805,6 +808,8 @@ describe("deep execution authority", () => {
           VALUES ('github_1', 1, 'READY', 1);
         INSERT INTO connector_scopes(id, project_id, connector_id, connector_epoch, revision, created_at)
           VALUES ('scope_1', 'project_1', 'github_1', 1, 1, 0);
+        INSERT INTO connector_provider_bindings(connector_id, provider, bound_at)
+          VALUES ('github_1', 'GITHUB', 0);
         INSERT INTO connector_scope_operations(scope_id, operation)
           VALUES ('scope_1', 'EDIT_ISSUE'), ('scope_1', 'EDIT_DOCUMENT_AS_BOT');
       `);
@@ -857,6 +862,35 @@ describe("deep execution authority", () => {
         },
       });
       expect(outline.ok).toBeTrue();
+      if (!github.ok || !outline.ok) throw new Error("CONNECTOR_AUTHORIZATION_REQUIRED");
+      const attemptAuthority = createConnectorAttemptAuthority(f.database, () => 100);
+      expect(
+        await attemptAuthority.verify({
+          authorizationId: github.value.authorizationId,
+          authorizationProof: github.value.operationDigest,
+          projectId: "project_1",
+          connectorId: "github_1",
+          connectorEpoch: 1,
+          reference: "issue_1",
+          operation: "EDIT_ISSUE",
+          actionDigest: "f".repeat(64),
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        await attemptAuthority.verify({
+          authorizationId: outline.value.authorizationId,
+          authorizationProof: outline.value.operationDigest,
+          projectId: "project_1",
+          connectorId: "github_1",
+          connectorEpoch: 1,
+          reference: "document_1",
+          operation: "EDIT_DOCUMENT_AS_BOT",
+          actionDigest: "a".repeat(64),
+        }),
+      ).toMatchObject({
+        ok: false,
+        error: { code: "OPERATION_AUTHORIZATION_INVALID" },
+      });
       f.database.exec(
         "UPDATE connector_epochs SET epoch = 2, revision = revision + 1 WHERE connector_id = 'github_1'",
       );

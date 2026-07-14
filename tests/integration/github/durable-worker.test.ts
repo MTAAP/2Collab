@@ -54,3 +54,44 @@ test("durable GitHub worker resumes pending webhook application and persisted cu
   ).toEqual({ cursor: null, status: "IDLE" });
   database.close();
 });
+
+test("durable GitHub worker retries failed reconciliation after sixty seconds", async () => {
+  const database = coordinationFixture();
+  database.exec(`
+    INSERT INTO github_project_connectors(project_id, connector_id, revision, created_at)
+      VALUES ('project_1', 'github_1', 1, 0);
+    INSERT INTO github_reconciliation_cursors(project_id, connector_id, resource_family, scope_digest, connector_epoch, status, revision)
+      VALUES ('project_1', 'github_1', 'REPOSITORIES', '${"b".repeat(64)}', 1, 'IDLE', 1);
+  `);
+  const worker = createGitHubDurableWorker({
+    database,
+    clock: () => 100,
+    scope: (projectId, connectorId) => ({
+      ok: true,
+      value: {
+        projectId: projectId as never,
+        connectorId: connectorId as never,
+        connectorEpoch: 1,
+        references: ["REPOSITORY:101"],
+        operations: ["INSPECT"],
+      },
+    }),
+    reconcile: async () => ({
+      ok: false,
+      error: { code: "GITHUB_UNAVAILABLE", message: "GitHub is unavailable.", retry: "SAME_INPUT" },
+    }),
+  });
+
+  expect(await worker.runDueReconciliation()).toMatchObject({
+    ok: true,
+    value: { completed: 0 },
+  });
+  expect(
+    database
+      .query<{ status: string; not_before: number }, []>(
+        "SELECT status, not_before FROM github_reconciliation_cursors",
+      )
+      .get(),
+  ).toEqual({ status: "FAILED_RETRYABLE", not_before: 160 });
+  database.close();
+});

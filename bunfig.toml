@@ -1,5 +1,6 @@
 [install]
 exact = true
+minimumReleaseAge = 172800
 
 [test]
 root = "./tests"

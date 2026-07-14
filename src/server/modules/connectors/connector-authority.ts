@@ -657,7 +657,9 @@ export function createConnectorAuthority(dependencies: Dependencies) {
     }
   };
 
-  const applyReconciliation = <P>(event: ReconciliationEvent<P>): Result<Observed<P>> => {
+  const applyReconciliation = <P>(
+    event: ReconciliationEvent<P>,
+  ): Result<Observed<P> & Readonly<{ reconciliationChanged: boolean }>> => {
     if (
       !validBounded(event.reference, 256) ||
       !validBounded(event.sourceRevision, 128) ||
@@ -731,7 +733,11 @@ export function createConnectorAuthority(dependencies: Dependencies) {
         const { projectionJson: _, auditId, ...metadata } = parsed;
         return {
           ok: true,
-          value: { ...metadata, value: persistedProjection.value },
+          value: {
+            ...metadata,
+            value: persistedProjection.value,
+            reconciliationChanged: false,
+          },
           auditId,
         };
       } catch {
@@ -757,8 +763,12 @@ export function createConnectorAuthority(dependencies: Dependencies) {
           .get(event.projectId, event.connectorId, event.reference);
         if ((latest?.projection_revision ?? 0) !== (current?.projection_revision ?? 0))
           return error("SOURCE_PROJECTION_STALE", "Source projection changed.", "REFRESH");
-        const nextRevision = (latest?.projection_revision ?? 0) + 1;
-        const observed: Observed<P> = {
+        const reconciliationChanged =
+          !latest ||
+          latest.source_revision !== event.sourceRevision ||
+          latest.comparable_digest !== event.comparableDigest;
+        const nextRevision = (latest?.projection_revision ?? 0) + (reconciliationChanged ? 1 : 0);
+        const observed: Observed<P> & Readonly<{ reconciliationChanged: boolean }> = {
           value: event.value,
           reference: event.reference,
           sourceRevision: event.sourceRevision,
@@ -778,6 +788,7 @@ export function createConnectorAuthority(dependencies: Dependencies) {
               ? {}
               : { providerActorId: event.provenance.providerActorId }),
           },
+          reconciliationChanged,
         };
         if (!observedIsBounded(observed))
           return error("RECONCILIATION_INPUT_INVALID", "Reconciliation input is invalid.");
@@ -866,6 +877,12 @@ export function createConnectorAuthority(dependencies: Dependencies) {
   };
 
   return {
+    currentScopeNow(projectId: string, connectorId: string): Result<ConnectorScope> {
+      const row = scopeSnapshot(projectId, connectorId);
+      if (row?.review_state !== "READY" || row.epoch !== row.connector_epoch)
+        return error("CONNECTOR_AUTHORITY_DENIED", "Connector authority is denied.");
+      return { ok: true, value: scopeFrom(row) };
+    },
     async currentScope(projectId: string, connectorId: string): Promise<Result<ConnectorScope>> {
       const row = scopeSnapshot(projectId, connectorId);
       if (row?.review_state !== "READY" || row.epoch !== row.connector_epoch)

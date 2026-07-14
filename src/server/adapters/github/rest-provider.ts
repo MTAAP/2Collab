@@ -18,6 +18,7 @@ import type {
   ReconciliationEvent,
 } from "../../modules/connectors/contract.ts";
 import type { GitHubPort } from "../../modules/github-coordination/contract.ts";
+import { githubMutationReference } from "../../modules/github-coordination/mutations.ts";
 import { GITHUB_REST_HEADERS } from "./app-auth.ts";
 import { normalizeGitHubIssue } from "./issues.ts";
 import { normalizeGitHubMilestone } from "./milestones.ts";
@@ -32,7 +33,7 @@ export type GitHubRestProviderInput = Readonly<{
   fetcher?: Fetcher;
   token(scope: ConnectorScope): Promise<Result<string>>;
   repository(repositoryId: string): Result<Repository>;
-  workItemNodeId(reference: GitHubWorkItemReference): Result<string>;
+  workItemNodeId(reference: GitHubWorkItemReference): Result<string> | Promise<Result<string>>;
   selectedRepositoryIds(scope: ConnectorScope): readonly string[];
   selectedProjectIds(scope: ConnectorScope): readonly string[];
   clock: () => number;
@@ -285,9 +286,13 @@ export function createGitHubRestProvider(input: GitHubRestProviderInput): GitHub
       command: ExactRevisionMutation<GitHubMutation>,
     ) {
       if (
+        authorization.projectId !== command.projectId ||
+        authorization.connectorId !== command.connectorId ||
         authorization.operation !== command.mutation.kind ||
         authorization.actionDigest !== command.actionDigest ||
-        authorization.connectorEpoch !== command.connectorEpoch
+        authorization.connectorEpoch !== command.connectorEpoch ||
+        authorization.reference !== githubMutationReference(command.mutation) ||
+        authorization.expiresAt < input.clock()
       )
         return failure("CONNECTOR_AUTHORIZATION_INVALID");
       const scope: ConnectorScope = {
@@ -449,7 +454,7 @@ export function createGitHubRestProvider(input: GitHubRestProviderInput): GitHub
           "mutation($project:ID!,$item:ID!,$field:ID!){clearProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field}){projectV2Item{id}}}";
       const variables: Record<string, unknown> = { project: project.projectNodeId };
       if (mutation.kind === "ADD_PROJECT_ITEM") {
-        const nodeId = input.workItemNodeId(mutation.item);
+        const nodeId = await input.workItemNodeId(mutation.item);
         if (!nodeId.ok) return nodeId;
         variables.content = nodeId.value;
       }
@@ -540,12 +545,17 @@ export function createGitHubRestProvider(input: GitHubRestProviderInput): GitHub
             for (const payload of result.value) {
               if (family === "ISSUES" && (payload as Record<string, unknown>).pull_request)
                 continue;
-              const value =
-                family === "ISSUES"
-                  ? normalizeGitHubIssue(repositoryId, payload)
-                  : family === "PULL_REQUESTS"
-                    ? normalizeGitHubPullRequest(repositoryId, payload)
-                    : normalizeGitHubMilestone(repositoryId, payload);
+              let value: GitHubProjection;
+              try {
+                value =
+                  family === "ISSUES"
+                    ? normalizeGitHubIssue(repositoryId, payload)
+                    : family === "PULL_REQUESTS"
+                      ? normalizeGitHubPullRequest(repositoryId, payload)
+                      : normalizeGitHubMilestone(repositoryId, payload);
+              } catch {
+                continue;
+              }
               const reference =
                 value.kind === "ISSUE"
                   ? `ISSUE:${repositoryId}:${value.number}`

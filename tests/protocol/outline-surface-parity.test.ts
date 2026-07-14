@@ -66,6 +66,8 @@ test("propagates the authenticated MCP member into Outline operations", async ()
   );
   expect(handler).toBeDefined();
   await handler?.({
+    projectId: "project_1",
+    connectorId: "outline_1",
     query: {
       query: "design",
       providerLimit: 1,

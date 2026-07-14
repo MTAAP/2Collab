@@ -297,3 +297,89 @@ export function createOperationAuthorizationConsumer(
     },
   };
 }
+
+type ConnectorOperationRow = Readonly<{
+  operation_digest: string;
+  operation_kind: "MUTATE_GITHUB" | "MUTATE_OUTLINE";
+  resource_id: string | null;
+  connector_id: string | null;
+  connector_epoch: number | null;
+  connector_operation: string | null;
+  action_digest: string | null;
+  state: "ISSUED" | "CONSUMED" | "REVOKED" | "EXPIRED";
+  expires_at: number;
+  session_id: string;
+  session_fence: number;
+  project_id: string | null;
+  provider: "GITHUB" | "OUTLINE" | null;
+}>;
+
+/** Adapts runner-issued operation authorizations to the connector's final pre-provider fence. */
+export function createConnectorAttemptAuthority(database: Database, clock: () => number) {
+  const consumer = createOperationAuthorizationConsumer(database, clock);
+  const load = (authorizationId: string) =>
+    database
+      .query<ConnectorOperationRow, [string]>(
+        `SELECT authorization.operation_digest, authorization.operation_kind,
+                authorization.resource_id, authorization.connector_id,
+                authorization.connector_epoch, authorization.connector_operation,
+                authorization.action_digest, authorization.state, authorization.expires_at,
+                authorization.session_id, authorization.session_fence, scope.project_id,
+                binding.provider
+         FROM operation_authorizations AS authorization
+         LEFT JOIN connector_scopes AS scope ON scope.id = authorization.connector_scope_id
+         LEFT JOIN connector_provider_bindings AS binding
+           ON binding.connector_id = authorization.connector_id
+         WHERE authorization.id = ?`,
+      )
+      .get(authorizationId);
+  const verify = (
+    input: Readonly<{
+      authorizationId: string;
+      authorizationProof: string;
+      projectId: string;
+      connectorId: string;
+      connectorEpoch: number;
+      reference: string;
+      operation: string;
+      actionDigest: string;
+    }>,
+  ): Result<Readonly<{ actorId: string; row: ConnectorOperationRow }>> => {
+    const row = load(input.authorizationId);
+    if (
+      row?.state !== "ISSUED" ||
+      row.expires_at <= clock() ||
+      row.operation_digest !== input.authorizationProof ||
+      row.project_id !== input.projectId ||
+      row.connector_id !== input.connectorId ||
+      row.connector_epoch !== input.connectorEpoch ||
+      row.resource_id !== input.reference ||
+      row.connector_operation !== input.operation ||
+      row.action_digest !== input.actionDigest ||
+      row.operation_kind !== `MUTATE_${row.provider ?? "UNBOUND"}`
+    )
+      return error("OPERATION_AUTHORIZATION_INVALID", "Operation authorization is invalid.");
+    const session = requireSessionFence(database, row.session_id, row.session_fence, clock());
+    if (!session.ok) return session;
+    return { ok: true, value: { actorId: session.value.attemptId, row } };
+  };
+  return {
+    async verify(input: Parameters<typeof verify>[0]) {
+      const verified = verify(input);
+      return verified.ok
+        ? { ok: true as const, value: { actorId: verified.value.actorId } }
+        : verified;
+    },
+    async consume(input: Parameters<typeof verify>[0]) {
+      const verified = verify(input);
+      if (!verified.ok) return verified;
+      const consumed = consumer.consume({
+        authorizationId: input.authorizationId,
+        operationDigest: input.authorizationProof,
+        sessionId: verified.value.row.session_id,
+        sessionFence: verified.value.row.session_fence,
+      });
+      return consumed.ok ? { ok: true as const, value: { consumed: true as const } } : consumed;
+    },
+  };
+}

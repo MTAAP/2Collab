@@ -127,6 +127,8 @@ test("Outline routes propagate the authenticated member and reject unbounded or 
     method: "POST",
     headers,
     body: JSON.stringify({
+      projectId: "project_1",
+      connectorId: "outline_1",
       query: {
         query: "design",
         providerLimit: 1,

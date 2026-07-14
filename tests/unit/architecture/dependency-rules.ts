@@ -29,6 +29,7 @@ function sourceLayer(path: string): Layer {
     path.startsWith("src/cli/") ||
     path.startsWith("src/web/") ||
     path === "src/server/app.ts" ||
+    path === "src/server/connector-production-composition.ts" ||
     path === "src/server/dependencies.ts" ||
     path === "src/server/github-production-composition.ts" ||
     path === "src/runner/production.ts" ||
@@ -45,6 +46,7 @@ function entrypointFamily(path: string): "CLI" | "WEB" | "SERVER" | "RUNNER" | u
   if (path.startsWith("src/web/")) return "WEB";
   if (
     path === "src/server/app.ts" ||
+    path === "src/server/connector-production-composition.ts" ||
     path === "src/server/dependencies.ts" ||
     path === "src/server/github-production-composition.ts" ||
     path === "src/server/index.ts"

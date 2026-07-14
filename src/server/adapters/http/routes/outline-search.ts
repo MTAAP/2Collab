@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Result } from "../../../../shared/contracts/result.ts";
 import type { MemberActor } from "../../../../shared/contracts/actors.ts";
+import { IdentifierSchema } from "../../../../shared/contracts/ids.ts";
 import { ScopedSearchSchema } from "../../../modules/connectors/contract.ts";
 import type {
   AuthorizedScopedSearch,
@@ -14,13 +15,19 @@ import {
 } from "../middleware/outline-security.ts";
 import { parseBoundedJson } from "../middleware/request-limits.ts";
 
-const RequestSchema = z.object({ query: ScopedSearchSchema }).strict();
+const RequestSchema = z
+  .object({ projectId: IdentifierSchema, connectorId: IdentifierSchema, query: ScopedSearchSchema })
+  .strict();
 
 export function createOutlineSearchRoutes(
   dependencies: OutlineHttpSecurity &
     OutlineProjectAuthorization &
     Readonly<{
-      authorize(actor: MemberActor, request: Request): Promise<Result<AuthorizedScopedSearch>>;
+      authorize(
+        actor: MemberActor,
+        projectId: string,
+        connectorId: string,
+      ): Promise<Result<AuthorizedScopedSearch>>;
       search(command: AuthorizedScopedSearch): Promise<Result<FederatedSearchResult>>;
     }>,
 ): Hono {
@@ -30,7 +37,7 @@ export function createOutlineSearchRoutes(
     if (actor instanceof Response) return actor;
     const parsed = await parseBoundedJson(context, RequestSchema);
     if (parsed instanceof Response) return parsed;
-    const authorized = await dependencies.authorize(actor, context.req.raw);
+    const authorized = await dependencies.authorize(actor, parsed.projectId, parsed.connectorId);
     if (!authorized.ok) return context.json(authorized, 403);
     const project = await dependencies.authorizeProject(actor, authorized.value.scope.projectId);
     if (!project.ok) return context.json(project, 403);

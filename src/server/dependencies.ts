@@ -5,6 +5,8 @@ import type { MemberActor } from "../shared/contracts/actors.ts";
 import type { CollabCommand, LaunchRun } from "../shared/contracts/commands.ts";
 import type { ExecutionAuthority } from "../shared/contracts/execution-authority.ts";
 import type { GitHubMutation, GitHubProjection } from "../shared/contracts/github.ts";
+import { GitHubProjectionSchema } from "../shared/contracts/github.ts";
+import { OutlineDocumentProjectionSchema } from "../shared/contracts/outline.ts";
 import type { Result } from "../shared/contracts/result.ts";
 import { verifyDpopProof } from "../shared/dpop.ts";
 import type { ServerEnvironment } from "../shared/environment.ts";
@@ -25,6 +27,8 @@ import { openDatabase } from "./db/connection.ts";
 import { migrate } from "./db/migrate.ts";
 import { inImmediateTransaction } from "./db/transaction.ts";
 import type { ExactRevisionMutation, Observed } from "./modules/connectors/contract.ts";
+import { createProjectionCodec } from "./modules/connectors/contract.ts";
+import { createConnectorAuthority } from "./modules/connectors/connector-authority.ts";
 import type { RefreshedAuthorityFacts } from "./modules/execution-authority/execution-authority.ts";
 import {
   createHmacPermitCodec,
@@ -55,10 +59,14 @@ import { createPlanArtifactStore } from "./modules/workflows/planning.ts";
 import type { WorkflowRuntimeOperations } from "./modules/workflows/runtime-operations.ts";
 import { createWorkflowScheduler } from "./modules/workflows/scheduler.ts";
 import { createWorkflowEngine } from "./modules/workflows/workflow-engine.ts";
+import { createConnectorAttemptAuthority } from "./modules/execution-authority/fencing.ts";
+import { createCredentialKeyManager } from "./operations/key-rotation.ts";
+import { createPackagedConnectorResources } from "./connector-production-composition.ts";
 
 export type ServerResources = Readonly<{
   docsRoot?: string;
   github?: Readonly<{
+    state?: "NOT_CONFIGURED" | "OPERATIONAL";
     webhooks: GitHubWebhookRouteDependencies;
     issues: GitHubIssueRouteDependencies;
     planning: Parameters<typeof createGitHubPlanningRoutes>[0];
@@ -77,9 +85,11 @@ export type ServerResources = Readonly<{
     mcp?: (request: Request) => Promise<Response>;
   }>;
   startup?: () => Promise<void> | void;
+  shutdown?: () => Promise<void> | void;
   webRoot?: string;
   outline?: NonNullable<FoundationHttpDependencies["outline"]> &
     Readonly<{
+      state?: "NOT_CONFIGURED" | "OPERATIONAL";
       mcp: Readonly<{
         search(
           actor: import("../shared/contracts/actors.ts").MemberActor,
@@ -261,6 +271,17 @@ export async function createServerDependencies(
   const runnerRequestProof = createRunnerRequestProofPort();
   const securityDigest = defaultSecurityDigest();
   const id = (prefix: string) => `${prefix}_${randomBytes(24).toString("base64url")}`;
+  const credentials = createCredentialKeyManager({
+    database,
+    masterKey: deploymentMasterKey,
+    masterKeyId: `master_${new Bun.CryptoHasher("sha256").update(deploymentMasterKey).digest("hex").slice(0, 32)}`,
+    clock,
+    id,
+  });
+  for (const credentialClass of ["PROVIDER", "MEMBER_OAUTH"] as const) {
+    const initialized = await credentials.initializeClass(credentialClass);
+    if (!initialized.ok) throw new Error(initialized.error.code);
+  }
 
   const databaseAuthorityFacts = (command: CollabCommand): Result<RefreshedAuthorityFacts> => {
     if (command.kind !== "LAUNCH_RUN")
@@ -1072,6 +1093,49 @@ export async function createServerDependencies(
           : configuration;
       },
     });
+  const connectorAuthority = createConnectorAuthority({
+    database,
+    clock,
+    id,
+    digest: async (value) =>
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))),
+    attemptAuthority: createConnectorAttemptAuthority(database, clock),
+    projectionCodec: (connectorId) => {
+      const binding = database
+        .query<{ provider: "GITHUB" | "OUTLINE" }, [string]>(
+          "SELECT provider FROM connector_provider_bindings WHERE connector_id = ?",
+        )
+        .get(connectorId);
+      if (binding?.provider === "OUTLINE") {
+        return createProjectionCodec(OutlineDocumentProjectionSchema) as never;
+      }
+      return createProjectionCodec(GitHubProjectionSchema) as never;
+    },
+  });
+  const packagedConnectors = createPackagedConnectorResources({
+    database,
+    clock,
+    environment,
+    credentials,
+    connectorAuthority,
+    authentication,
+    rateLimits,
+    runs,
+  });
+  const effectiveResources: ServerResources = {
+    ...resources,
+    github: resources.github ?? packagedConnectors.github,
+    outline: resources.outline ?? packagedConnectors.outline,
+    inbox: resources.inbox ?? packagedConnectors.inbox,
+    startup: async () => {
+      await packagedConnectors.startup?.();
+      await resources.startup?.();
+    },
+    shutdown: async () => {
+      await resources.shutdown?.();
+      await packagedConnectors.shutdown?.();
+    },
+  };
   let runnerRegistry:
     | Awaited<ReturnType<typeof createProductionServer>>["runnerRegistry"]
     | undefined;
@@ -1083,9 +1147,9 @@ export async function createServerDependencies(
     authentication,
     rateLimits,
     runs,
-    browserIdentity: resources.foundation ? undefined : identity,
-    deviceIdentity: resources.foundation ? undefined : devices,
-    runnerPairing: resources.foundation
+    browserIdentity: effectiveResources.foundation ? undefined : identity,
+    deviceIdentity: effectiveResources.foundation ? undefined : devices,
+    runnerPairing: effectiveResources.foundation
       ? undefined
       : {
           beginPairing: (command) => {
@@ -1101,7 +1165,7 @@ export async function createServerDependencies(
             return runnerRegistry.consumePairing(command);
           },
         },
-    runnerAuthentication: resources.foundation
+    runnerAuthentication: effectiveResources.foundation
       ? undefined
       : {
           exchangeCredential: (command) => {
@@ -1109,7 +1173,7 @@ export async function createServerDependencies(
             return runnerAuthentication.exchangeCredential(command);
           },
         },
-    runnerConfiguration: resources.foundation
+    runnerConfiguration: effectiveResources.foundation
       ? undefined
       : {
           registerMapping: (command) => {
@@ -1128,31 +1192,31 @@ export async function createServerDependencies(
     readiness: {
       ready: () =>
         boundAuthority !== undefined &&
-        (resources.foundation !== undefined || identity !== undefined) &&
+        (effectiveResources.foundation !== undefined || identity !== undefined) &&
         automation.workflows !== undefined &&
         automation.templates !== undefined,
     },
     mcp:
-      resources.foundation?.mcp ??
+      effectiveResources.foundation?.mcp ??
       createMcpHttpHandler({
         authentication,
         rateLimits,
         runs,
-        ...(resources.outline ? { outlineMcp: resources.outline.mcp } : {}),
-        ...(resources.github?.mcp ? { github: resources.github.mcp } : {}),
+        ...(effectiveResources.outline ? { outlineMcp: effectiveResources.outline.mcp } : {}),
+        ...(effectiveResources.github?.mcp ? { github: effectiveResources.github.mcp } : {}),
         ...automation,
         workflowRuntime: automation.runtime,
       }),
-    ...(resources.outline ? { outline: resources.outline } : {}),
+    ...(effectiveResources.outline ? { outline: effectiveResources.outline } : {}),
   };
   const app = createApp(dependencies, {
-    docsRoot: resources.docsRoot,
-    githubWebhooks: resources.github?.webhooks,
-    githubIssues: resources.github?.issues,
-    githubPlanning: resources.github?.planning,
-    inbox: resources.inbox,
+    docsRoot: effectiveResources.docsRoot,
+    githubWebhooks: effectiveResources.github?.webhooks,
+    githubIssues: effectiveResources.github?.issues,
+    githubPlanning: effectiveResources.github?.planning,
+    inbox: effectiveResources.inbox,
     automation: { authentication, rateLimits, ...automation },
-    webRoot: resources.webRoot,
+    webRoot: effectiveResources.webRoot,
   });
 
   const server = await createProductionServer(environment, app, {
@@ -1162,14 +1226,33 @@ export async function createServerDependencies(
   runnerRegistry = server.runnerRegistry;
   runnerAuthentication = server.runnerAuthentication;
   boundAuthority = server.authority;
-  await resources.startup?.();
-  if (!resources.automation) await workflowScheduler.tick();
+  await effectiveResources.startup?.();
+  if (!resources.automation) {
+    await workflowScheduler.tick();
+    workflowScheduler.start();
+  }
+  let stopped = false;
   return {
     ...server,
+    async shutdown() {
+      if (stopped) return;
+      stopped = true;
+      await workflowScheduler.stop();
+      await effectiveResources.shutdown?.();
+      database.close();
+    },
     components: {
       foundation: { state: identity ? ("OPERATIONAL" as const) : ("NOT_CONFIGURED" as const) },
-      github: { state: resources.github ? ("OPERATIONAL" as const) : ("DISABLED" as const) },
-      outline: { state: resources.outline ? ("OPERATIONAL" as const) : ("DISABLED" as const) },
+      github: {
+        state:
+          effectiveResources.github?.state ??
+          (effectiveResources.github ? ("OPERATIONAL" as const) : ("DISABLED" as const)),
+      },
+      outline: {
+        state:
+          effectiveResources.outline?.state ??
+          (effectiveResources.outline ? ("OPERATIONAL" as const) : ("DISABLED" as const)),
+      },
       automation: {
         state: "OPERATIONAL" as const,
         engine: workflowEngine,

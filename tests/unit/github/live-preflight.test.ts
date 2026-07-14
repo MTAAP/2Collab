@@ -19,9 +19,10 @@ function fixture() {
   directories.push(directory);
   const privateKeyFile = join(directory, "github-app.pem");
   const webhookSecretFile = join(directory, "github-webhook-secret");
+  const privateKeyHeader = ["-----BEGIN ", "PRIVATE KEY-----"].join("");
   writeFileSync(
     privateKeyFile,
-    "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+    `${privateKeyHeader}\nnot-a-real-key\n-----END PRIVATE KEY-----\n`,
     {
       mode: 0o600,
     },

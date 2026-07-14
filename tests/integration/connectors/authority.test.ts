@@ -628,9 +628,17 @@ describe("ConnectorAuthority", () => {
         value: { title: "Reconciled" },
       };
       const first = f.authority.reconcileSource(event);
-      expect(first.ok).toBe(true);
+      expect(first).toMatchObject({ ok: true, value: { reconciliationChanged: true } });
       const replay = f.authority.reconcileSource(event);
-      expect(replay.ok).toBe(true);
+      expect(replay).toMatchObject({ ok: true, value: { reconciliationChanged: false } });
+      const unchanged = f.authority.reconcileSource({
+        ...event,
+        idempotencyKey: "reconcile_same_source",
+      });
+      expect(unchanged).toMatchObject({
+        ok: true,
+        value: { projectionRevision: 2, reconciliationChanged: false },
+      });
       const later = f.authority.reconcileSource({
         ...event,
         idempotencyKey: "reconcile_2",
@@ -638,7 +646,7 @@ describe("ConnectorAuthority", () => {
         comparableDigest: "d".repeat(64) as never,
         value: { title: "Later" },
       });
-      expect(later.ok).toBe(true);
+      expect(later).toMatchObject({ ok: true, value: { reconciliationChanged: true } });
       const immutableReplay = f.authority.reconcileSource(event);
       expect(immutableReplay.ok).toBe(true);
       if (immutableReplay.ok) {

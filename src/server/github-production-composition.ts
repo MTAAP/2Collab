@@ -15,13 +15,9 @@ import { createGitHubReconciliationScheduler } from "./modules/github-coordinati
 import { createGitHubCoordinationService } from "./modules/github-coordination/service.ts";
 import type { Result } from "../shared/contracts/result.ts";
 
-type Dependencies = Readonly<{
+type BaseDependencies = Readonly<{
   database: Database;
   clock: () => number;
-  id: (prefix: string) => string;
-  digest: (value: string) => Promise<Uint8Array>;
-  attemptAuthority: AttemptOperationAuthorityPort;
-  projectionCodec: (connectorId: string) => ProjectionCodec<unknown>;
   github: GitHubPort;
   authentication: PublicAuthenticationPort;
   rateLimits: PublicRateLimitPort;
@@ -40,6 +36,17 @@ type Dependencies = Readonly<{
   maximumBackoffMs?: number;
 }>;
 
+type Dependencies = BaseDependencies &
+  (
+    | Readonly<{ connectorAuthority: ReturnType<typeof createConnectorAuthority> }>
+    | Readonly<{
+        id: (prefix: string) => string;
+        digest: (value: string) => Promise<Uint8Array>;
+        attemptAuthority: AttemptOperationAuthorityPort;
+        projectionCodec: (connectorId: string) => ProjectionCodec<unknown>;
+      }>
+  );
+
 /** Import-safe assembly of every GitHub delivery surface around one authority and one port. */
 export function createGitHubProductionComposition(dependencies: Dependencies): Readonly<{
   resources: ServerResources;
@@ -47,14 +54,17 @@ export function createGitHubProductionComposition(dependencies: Dependencies): R
   scheduler: ReturnType<typeof createGitHubReconciliationScheduler>;
   service: ReturnType<typeof createGitHubCoordinationService>;
 }> {
-  const connectorAuthority = createConnectorAuthority({
-    database: dependencies.database,
-    clock: dependencies.clock,
-    id: dependencies.id,
-    digest: dependencies.digest,
-    attemptAuthority: dependencies.attemptAuthority,
-    projectionCodec: dependencies.projectionCodec,
-  });
+  const connectorAuthority =
+    "connectorAuthority" in dependencies
+      ? dependencies.connectorAuthority
+      : createConnectorAuthority({
+          database: dependencies.database,
+          clock: dependencies.clock,
+          id: dependencies.id,
+          digest: dependencies.digest,
+          attemptAuthority: dependencies.attemptAuthority,
+          projectionCodec: dependencies.projectionCodec,
+        });
   const service = createGitHubCoordinationService({
     database: dependencies.database,
     clock: dependencies.clock,
@@ -115,6 +125,7 @@ export function createGitHubProductionComposition(dependencies: Dependencies): R
         await worker.consumePendingWebhookApplications();
         scheduler.start();
       },
+      shutdown: () => scheduler.stop(),
     },
   };
 }

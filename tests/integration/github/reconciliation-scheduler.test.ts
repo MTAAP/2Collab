@@ -28,3 +28,26 @@ test("scheduler resumes configured scopes and stops cleanly", async () => {
   scheduler.stop();
   expect(scheduler.state()).toMatchObject({ stopped: true, running: false });
 });
+
+test("scheduler backs off when loading configured scopes fails", async () => {
+  const delays: number[] = [];
+  const scheduler = createGitHubReconciliationScheduler({
+    clock: () => 100,
+    intervalMs: 1_000,
+    maximumBackoffMs: 8_000,
+    scopes() {
+      throw new Error("DATABASE_CLOSED");
+    },
+    reconcile: async () => ({ ok: true, value: {} }),
+    setTimer: ((_callback: () => void, delay?: number) => {
+      delays.push(delay ?? 0);
+      return 1;
+    }) as never,
+    clearTimer: (() => undefined) as never,
+  });
+
+  await expect(scheduler.runNow()).resolves.toBeUndefined();
+  expect(scheduler.state()).toMatchObject({ failures: 1, running: false });
+  expect(delays).toEqual([2_000]);
+  scheduler.stop();
+});

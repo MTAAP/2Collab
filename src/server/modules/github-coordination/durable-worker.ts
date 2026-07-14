@@ -48,7 +48,7 @@ export function createGitHubDurableWorker(dependencies: Dependencies) {
         .query(
           `UPDATE github_reconciliation_cursors SET status = 'FAILED_RETRYABLE', not_before = ?, revision = revision + 1 WHERE project_id = ? AND connector_id = ? AND resource_family = 'REPOSITORIES'`,
         )
-        .run(dependencies.clock() + 60_000, row.project_id, row.connector_id);
+        .run(dependencies.clock() + 60, row.project_id, row.connector_id);
       return false;
     }
     dependencies.database

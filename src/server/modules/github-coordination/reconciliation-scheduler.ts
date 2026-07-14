@@ -24,6 +24,7 @@ export function createGitHubReconciliationScheduler(input: GitHubReconciliationS
     if (stopped) return;
     if (timer) clear(timer);
     timer = set(() => void tick(), Math.max(0, delay));
+    if (typeof timer === "object" && timer !== null && "unref" in timer) timer.unref();
   };
   const tick = async () => {
     if (stopped || running) return;
@@ -40,6 +41,9 @@ export function createGitHubReconciliationScheduler(input: GitHubReconciliationS
           next = Math.min(input.maximumBackoffMs, input.intervalMs * 2 ** Math.min(failures, 10));
         }
       }
+    } catch {
+      failures += 1;
+      next = Math.min(input.maximumBackoffMs, input.intervalMs * 2 ** Math.min(failures, 10));
     } finally {
       running = false;
       schedule(next);

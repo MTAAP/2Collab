@@ -9,8 +9,10 @@ import {
 import type { ServerEnvironment } from "../../src/shared/environment.ts";
 
 const directories: string[] = [];
+const servers: Awaited<ReturnType<typeof createProductionComposition>>[] = [];
 
-afterEach(() => {
+afterEach(async () => {
+  for (const server of servers.splice(0)) await server.shutdown();
   for (const directory of directories.splice(0))
     rmSync(directory, { recursive: true, force: true });
 });
@@ -41,6 +43,7 @@ function environment(withBootstrapSecret: boolean): ServerEnvironment {
 
 async function composition(withBootstrapSecret: boolean) {
   const server = await createProductionComposition(environment(withBootstrapSecret));
+  servers.push(server);
   return server;
 }
 
@@ -75,6 +78,7 @@ describe("packaged production composition", () => {
   test("mounts browser bootstrap, device enrollment, and Automation resources", async () => {
     const server = await composition(true);
     expect((await request(server, new Request("http://localhost/readyz"))).status).toBe(200);
+    expect(server.components.automation.scheduler.state()).toMatchObject({ stopped: false });
 
     const origin = { origin: "http://localhost:3210", "content-type": "application/json" };
     const registration = await request(
@@ -121,6 +125,19 @@ describe("packaged production composition", () => {
       new Request("http://localhost/api/v1/workflow-presets/bind", { method: "POST" }),
     ];
     for (const input of automationRoutes) expect((await request(server, input)).status).toBe(401);
+    const connectorRoutes = [
+      new Request("http://localhost/api/v1/github/mutations", { method: "POST" }),
+      new Request("http://localhost/api/v1/connectors/github/github_1/webhooks", {
+        method: "POST",
+      }),
+      new Request("http://localhost/api/v1/connectors/outline/oauth/begin", { method: "POST" }),
+      new Request("http://localhost/api/v1/outline/search", { method: "POST" }),
+      new Request("http://localhost/api/v1/outline/documents", { method: "POST" }),
+    ];
+    for (const input of connectorRoutes)
+      expect((await request(server, input)).status).not.toBe(404);
+    expect(server.components.github.state).toBe("NOT_CONFIGURED");
+    expect(server.components.outline.state).toBe("NOT_CONFIGURED");
     expect(
       (
         await request(

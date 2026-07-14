@@ -7,6 +7,7 @@ import type {
   OutlineReadResult,
   OutlineReference,
 } from "../../../shared/contracts/outline.ts";
+import { prepareAuthoredDocumentPatch } from "../../../shared/contracts/outline.ts";
 import type { Result } from "../../../shared/contracts/result.ts";
 import type {
   ConnectorOperationAuthorization,
@@ -96,9 +97,9 @@ export function createOutlineFetchTransport(
   const origin = canonicalOrigin(input.baseUrl);
   const request = input.fetch ?? fetch;
   const timeoutMs = input.timeoutMs ?? 10_000;
-  const token = input.readToken();
   return {
     async request(call: OutlineHttpRequest): Promise<unknown> {
+      const token = call.accessToken || input.readToken();
       const response = await request(`${origin}/api/${call.endpoint}`, {
         method: "POST",
         redirect: "error",
@@ -150,31 +151,40 @@ function projection(
   };
 }
 
-function applyPatch(body: string, patch: string): Result<string> {
-  const lines = patch.split("\n");
-  const removed = lines
-    .filter((line) => line.startsWith("-") && !line.startsWith("---"))
-    .map((line) => line.slice(1))
-    .join("\n");
-  const added = lines
-    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
-    .map((line) => line.slice(1))
-    .join("\n");
-  if (!removed || !body.includes(removed))
-    return failure("OUTLINE_PATCH_INVALID", "Document patch is invalid.");
-  return { ok: true, value: body.replace(removed, added) };
-}
-
 export function createProductionOutlineContent(
   input: Readonly<{
     workspaceId: string;
     transport: OutlineHttpTransport;
     clock?: () => number;
+    memberAccessToken?: (authorization: ConnectorOperationAuthorization) => Promise<Result<string>>;
   }>,
 ): OutlineContentPort {
   const clock = input.clock ?? (() => Math.floor(Date.now() / 1_000));
-  const call = async (endpoint: OutlineHttpRequest["endpoint"], body: Record<string, unknown>) =>
-    input.transport.request({ endpoint, accessToken: "", body });
+  const call = async (
+    endpoint: OutlineHttpRequest["endpoint"],
+    body: Record<string, unknown>,
+    accessToken = "",
+  ) => input.transport.request({ endpoint, accessToken, body });
+  const documentWrites = new Map<string, Promise<void>>();
+  const withDocumentWriteLock = async <T>(
+    documentId: string,
+    task: () => Promise<T>,
+  ): Promise<T> => {
+    const previous = documentWrites.get(documentId) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = previous.then(() => current);
+    documentWrites.set(documentId, queued);
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+      if (documentWrites.get(documentId) === queued) documentWrites.delete(documentId);
+    }
+  };
 
   const readDocument = async (
     documentId: string,
@@ -303,35 +313,116 @@ export function createProductionOutlineContent(
       )
         return failure("CONNECTOR_AUTHORITY_DENIED", "Connector authority is denied.");
       const mutation = command.mutation;
+      if (
+        mutation.kind === "CREATE_DOCUMENT_AS_MEMBER" &&
+        (authorization.reference !== `OUTLINE_COLLECTION:${mutation.collectionId}` ||
+          authorization.operation !== "CREATE_DOCUMENT")
+      )
+        return failure("CONNECTOR_AUTHORITY_DENIED", "Connector authority is denied.");
+      if (
+        (mutation.kind === "EDIT_DOCUMENT_AS_MEMBER" || mutation.kind === "EDIT_DOCUMENT_AS_BOT") &&
+        (authorization.reference !== mutation.documentId ||
+          authorization.operation !== "EDIT_CONTENT")
+      )
+        return failure("CONNECTOR_AUTHORITY_DENIED", "Connector authority is denied.");
       let response: unknown;
       try {
         if (mutation.kind === "CREATE_DOCUMENT_AS_MEMBER") {
           if (command.precondition.kind !== "ABSENT")
             return failure("SOURCE_REVISION_STALE", "Source revision is stale.", "REFRESH");
-          response = await call("documents.create", {
-            collectionId: mutation.collectionId,
-            title: mutation.title,
-            text: mutation.body,
-            publish: true,
-          });
+          if (!input.memberAccessToken)
+            return failure(
+              "OUTLINE_MEMBER_GRANT_REQUIRED",
+              "A delegated member grant is required.",
+            );
+          const access = await input.memberAccessToken(authorization);
+          if (!access.ok) return access;
+          response = await call(
+            "documents.create",
+            {
+              collectionId: mutation.collectionId,
+              title: mutation.title,
+              text: mutation.body,
+              publish: true,
+            },
+            access.value,
+          );
         } else if (
           mutation.kind === "EDIT_DOCUMENT_AS_MEMBER" ||
           mutation.kind === "EDIT_DOCUMENT_AS_BOT"
         ) {
-          const current = await readDocument(mutation.documentId);
-          if (!current.ok) return current;
-          if (
-            command.precondition.kind !== "EXACT_REVISION" ||
-            command.precondition.sourceRevision !== String(current.value.revision) ||
-            command.precondition.comparableDigest !== digest(current.value.text)
-          )
-            return failure("SOURCE_REVISION_STALE", "Source revision is stale.", "REFRESH");
-          const patched = applyPatch(current.value.text, mutation.authoredPatch.value);
-          if (!patched.ok) return patched;
-          response = await call("documents.update", {
-            id: mutation.documentId,
-            text: patched.value,
+          const edited = await withDocumentWriteLock(mutation.documentId, async () => {
+            const current = await readDocument(mutation.documentId);
+            if (!current.ok) return current;
+            if (
+              command.precondition.kind !== "EXACT_REVISION" ||
+              command.precondition.sourceRevision !== String(current.value.revision) ||
+              command.precondition.comparableDigest !== digest(current.value.text)
+            )
+              return failure("SOURCE_REVISION_STALE", "Source revision is stale.", "REFRESH");
+            const patched = prepareAuthoredDocumentPatch(
+              current.value.text,
+              mutation.authoredPatch.value,
+            );
+            if (!patched.ok) return patched;
+            let accessToken = "";
+            if (mutation.kind === "EDIT_DOCUMENT_AS_MEMBER") {
+              if (!input.memberAccessToken)
+                return failure(
+                  "OUTLINE_MEMBER_GRANT_REQUIRED",
+                  "A delegated member grant is required.",
+                );
+              const access = await input.memberAccessToken(authorization);
+              if (!access.ok) return access;
+              accessToken = access.value;
+            }
+            let updated: unknown;
+            try {
+              updated = await call(
+                "documents.update",
+                {
+                  id: mutation.documentId,
+                  text: patched.value.text,
+                  editMode: patched.value.editMode,
+                  ...(patched.value.findText ? { findText: patched.value.findText } : {}),
+                },
+                accessToken,
+              );
+            } catch (error) {
+              return error instanceof Error && error.message === "OUTLINE_HTTP_400"
+                ? failure("SOURCE_REVISION_STALE", "Source revision is stale.", "REFRESH")
+                : failure(
+                    "OUTLINE_RESULT_UNKNOWN",
+                    "Outline mutation result is unknown.",
+                    "REFRESH",
+                  );
+            }
+            const parsed = DocumentResponseSchema.safeParse(updated);
+            if (
+              !parsed.success ||
+              parsed.data.data.revision <= current.value.revision ||
+              parsed.data.data.text !== patched.value.body
+            )
+              return failure(
+                "OUTLINE_RESULT_UNKNOWN",
+                "Outline mutation result is unknown.",
+                "REFRESH",
+              );
+            const confirmed = await readDocument(mutation.documentId);
+            if (
+              !confirmed.ok ||
+              confirmed.value.revision !== parsed.data.data.revision ||
+              confirmed.value.text !== parsed.data.data.text
+            )
+              return failure(
+                "OUTLINE_RESULT_UNKNOWN",
+                "Outline mutation result is unknown.",
+                "REFRESH",
+              );
+            return { ok: true as const, value: parsed.data };
           });
+          if (!edited.ok) return edited;
+          response = edited.value;
         } else if (mutation.kind === "PROMOTE_WORKING_DOCUMENT") {
           response = await call("documents.update", {
             id: mutation.workingDocumentId,
@@ -362,6 +453,7 @@ export function createProductionOutlineContent(
           observedAt: clock(),
           sourceUpdatedAt: value.sourceUpdatedAt,
           freshness: "FRESH",
+          consistency: "RESIDUAL_RACE",
           provenance: {
             projectId: command.projectId,
             connectorId: command.connectorId,
